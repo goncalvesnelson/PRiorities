@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PRiorities settings</title>
+  <link rel="stylesheet" href="options.css">
+  <script type="module" src="options.js"></script>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">PRiorities</p>
+    <h1>Choose your review assistant.</h1>
+    <p class="intro">Choose the CLI for new reviews and manage saved reviews.</p>
+
+    <form id="settings-form">
+      <label for="provider">Local CLI</label>
+      <select id="provider" name="provider">
+        <option value="codex">Codex</option>
+        <option value="claude">Claude Code</option>
+      </select>
+      <strong id="connection-title">Local Codex connection</strong>
+      <p id="connection-status" role="status">Checking the local helper…</p>
+      <p class="hint">Uses your existing CLI login. To sign in, run <code id="login-command">codex login</code> in Terminal, then check the connection again.</p>
+
+      <label for="model">Model</label>
+      <input id="model" name="model" type="text" placeholder="Codex default" maxlength="100" autocomplete="off" spellcheck="false" aria-describedby="model-help" disabled>
+      <p id="model-help" class="hint">Leave blank for Codex’s built-in default, or enter a model ID available to your account. Reviews use isolated sessions with the captured PR context.</p>
+
+      <div class="privacy">
+        <strong>Code is sent only when you start analysis.</strong>
+        <p id="provider-privacy">Analyze PR sends the included diffs and captured context through your selected local CLI.</p>
+        <details>
+          <summary>How reviews run</summary>
+          <p>Up to three files are reviewed at once, then related changes are checked together. Generated files stay out of analysis until you choose Review anyway.</p>
+          <p>Your login stays with the CLI. No API key or local repository checkout is needed.</p>
+        </details>
+      </div>
+
+      <div class="actions">
+        <button id="save" type="submit" disabled>Save settings</button>
+        <button id="check-connection" class="secondary" type="button" disabled>Check connection</button>
+      </div>
+      <p id="status" role="status" aria-live="polite"></p>
+    </form>
+
+    <form id="cache-form" class="cache-settings">
+      <h2>Saved reviews</h2>
+      <p class="hint">Matching reviews reopen without new model calls. The cache stores review explanations and selected code excerpts on this browser. Changes to commits, captured context, provider or model require a fresh review.</p>
+      <p id="cache-usage" role="status">Checking saved reviews…</p>
+      <progress id="cache-usage-bar" max="100" value="0" aria-label="Review cache usage"></progress>
+      <label for="cache-limit">Cache limit (MB)</label>
+      <input id="cache-limit" type="number" min="1" max="1024" step="1" value="100" required disabled aria-describedby="cache-help">
+      <p id="cache-help" class="hint">Default: 100 MB. When full, the least recently used reviews are removed first. You can choose 1–1024 MB.</p>
+      <div class="actions">
+        <button id="save-cache-limit" type="submit" class="secondary" disabled>Save cache limit</button>
+        <button id="clear-cache" type="button" class="secondary" disabled>Clear saved reviews</button>
+      </div>
+      <p id="cache-status" role="status" aria-live="polite"></p>
+    </form>
+
+    <section class="next">
+      <h2>Try it on a pull request</h2>
+      <ol>
+        <li>Choose a connected CLI, save your settings, then open a GitHub PR’s <strong>Files changed</strong> tab.</li>
+        <li>Choose <strong>Analyze PR</strong> in PRiorities.</li>
+        <li>Read the review decisions, expand supporting evidence, or switch back to the full GitHub diff.</li>
+      </ol>
+      <p class="hint">PRiorities does not post comments, approve changes, or mark files reviewed. Its prioritization is a suggestion; all changed code remains accessible.</p>
+    </section>
+  </main>
+</body>
+</html>

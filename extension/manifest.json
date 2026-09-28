@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "PRiorities",
+  "version": "0.5.1",
+  "description": "Focus GitHub pull requests on the changes that need your judgment.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxcyNMpFz5MUQAbsGiZ1maM8IBtSBYoZVEus4yX+biLJe1u7XZ3v955uZh+KhUiaQpP4Ie4K2t2y+2+Emk4MeGZfqcrXPKYInv2wM4vAxz15nMkUbi5Rt0d9d+rMYM+49DWobugxGu7lpCkgFHO7PuizW2zfSwUYNXHEX1riPHuaw2GPkLw4BVF1oOjW/OW2Dt9tsORM8krCsf2RkeYtfEWCf41LJ8hylzedcN/cOJgmxqgSHv79GuqQgp8UsRKebCdwsbVpoAHhmGE1mGk5zETmrIDQhs1QvA+ipnkpsxfQ75ca9t83x64oJXRbrAR8rfYOczW1TJolgDgoSiaAe9wIDAQAB",
+  "permissions": [
+    "storage",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.bundle.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "PRiorities settings"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://github.com/*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": ["review.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "review-ui.js",
+        "github.js",
+        "review-data.js",
+        "diff.js",
+        "review.css"
+      ],
+      "matches": [
+        "https://github.com/*"
+      ]
+    }
+  ]
+}

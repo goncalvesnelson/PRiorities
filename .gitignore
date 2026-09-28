@@ -1,0 +1,14 @@
+node_modules/
+extension/background.bundle.js
+*.zip
+.DS_Store
+.env
+.env.*
+
+# Captured PR data belongs outside the extension repository.
+source/
+pr.json
+pr.diff
+analysis.json
+context.json
+index.html
