@@ -14,6 +14,7 @@ await build({
   legalComments: 'eof'
 });
 const files = [manifest.background.service_worker, manifest.options_ui.page,
+  ...Object.values(manifest.icons), ...Object.values(manifest.action.default_icon),
   ...manifest.content_scripts.flatMap(entry => [...entry.js, ...entry.css]),
   ...manifest.web_accessible_resources.flatMap(entry => entry.resources)];
 await Promise.all(files.map(file => access(new URL(file, root))));

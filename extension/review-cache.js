@@ -1,4 +1,6 @@
-const cacheVersion = 1;
+import { defaultReviewPreferences } from './review-preferences.js';
+
+const cacheVersion = 2;
 const megabyte = 1024 * 1024;
 let database;
 
@@ -28,9 +30,12 @@ function result(request) {
   });
 }
 
-async function transaction(mode, operation) {
+async function transaction(mode, operation, signal) {
   const db = await openDatabase();
+  signal?.throwIfAborted();
   const tx = db.transaction(['reviews', 'metadata', 'settings'], mode);
+  const abort = () => { try { tx.abort(); } catch {} };
+  signal?.addEventListener('abort', abort, { once: true });
   const completion = new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);
@@ -43,12 +48,15 @@ async function transaction(mode, operation) {
   } catch (error) {
     try { tx.abort(); } catch {}
     await completion.catch(() => {});
+    signal?.throwIfAborted();
     throw error;
+  } finally {
+    signal?.removeEventListener('abort', abort);
   }
 }
 
 export function reviewLookup(snapshot, settings) {
-  return JSON.stringify([cacheVersion, snapshot.url, snapshot.baseSha, snapshot.headSha, settings.provider, settings.model]);
+  return JSON.stringify([cacheVersion, snapshot.url, snapshot.baseSha, snapshot.headSha, settings.provider, settings.model, settings.effort ?? '', settings.review ?? defaultReviewPreferences()]);
 }
 
 export async function reviewCacheKey(snapshot, settings) {
@@ -90,7 +98,7 @@ function trimReviews(reviews, metadata, entries, limitBytes) {
   return { usedBytes, count: ordered.length };
 }
 
-export function saveReview(identity, value) {
+export function saveReview(identity, value, signal) {
   const savedAt = Date.now();
   const record = { key: identity.key, value };
   const meta = { ...identity, savedAt, lastUsed: savedAt, bytes: 0 };
@@ -111,14 +119,7 @@ export function saveReview(identity, value) {
     reviews.put(record);
     metadata.put(meta);
     return { saved: true, savedAt };
-  });
-}
-
-export function deleteReview(key) {
-  return transaction('readwrite', (reviews, metadata) => {
-    reviews.delete(key);
-    metadata.delete(key);
-  });
+  }, signal);
 }
 
 export function cacheInfo() {

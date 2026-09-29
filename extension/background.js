@@ -1,9 +1,11 @@
-import { analyzeWithCLI, getCLIStatus } from './cli-client.js';
-import { analysisSchema, classificationSchema, isGeneratedFile, makeClassificationPrompt, makePrompt, validateAnalysis, validateClassifications, validateSnapshot } from './review-data.js';
-import { cacheInfo, clearCache, deleteReview, peekReview, readReview, reviewCacheKey, reviewLookup, saveReview, setCacheLimit } from './review-cache.js';
+import { analyzeWithCLI, getCLIModels, getCLIStatus } from './cli-client.js';
+import { allEdits, analysisSchema, classificationSchema, isGeneratedFile, makeClassificationPrompt, makePrompt, validateAnalysis, validateClassifications, validateSnapshot } from './review-data.js';
+import { cacheInfo, clearCache, peekReview, readReview, reviewCacheKey, reviewLookup, saveReview, setCacheLimit } from './review-cache.js';
+import { defaultReviewPreferences, validateReviewPreferences } from './review-preferences.js';
 
 const jobs = new Map();
-const storageReady = chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).then(() => chrome.storage.local.remove('settings'));
+const connectionChecks = new Map();
+const storageReady = chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 
 function isOptions(sender) {
   return sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL('options.html');
@@ -32,22 +34,61 @@ async function readSettings(provider) {
   }
   const key = `${provider}Settings`;
   const stored = await chrome.storage.local.get(key);
-  return { provider, model: validModel(stored[key]?.model) ? stored[key].model : '' };
+  return { provider, model: validModel(stored[key]?.model) ? stored[key].model : '', effort: validEffort(stored[key]?.effort) ? stored[key].effort : '' };
 }
 
 function validModel(model) {
-  return typeof model === 'string' && (model === '' || /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,99}$/.test(model));
+  return typeof model === 'string' && (model === '' || /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/.test(model));
 }
 
-async function publicSettings(settings) {
-  const result = { configured: false, ...settings };
-  try {
-    const status = await getCLIStatus(settings.provider);
-    if (status.authenticated) return { ...result, configured: true };
-    return { ...result, connectionError: status.message || `Sign in with ${settings.provider === 'claude' ? 'claude auth login' : 'codex login'}, then check the connection again.` };
-  } catch (error) {
-    return { ...result, connectionError: error.message };
+function validEffort(effort) {
+  return typeof effort === 'string' && /^(?:[a-z][a-z0-9_-]{0,29})?$/.test(effort);
+}
+
+async function readReviewPreferences() {
+  await storageReady;
+  const stored = await chrome.storage.local.get('reviewPreferences');
+  return stored.reviewPreferences === undefined ? defaultReviewPreferences() : validateReviewPreferences(stored.reviewPreferences);
+}
+
+async function connectionStatus(provider, refreshConnection) {
+  if (connectionChecks.has(provider)) return connectionChecks.get(provider);
+  const key = `${provider}ConnectionStatus`;
+  if (!refreshConnection) {
+    let cached;
+    try {
+      const stored = await chrome.storage.session.get(key);
+      cached = stored[key];
+    } catch {}
+    if (connectionChecks.has(provider)) return connectionChecks.get(provider);
+    const age = Date.now() - cached?.checkedAt;
+    if (age >= 0 && age < 60_000) {
+      return { configured: cached.configured, ...(cached.connectionError ? { connectionError: cached.connectionError } : {}) };
+    }
   }
+  const check = (async () => {
+    let connection;
+    try {
+      const status = await getCLIStatus(provider);
+      connection = status.authenticated
+        ? { configured: true }
+        : { configured: false, connectionError: status.message || `Sign in with ${provider === 'claude' ? 'claude auth login' : 'codex login'}, then check the connection again.` };
+    } catch (error) {
+      connection = { configured: false, connectionError: error.message };
+    }
+    try { await chrome.storage.session.set({ [key]: { ...connection, checkedAt: Date.now() } }); } catch {}
+    return connection;
+  })();
+  connectionChecks.set(provider, check);
+  try {
+    return await check;
+  } finally {
+    connectionChecks.delete(provider);
+  }
+}
+
+async function publicSettings(settings, refreshConnection) {
+  return { ...settings, ...await connectionStatus(settings.provider, refreshConnection) };
 }
 
 async function handleMessage(message, sender) {
@@ -55,8 +96,9 @@ async function handleMessage(message, sender) {
   if (message?.type === 'get-settings') {
     if (message.provider !== undefined && !isOptions(sender)) throw new Error('Only the settings page can select the provider.');
     if (message.provider !== undefined && !['codex', 'claude'].includes(message.provider)) throw new Error('Choose Codex or Claude Code.');
+    if (message.refreshConnection !== undefined && typeof message.refreshConnection !== 'boolean') throw new Error('Connection refresh must be true or false.');
     const settings = await readSettings(message.provider);
-    return publicSettings(settings);
+    return publicSettings(settings, isOptions(sender) || message.refreshConnection === true);
   }
   if (message?.type === 'open-settings') {
     await chrome.runtime.openOptionsPage();
@@ -64,27 +106,39 @@ async function handleMessage(message, sender) {
   }
   if (message?.type === 'peek-review' && isPullRequest(sender)) {
     if (![message.baseSha, message.headSha].every(sha => typeof sha === 'string' && /^[a-f0-9]{40}$/.test(sha))) return { available: false };
-    const settings = await readSettings();
+    const settings = { ...await readSettings(), review: await readReviewPreferences() };
     try {
       return await peekReview(reviewLookup({ url: pullRequestUrl(sender.url), baseSha: message.baseSha, headSha: message.headSha }, settings));
-    } catch { return { available: false }; }
+    } catch { throw new Error('Could not check saved reviews in local browser storage. Retry by returning to this tab, or choose Run fresh review.'); }
   }
   if (!isOptions(sender)) throw new Error('Only the settings page can change the provider or model.');
+  if (message?.type === 'get-review-preferences') return { preferences: await readReviewPreferences() };
+  if (message?.type === 'save-review-preferences') {
+    const preferences = validateReviewPreferences(message.preferences);
+    await storageReady;
+    await chrome.storage.local.set({ reviewPreferences: preferences });
+    return { preferences };
+  }
+  if (message?.type === 'get-models') {
+    if (!['codex', 'claude'].includes(message.provider)) throw new Error('Choose Codex or Claude Code.');
+    return { provider: message.provider, models: await getCLIModels(message.provider) };
+  }
   if (message?.type === 'cache-info') return cacheInfo();
   if (message?.type === 'clear-cache') return clearCache();
   if (message?.type === 'set-cache-limit') return setCacheLimit(message.limitMB);
   if (message?.type === 'save-settings') {
-    if (Object.keys(message).some(key => !['type', 'provider', 'model'].includes(key))) {
-      throw new Error('Only provider and model preferences can be saved. Sign in through the selected CLI.');
+    if (Object.keys(message).some(key => !['type', 'provider', 'model', 'effort'].includes(key))) {
+      throw new Error('Only provider, model and effort preferences can be saved. Sign in through the selected CLI.');
     }
     if (!['codex', 'claude'].includes(message.provider)) throw new Error('Choose Codex or Claude Code.');
     if (!validModel(message.model)) {
       throw new Error('Enter a valid model ID, or leave it blank to use the selected CLI’s default.');
     }
+    if (!validEffort(message.effort)) throw new Error('Choose a valid reasoning effort.');
     await storageReady;
-    const settings = { provider: message.provider, model: message.model };
-    await chrome.storage.local.set({ reviewProvider: settings.provider, [`${settings.provider}Settings`]: { model: settings.model } });
-    return publicSettings(settings);
+    const settings = { provider: message.provider, model: message.model, effort: message.effort };
+    await chrome.storage.local.set({ reviewProvider: settings.provider, [`${settings.provider}Settings`]: { model: settings.model, effort: settings.effort } });
+    return publicSettings(settings, true);
   }
   throw new Error('Unknown PRiorities request.');
 }
@@ -94,35 +148,30 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 
-chrome.runtime.onConnect.addListener(port => {
-  if (port.name !== 'review-focus' || !isPullRequest(port.sender)) {
-    port.disconnect();
-    return;
-  }
-
-  let job;
-  let connected = true;
-  const tabId = port.sender.tab.id;
+function createSession(tabId, url, port) {
+  const job = { files: new Map(), active: 0, checking: null, checkVersion: 0, finalState: 'pending', cancelled: false, settled: false, port };
   const send = message => {
-    if (!connected) return;
+    if (job.disposed || !job.port) return;
     try {
-      port.postMessage(message);
+      job.port.postMessage(message);
+      if (message.type === 'result') job.resultDelivered = true;
     } catch {
-      disconnect();
+      job.detach();
     }
   };
 
-  function setFileState(entry, state, message, analysis) {
+  function setFileState(entry, state, message) {
     entry.state = state;
-    if (analysis) entry.analysis = analysis;
-    send({ type: 'file-progress', path: entry.snapshot.files[0].path, state, ...(message ? { message } : {}), ...(analysis ? { analysis } : {}) });
+    entry.message = message;
+    send({ type: 'file-progress', path: entry.snapshot.files[0].path, state, ...(message ? { message } : {}) });
   }
 
   function settle(session, state, message) {
-    if (!connected || session.settled) return;
+    if (session.disposed || session.settled) return;
     session.settled = true;
     const update = { type: 'settled', state, message };
-    keepSessionAlive(session, update);
+    session.settlement = update;
+    keepSessionAlive(session);
     send(update);
   }
 
@@ -131,14 +180,17 @@ chrome.runtime.onConnect.addListener(port => {
     session.idleHeartbeat = null;
   }
 
-  function keepSessionAlive(session, update) {
+  function keepSessionAlive(session) {
     stopIdleHeartbeat(session);
-    // Port messages keep Chrome's service worker alive while more files can be requested or retried.
-    session.idleHeartbeat = setInterval(() => send(update), 20_000);
+    // A browser API call keeps detached sessions alive and detects a closed tab.
+    session.idleHeartbeat = setInterval(() => {
+      void chrome.tabs.get(tabId).catch(() => job.dispose());
+      send({ type: 'heartbeat' });
+    }, 20_000);
   }
 
   function cancel() {
-    if (!job || job.finalState === 'complete') return;
+    if (job.disposed || job.finalState === 'complete') return;
     stopIdleHeartbeat(job);
     job.cancelled = true;
     job.settled = false;
@@ -147,17 +199,49 @@ chrome.runtime.onConnect.addListener(port => {
       entry.controller?.abort();
     }
     job.checking?.abort();
-    if (!job.active && !job.checking) settle(job, 'cancelled', 'Analysis cancelled. Completed file reviews are kept.');
+    if (!job.active && !job.checking) settle(job, 'cancelled', 'Analysis cancelled. Completed file classifications are kept.');
   }
 
-  function disconnect() {
-    connected = false;
-    if (job) stopIdleHeartbeat(job);
-    cancel();
+  job.dispose = () => {
+    job.disposed = true;
+    stopIdleHeartbeat(job);
+    for (const entry of job.files.values()) entry.controller?.abort();
+    job.checking?.abort();
+    job.port = null;
     if (jobs.get(tabId) === job) jobs.delete(tabId);
+  };
+
+  job.detach = () => {
+    job.port = null;
+    if (job.result?.cache.saved && job.resultDelivered) job.dispose();
+    else keepSessionAlive(job);
+  };
+
+  job.resume = port => {
+    const previous = job.port;
+    job.port = port;
+    if (previous && previous !== port) previous.disconnect();
+    send({ type: 'resumed', snapshot: job.snapshot, restoring: job.restoring === true });
+    if (job.settings) send({ type: 'session', ...job.settings });
+    for (const [path, entry] of job.files) {
+      send({ type: 'file-progress', path, state: entry.state, ...(entry.message ? { message: entry.message } : {}) });
+    }
+    if (job.result) send(job.result);
+    else if (job.settled) send(job.settlement);
+    else if (job.finalState === 'checking') send({ type: 'progress', stage: 'checking', message: 'Choosing review decisions for the PR…' });
+  };
+
+  function finish(session, result) {
+    session.result = result;
+    session.resultDelivered = false;
+    session.finalState = 'complete';
+    session.settled = true;
+    stopIdleHeartbeat(session);
+    if (!session.port || !result.cache.saved || [...session.files.values()].some(entry => entry.state === 'excluded')) keepSessionAlive(session);
+    send(result);
   }
 
-  async function analyzeFile(session, entry) {
+  async function classifyFile(session, entry) {
     const controller = new AbortController();
     entry.controller = controller;
     let timedOut = false;
@@ -166,22 +250,14 @@ chrome.runtime.onConnect.addListener(port => {
       timedOut = true;
       controller.abort();
     }, 600_000);
-    const heartbeat = setInterval(() => send({
-      type: 'file-progress', path: entry.snapshot.files[0].path, state: entry.state,
-      message: `${entry.state === 'classifying' ? 'Classifying edits' : 'Choosing review decisions'}… ${Math.floor((Date.now() - started) / 1000)}s`
-    }), 15_000);
+    const heartbeat = setInterval(() => setFileState(entry, entry.state, `Classifying edits… ${Math.floor((Date.now() - started) / 1000)}s`), 15_000);
     try {
       setFileState(entry, 'classifying', 'Classifying edits…');
-      const request = { ...session.settings, signal: controller.signal };
       const changedPaths = [...session.files.values()].filter(file => file.included).map(file => file.snapshot.files[0].path);
-      const rawClassifications = await analyzeWithCLI({ ...request, prompt: makeClassificationPrompt(entry.snapshot, changedPaths), schema: classificationSchema });
+      const raw = await analyzeWithCLI({ ...session.settings, signal: controller.signal, prompt: makeClassificationPrompt(entry.snapshot, changedPaths, session.settings.review), schema: classificationSchema });
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
-      const classifications = validateClassifications(rawClassifications, entry.snapshot);
-      setFileState(entry, 'prioritizing', 'Choosing review decisions…');
-      const raw = await analyzeWithCLI({ ...request, prompt: makePrompt(entry.snapshot, classifications, { changedPaths }), schema: analysisSchema });
-      if (controller.signal.aborted) throw new Error('Analysis cancelled.');
-      const analysis = { ...validateAnalysis(raw, entry.snapshot), classifications };
-      setFileState(entry, 'complete', 'Ready. The check across files may revise this review.', analysis);
+      entry.classifications = validateClassifications(raw, entry.snapshot);
+      setFileState(entry, 'classified', 'Classified. Review decisions follow once every file is classified.');
     } catch (error) {
       if (timedOut) setFileState(entry, 'failed', 'This file timed out after 10 minutes. Its changes remain expanded. Retry this file to continue.');
       else if (controller.signal.aborted) setFileState(entry, 'cancelled', 'Analysis cancelled. This file remains expanded.');
@@ -195,7 +271,7 @@ chrome.runtime.onConnect.addListener(port => {
     }
   }
 
-  async function checkAcrossFiles(session) {
+  async function reviewPullRequest(session) {
     stopIdleHeartbeat(session);
     const controller = new AbortController();
     const version = session.checkVersion;
@@ -203,7 +279,7 @@ chrome.runtime.onConnect.addListener(port => {
     session.finalState = 'checking';
     let timedOut = false;
     const started = Date.now();
-    const progress = 'Checking related changes across files…';
+    const progress = 'Choosing review decisions for the PR…';
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
@@ -211,7 +287,7 @@ chrome.runtime.onConnect.addListener(port => {
     const heartbeat = setInterval(() => send({ type: 'progress', stage: 'checking', message: `${progress} ${Math.floor((Date.now() - started) / 1000)}s` }), 15_000);
     try {
       send({ type: 'progress', stage: 'checking', message: progress });
-      const complete = [...session.files.values()].filter(entry => entry.state === 'complete');
+      const classified = [...session.files.values()].filter(entry => entry.state === 'classified');
       const includedPaths = new Set([...session.files].filter(([, entry]) => entry.included).map(([path]) => path));
       const excludedPaths = session.snapshot.files.filter(file => !includedPaths.has(file.path)).map(file => file.path);
       const snapshot = {
@@ -220,37 +296,32 @@ chrome.runtime.onConnect.addListener(port => {
         context: session.snapshot.context.filter(source => includedPaths.has(source.path)),
         warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated files excluded from this review: ${excludedPaths.join(', ')}. Their source was not inspected.`] : [])]
       };
-      const classifications = validateClassifications({ edits: complete.flatMap(entry => entry.analysis.classifications) }, snapshot);
-      const fileReviews = complete.map(entry => ({ path: entry.snapshot.files[0].path, analysis: entry.analysis }));
+      const classifications = validateClassifications({ edits: classified.flatMap(entry => entry.classifications) }, snapshot);
       const raw = await analyzeWithCLI({
         ...session.settings, signal: controller.signal,
-        prompt: makePrompt(snapshot, classifications, { fileReviews }), schema: analysisSchema
+        prompt: makePrompt(snapshot, classifications, session.settings.review), schema: analysisSchema
       });
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       if (session.checkVersion !== version) return;
       const analysis = { ...validateAnalysis(raw, snapshot), classifications };
-      let cache;
+      let cache = { saved: false, message: 'This review could not be saved locally. It remains available in this tab.' };
       try {
-        cache = session.cacheIdentity && await saveReview(session.cacheIdentity, {
-          analysis, files: complete.map(entry => ({ path: entry.snapshot.files[0].path, analysis: entry.analysis }))
-        });
-      } catch { cache = { saved: false, message: 'This review could not be saved locally. It remains available in this tab.' }; }
+        if (session.cacheIdentity) cache = await saveReview(session.cacheIdentity, {
+          analysis, paths: classified.map(entry => entry.snapshot.files[0].path)
+        }, controller.signal);
+      } catch {}
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       if (session.checkVersion !== version) return;
-      stopIdleHeartbeat(session);
-      session.finalState = 'complete';
-      session.settled = true;
-      if ([...session.files.values()].some(entry => entry.state === 'excluded')) keepSessionAlive(session, { type: 'heartbeat' });
-      send({ type: 'result', analysis, provider: session.settings.provider, model: session.settings.model, cache });
+      finish(session, { type: 'result', analysis, provider: session.settings.provider, model: session.settings.model, cache });
     } catch (error) {
       if (session.checkVersion !== version) return;
       if (controller.signal.aborted && !timedOut) {
         session.finalState = 'cancelled';
-        settle(session, 'cancelled', 'The check across files was cancelled. Completed file reviews are kept.');
+        settle(session, 'cancelled', 'Choosing review decisions was cancelled. File classifications are kept.');
       } else {
         session.finalState = 'failed';
-        const message = timedOut ? 'The check across files timed out after 10 minutes.' : error.message || 'The check across files failed.';
-        settle(session, 'check-failed', `${message} Completed file reviews are kept. Retry the final check to continue.`);
+        const message = timedOut ? 'Choosing review decisions timed out after 10 minutes.' : error.message || 'Choosing review decisions failed.';
+        settle(session, 'check-failed', `${message} File classifications are kept. Retry review decisions to continue.`);
       }
     } finally {
       clearTimeout(timeout);
@@ -261,66 +332,62 @@ chrome.runtime.onConnect.addListener(port => {
   }
 
   function restoreReview(session, cached) {
-    if (!cached || !Array.isArray(cached.files) || !cached.files.length || cached.files.length > session.files.size) return false;
-    const restored = new Map();
-    for (const file of cached.files) {
-      const entry = session.files.get(file.path);
-      if (!entry || restored.has(file.path) || entry.state === 'skipped') return false;
-      const classifications = validateClassifications({ edits: file.analysis.classifications }, entry.snapshot);
-      restored.set(file.path, { ...validateAnalysis(file.analysis, entry.snapshot), classifications });
-    }
+    if (!cached || !Array.isArray(cached.paths) || !cached.paths.length) return false;
+    const restored = new Set(cached.paths);
+    if (restored.size !== cached.paths.length || [...restored].some(path => !session.files.has(path) || session.files.get(path).state === 'skipped')) return false;
     if ([...session.files].some(([path, entry]) => entry.included && entry.state !== 'skipped' && !restored.has(path))) return false;
     const included = session.snapshot.files.filter(file => restored.has(file.path) || session.files.get(file.path).included && session.files.get(file.path).state === 'skipped');
     const snapshot = { ...session.snapshot, files: included, context: session.snapshot.context.filter(source => included.some(file => file.path === source.path)) };
     const classifications = validateClassifications({ edits: cached.analysis.classifications }, snapshot);
     const analysis = { ...validateAnalysis(cached.analysis, snapshot), classifications };
     session.initialized = true;
-    for (const [path, review] of restored) {
+    session.restoring = false;
+    for (const path of restored) {
       const entry = session.files.get(path);
+      const editIds = new Set(allEdits(entry.snapshot).map(edit => edit.id));
       entry.included = true;
-      setFileState(entry, 'complete', 'Saved review restored.', review);
+      entry.classifications = classifications.filter(classification => editIds.has(classification.editId));
+      setFileState(entry, 'classified', 'Saved review restored.');
     }
-    session.finalState = 'complete';
-    session.settled = true;
-    if ([...session.files.values()].some(entry => entry.state === 'excluded')) keepSessionAlive(session, { type: 'heartbeat' });
-    send({ type: 'result', analysis, provider: session.settings.provider, model: session.settings.model, cache: { saved: true, restored: true, savedAt: cached.savedAt } });
+    finish(session, { type: 'result', analysis, provider: session.settings.provider, model: session.settings.model, cache: { saved: true, restored: true, savedAt: cached.savedAt } });
     return true;
   }
 
   function schedule(session) {
-    if (!connected || job !== session || session.checking || !session.settings || !session.initialized) return;
+    if (session.disposed || session.checking || session.restoring || !session.settings || !session.initialized) return;
     if (!session.cancelled) {
       for (const entry of session.files.values()) {
         if (session.active === 3) break;
         if (entry.state !== 'queued') continue;
         session.active++;
-        void analyzeFile(session, entry);
+        void classifyFile(session, entry);
       }
     }
     if (session.active) return;
     if (session.cancelled) {
-      settle(session, 'cancelled', 'Analysis cancelled. Completed file reviews are kept.');
+      settle(session, 'cancelled', 'Analysis cancelled. Completed file classifications are kept.');
       return;
     }
-    const incomplete = [...session.files.values()].some(entry => !['complete', 'skipped', 'excluded'].includes(entry.state));
+    const incomplete = [...session.files.values()].some(entry => !['classified', 'skipped', 'excluded'].includes(entry.state));
     if (incomplete) {
-      settle(session, 'incomplete', 'Some files still need analysis. Completed file reviews are kept; retry the remaining files to continue.');
+      settle(session, 'incomplete', 'Some files still need analysis. Completed file classifications are kept; retry the remaining files to continue.');
       return;
     }
-    if (![...session.files.values()].some(entry => entry.state === 'complete')) {
+    if (![...session.files.values()].some(entry => entry.state === 'classified')) {
       session.finalState = 'excluded';
       settle(session, 'excluded', 'Generated files are excluded by default. Choose Review anyway on a file to analyze it.');
       return;
     }
-    if (session.finalState === 'pending') void checkAcrossFiles(session);
+    if (session.finalState === 'pending') void reviewPullRequest(session);
   }
 
-  port.onDisconnect.addListener(disconnect);
-  port.onMessage.addListener(async message => {
+  job.handleMessage = async message => {
+    if (job.disposed) return;
     if (message?.type === 'cancel') {
       cancel();
       return;
     }
+    if (job?.restoring && ['review-file', 'retry-file', 'retry-final'].includes(message?.type)) return;
     if (message?.type === 'review-file') {
       const entry = typeof message.path === 'string' ? job?.files.get(message.path) : null;
       if (!entry || entry.state !== 'excluded') return;
@@ -329,6 +396,7 @@ chrome.runtime.onConnect.addListener(port => {
       job.settled = false;
       job.checkVersion++;
       job.finalState = 'pending';
+      job.result = null;
       entry.included = true;
       setFileState(entry, 'queued', 'Queued for your requested review.');
       job.checking?.abort();
@@ -341,7 +409,9 @@ chrome.runtime.onConnect.addListener(port => {
       stopIdleHeartbeat(job);
       job.cancelled = false;
       job.settled = false;
+      job.checkVersion++;
       job.finalState = 'pending';
+      job.result = null;
       setFileState(entry, 'queued', 'Queued for another attempt.');
       schedule(job);
       return;
@@ -352,22 +422,18 @@ chrome.runtime.onConnect.addListener(port => {
       job.cancelled = false;
       job.settled = false;
       job.finalState = 'pending';
+      job.result = null;
       schedule(job);
       return;
     }
     if (message?.type !== 'analyze') return;
-    if (jobs.has(tabId)) {
-      send({ type: 'error', message: 'This tab already has an analysis session. Close it before starting another.' });
-      return;
-    }
-    job = { files: new Map(), active: 0, checking: null, checkVersion: 0, finalState: 'pending', cancelled: false, settled: false };
-    jobs.set(tabId, job);
     try {
       const serialized = JSON.stringify(message.snapshot);
       if (!serialized || new TextEncoder().encode(serialized).length > 2_000_000) throw new Error('This PR is too large for the prototype. No changes were hidden.');
       const snapshot = validateSnapshot(message.snapshot);
-      if (message.force !== undefined && typeof message.force !== 'boolean' || message.cacheOnly !== undefined && typeof message.cacheOnly !== 'boolean') throw new Error('Invalid saved-review request.');
-      if (pullRequestUrl(snapshot.url) !== pullRequestUrl(port.sender.url)) throw new Error('The assessment does not match this pull request. Refresh the page.');
+      if (message.force !== undefined && typeof message.force !== 'boolean' || message.cacheOnly !== undefined && typeof message.cacheOnly !== 'boolean' || message.force && message.cacheOnly) throw new Error('Invalid saved-review request.');
+      job.restoring = message.cacheOnly === true;
+      if (pullRequestUrl(snapshot.url) !== url) throw new Error('The assessment does not match this pull request. Refresh the page.');
       job.snapshot = snapshot;
       for (const file of snapshot.files) {
         const fileSnapshot = { ...snapshot, files: [file], context: snapshot.context.filter(source => source.path === file.path) };
@@ -380,37 +446,90 @@ chrome.runtime.onConnect.addListener(port => {
           : entry.state === 'excluded' ? 'Generated file excluded by default. Choose Review anyway to include it.' : 'Queued for analysis.';
         setFileState(entry, entry.state, message);
       }
-      job.settings = await readSettings();
+      job.settings = { ...await readSettings(), review: await readReviewPreferences() };
+      if (job.disposed) return;
       send({ type: 'session', ...job.settings });
       const session = job;
+      let cacheError;
+      let cacheFailureMessage = 'Could not calculate the captured PR fingerprint to open or save its review. Reload the extension and try again.';
       try {
         session.cacheIdentity = await reviewCacheKey(snapshot, session.settings);
         if (!message.force) {
+          cacheFailureMessage = 'Could not read saved reviews from local browser storage. Reload the extension and retry, or choose Run fresh review.';
           const cached = await readReview(session.cacheIdentity.key);
-          if (!connected || job !== session || session.cancelled) return;
+          if (session.disposed || session.cancelled) return;
           if (cached && !session.checkVersion) {
-            try { if (restoreReview(session, cached)) return; } catch {}
-            await deleteReview(session.cacheIdentity.key);
+            cacheFailureMessage = 'The saved review contains invalid or incomplete analysis and cannot be restored. Choose Run fresh review to replace it.';
+            if (restoreReview(session, cached)) return;
+            throw new Error(cacheFailureMessage);
           }
         }
-      } catch {}
-      if (!connected || job !== session || session.cancelled) return;
-      if (message.cacheOnly && !session.checkVersion) {
-        try {
-          const previous = await peekReview(session.cacheIdentity.lookup);
-          if (previous.key) await deleteReview(previous.key);
-        } catch {}
+      } catch {
+        cacheError = new Error(cacheFailureMessage);
+      } finally {
+        session.initialized = true;
+      }
+      if (session.disposed || session.cancelled) return;
+      if (cacheError && !message.force) throw cacheError;
+      if (message.cacheOnly) {
         send({ type: 'cache-miss' });
+        job.dispose();
         return;
       }
-      session.initialized = true;
       schedule(job);
     } catch (error) {
       send({ type: 'error', message: error.message || 'Analysis failed. No changes were hidden.' });
-      if (jobs.get(tabId) === job) jobs.delete(tabId);
-      job = null;
+      job.dispose();
     }
+  };
+  return job;
+}
+
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name !== 'review-focus' || !isPullRequest(port.sender)) {
+    port.disconnect();
+    return;
+  }
+  const tabId = port.sender.tab.id;
+  const url = pullRequestUrl(port.sender.url);
+  let connected = true;
+  port.onDisconnect.addListener(() => {
+    connected = false;
+    const session = jobs.get(tabId);
+    if (session?.port === port) session.detach();
+  });
+  port.onMessage.addListener(async message => {
+    if (!connected) return;
+    let session = jobs.get(tabId);
+    if (message?.type === 'resume') {
+      if (![message.baseSha, message.headSha].every(sha => sha == null || typeof sha === 'string' && /^[a-f0-9]{40}$/.test(sha))) {
+        port.postMessage({ type: 'error', message: 'Invalid pull request revision. Refresh the page.' });
+        return;
+      }
+      if (session && (pullRequestUrl(session.snapshot?.url) !== url || ['baseSha', 'headSha'].some(key => message[key] && message[key] !== session.snapshot[key]))) {
+        session.dispose();
+        session = null;
+      }
+      if (session) session.resume(port);
+      else port.postMessage({ type: 'no-session' });
+      return;
+    }
+    if (message?.type === 'discard') {
+      if (session && (session.port === port || !session.port && pullRequestUrl(session.snapshot.url) === url)) session.dispose();
+      return;
+    }
+    if (message?.type === 'analyze') {
+      if (session) {
+        port.postMessage({ type: 'error', message: 'This tab already has an analysis session. Close it before starting another.' });
+        return;
+      }
+      session = createSession(tabId, url, port);
+      jobs.set(tabId, session);
+    }
+    if (session?.port === port) await session.handleMessage(message);
   });
 });
+
+chrome.tabs.onRemoved.addListener(tabId => jobs.get(tabId)?.dispose());
 
 chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());

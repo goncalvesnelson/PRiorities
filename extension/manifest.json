@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
   "name": "PRiorities",
-  "version": "0.5.1",
+  "version": "0.5.5",
   "description": "Focus GitHub pull requests on the changes that need your judgment.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxcyNMpFz5MUQAbsGiZ1maM8IBtSBYoZVEus4yX+biLJe1u7XZ3v955uZh+KhUiaQpP4Ie4K2t2y+2+Emk4MeGZfqcrXPKYInv2wM4vAxz15nMkUbi5Rt0d9d+rMYM+49DWobugxGu7lpCkgFHO7PuizW2zfSwUYNXHEX1riPHuaw2GPkLw4BVF1oOjW/OW2Dt9tsORM8krCsf2RkeYtfEWCf41LJ8hylzedcN/cOJgmxqgSHv79GuqQgp8UsRKebCdwsbVpoAHhmGE1mGk5zETmrIDQhs1QvA+ipnkpsxfQ75ca9t83x64oJXRbrAR8rfYOczW1TJolgDgoSiaAe9wIDAQAB",
   "permissions": [
     "storage",
@@ -13,7 +19,11 @@
     "type": "module"
   },
   "action": {
-    "default_title": "PRiorities settings"
+    "default_title": "PRiorities settings",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   },
   "options_ui": {
     "page": "options.html",
@@ -37,6 +47,7 @@
         "review-ui.js",
         "github.js",
         "review-data.js",
+        "review-preferences.js",
         "diff.js",
         "review.css"
       ],

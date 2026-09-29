@@ -27,6 +27,8 @@ let activeChild;
 let temporaryDirectory;
 let requestTimer;
 
+class HelperError extends Error {}
+
 function cleanup() {
   clearTimeout(requestTimer);
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
@@ -71,9 +73,10 @@ function object(value) {
 
 function validRequest(request) {
   if (!object(request)) return false;
-  if (request.type === 'status') return Object.keys(request).length === 1;
-  if (request.type !== 'analyze' || Object.keys(request).some(key => !['type', 'model', 'prompt', 'schema'].includes(key))) return false;
+  if (['status', 'models'].includes(request.type)) return Object.keys(request).length === 1;
+  if (request.type !== 'analyze' || Object.keys(request).some(key => !['type', 'model', 'effort', 'prompt', 'schema'].includes(key))) return false;
   if (typeof request.model !== 'string' || (request.model !== '' && !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/.test(request.model))) return false;
+  if (typeof request.effort !== 'string' || !/^(?:[a-z][a-z0-9_-]{0,29})?$/.test(request.effort)) return false;
   if (!object(request.prompt) || Object.keys(request.prompt).length !== 2) return false;
   if (typeof request.prompt.system !== 'string' || !request.prompt.system.trim() || Buffer.byteLength(request.prompt.system) > 65536) return false;
   if (typeof request.prompt.user !== 'string' || !request.prompt.user.trim()) return false;
@@ -81,15 +84,17 @@ function validRequest(request) {
   return true;
 }
 
-function runCli(args, inputText = '', outputLimit = 0, captureErrors = false) {
+function runCli(args, inputText = '', outputLimit = 0) {
   return new Promise((resolve, reject) => {
     const child = spawn(executablePath, args, {
       cwd: temporaryDirectory, env: childEnvironment, detached: true,
-      stdio: ['pipe', outputLimit ? 'pipe' : 'ignore', captureErrors ? 'pipe' : 'ignore']
+      stdio: ['pipe', outputLimit ? 'pipe' : 'ignore', 'pipe']
     });
     activeChild = child;
     const output = [];
+    const errors = [];
     let outputBytes = 0;
+    let errorBytes = 0;
     function collect(chunk) {
       if (finished) return;
       outputBytes += chunk.length;
@@ -100,15 +105,57 @@ function runCli(args, inputText = '', outputLimit = 0, captureErrors = false) {
       output.push(chunk);
     }
     child.stdout?.on('data', collect);
-    child.stderr?.on('data', collect);
+    child.stderr?.on('data', chunk => {
+      const remaining = 16384 - errorBytes;
+      if (remaining <= 0) return;
+      const part = chunk.subarray(0, remaining);
+      errors.push(part);
+      errorBytes += part.length;
+    });
     child.stdin.on('error', () => {});
-    child.once('error', () => reject(new Error(`${providerName} could not be started. Reinstall the helper after installing ${providerName}.`)));
+    child.once('error', () => reject(new HelperError(`${providerName} could not be started. Reinstall the helper after installing ${providerName}.`)));
     child.once('close', code => {
       activeChild = undefined;
-      resolve({ code, output: Buffer.concat(output).toString('utf8') });
+      resolve({ code, output: Buffer.concat(output).toString('utf8'), errorOutput: Buffer.concat(errors).toString('utf8') });
     });
     child.stdin.end(inputText);
   });
+}
+
+function cliFailure(output) {
+  if (/(?:unknown|unrecognized|unexpected) (?:argument|option|flag)|unknown subcommand/i.test(output)) return `${providerName} does not support a required CLI option. Update ${providerName}, reinstall the helper, and try again.`;
+  if (/(?:invalid|unsupported|unknown)[^\n]{0,80}(?:reasoning|effort)|(?:reasoning|effort)[^\n]{0,80}(?:invalid|unsupported|not supported|not available)/i.test(output)) return `${providerName} rejected the selected effort. Choose an effort supported by this model in Settings.`;
+  if (/model_not_found|(?:invalid|unknown|unsupported) model|model[^\n]{0,256}(?:not found|(?:does|may) not exist|not supported|not available|not have access|access denied)|(?:do not|don't) have access to[^\n]{0,40}model/i.test(output)) return `${providerName} could not use the selected model. Choose an available model in Settings or check the custom model ID and your account's access.`;
+  if (/rate[_ -]?limit|usage limit|quota|too many requests|hit your (?:usage )?limit|exceeded[^\n]{0,40}limit/i.test(output)) return `${providerName} reached an account or rate limit. Wait for the limit to reset or check your account allowance, then retry.`;
+  if (/authentication_error|unauthorized|invalid_api_key|token[^\n]{0,30}expired|not logged in/i.test(output)) return `${providerName} rejected the login credentials. Run ${loginCommand}, then check the connection again.`;
+  if (/ECONN(?:REFUSED|RESET)|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|network (?:error|failure)|connection (?:error|failed|refused|reset)|failed to (?:connect|fetch)|request timed out|TLS|certificate/i.test(output)) return `${providerName} could not reach its service. Check your network connection and CLI proxy settings, then retry.`;
+  return null;
+}
+
+function loginStatus({ code, output, errorOutput }) {
+  const diagnostics = `${output}\n${errorOutput}`;
+  let loggedIn;
+  let supportedAccount;
+  if (provider === 'claude') {
+    let status;
+    try { status = JSON.parse(output); } catch {}
+    if (object(status) && typeof status.loggedIn === 'boolean') {
+      loggedIn = status.loggedIn;
+      if (typeof status.authMethod === 'string' && typeof status.apiProvider === 'string') supportedAccount = status.authMethod === 'claude.ai' && status.apiProvider === 'firstParty';
+    }
+  } else {
+    const lines = diagnostics.split(/\r?\n/).map(line => line.trim());
+    if (lines.includes('Logged in using ChatGPT')) { loggedIn = true; supportedAccount = true; }
+    else if (lines.some(line => line.startsWith('Logged in using an API key'))) { loggedIn = true; supportedAccount = false; }
+    else if (lines.includes('Not logged in')) loggedIn = false;
+  }
+  if (loggedIn === false) return { authenticated: false, message: `Sign in with your ${providerName} account by running ${loginCommand}, then check the connection again.` };
+  if (loggedIn && supportedAccount === false) return { authenticated: false, message: `This helper requires a ${provider === 'claude' ? 'Claude subscription login through claude.ai' : 'ChatGPT login'}. The CLI is using a different account mode. Switch accounts with ${loginCommand}, then check the connection again.` };
+  if (code === 0 && loggedIn && supportedAccount) return { authenticated: true };
+  const failure = cliFailure(diagnostics);
+  if (failure) throw new HelperError(failure);
+  if (code !== 0) throw new HelperError(`${providerName} could not check its login. Run ${statusCommand} in Terminal to inspect the failure, then check the connection again.`);
+  throw new HelperError(`${providerName} returned an unreadable login status. Run ${statusCommand} in Terminal and update the CLI before checking again.`);
 }
 
 function analysisArguments(request) {
@@ -119,6 +166,7 @@ function analysisArguments(request) {
   if (provider === 'claude') {
     const args = ['--safe-mode', '--setting-sources', '', '--print', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands', '--no-chrome', '--no-session-persistence', '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--output-format', 'json', '--json-schema', JSON.stringify(request.schema), '--system-prompt-file', instructionsPath];
     if (request.model) args.push('--model', request.model);
+    if (request.effort) args.push('--effort', request.effort);
     return { args };
   }
   writeFileSync(schemaPath, JSON.stringify(request.schema), { mode: 0o600 });
@@ -136,38 +184,122 @@ function analysisArguments(request) {
   const args = ['exec', '--strict-config', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', '--output-schema', schemaPath, '--output-last-message', outputPath];
   for (const [key, value] of Object.entries(configuration)) args.push('-c', `${key}=${JSON.stringify(value)}`);
   if (request.model) args.push('--model', request.model);
+  if (request.effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(request.effort)}`);
   args.push('-');
   return { args, outputPath };
 }
 
+function readModels() {
+  return new Promise((resolve, reject) => {
+    const args = provider === 'codex'
+      ? ['app-server', '--stdio', '-c', 'features.plugins=false', '-c', 'features.hooks=false', '-c', 'features.apps=false']
+      : ['--safe-mode', '--setting-sources', '', '--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--permission-mode', 'dontAsk', '--permission-prompts', 'none'];
+    const child = spawn(executablePath, args, { cwd: temporaryDirectory, env: childEnvironment, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    activeChild = child;
+    let buffer = '';
+    let bytes = 0;
+    let models;
+    let failure;
+    let errorOutput = '';
+    const catalog = [];
+    const cursors = new Set();
+    const sendRequest = value => child.stdin.write(`${JSON.stringify(value)}\n`);
+    const finish = (value, error) => {
+      if (models || failure) return;
+      models = value;
+      failure = error;
+      child.stdin.end();
+      try { process.kill(-child.pid, 'SIGTERM'); } catch {}
+    };
+    child.stdin.on('error', () => {});
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { errorOutput = (errorOutput + chunk).slice(0, 16384); });
+    child.once('error', () => reject(new HelperError(`${providerName} could not be started. Reinstall the helper after installing ${providerName}.`)));
+    child.once('close', () => {
+      activeChild = undefined;
+      if (models) resolve(models);
+      else reject(failure ?? new HelperError(cliFailure(errorOutput) ?? `${providerName} closed before returning its models. Run ${statusCommand} in Terminal and update the CLI before trying again.`));
+    });
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      if (models || failure || finished) return;
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > 4 * 1024 * 1024) { finish(null, new HelperError('The model catalog is too large.')); return; }
+      buffer += chunk;
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        try {
+          const message = JSON.parse(line);
+          if (provider === 'codex' && message.id === 1) {
+            if (message.error) throw new HelperError('Codex could not initialize its model catalog. Update the CLI and retry.');
+            sendRequest({ method: 'initialized', params: {} });
+            sendRequest({ id: 2, method: 'model/list', params: { limit: 100, includeHidden: true } });
+          } else if (provider === 'codex' && message.id === 2) {
+            if (!Array.isArray(message.result?.data)) throw new HelperError('Codex returned an unreadable model catalog. Update the CLI and retry.');
+            catalog.push(...message.result.data);
+            if (catalog.length > 500) throw new HelperError('The model catalog exceeds the 500-model limit.');
+            const cursor = message.result.nextCursor;
+            if (cursor) {
+              if (typeof cursor !== 'string' || cursors.has(cursor)) throw new HelperError('Codex repeated a model catalog page. Update the CLI and retry.');
+              cursors.add(cursor);
+              sendRequest({ id: 2, method: 'model/list', params: { limit: 100, includeHidden: true, cursor } });
+            } else finish(catalog.map(model => ({ id: model.model, label: model.displayName, efforts: model.supportedReasoningEfforts?.map(option => option.reasoningEffort), defaultEffort: model.defaultReasoningEffort, isDefault: model.isDefault === true })));
+          } else if (provider === 'claude' && message.type === 'control_response' && message.response?.request_id === 'catalog') {
+            const entries = message.response.response?.models;
+            if (message.response.subtype !== 'success' || !Array.isArray(entries)) throw new HelperError('Claude Code could not return its model catalog. Update the CLI and retry.');
+            if (entries.length > 500) throw new HelperError('The model catalog exceeds the 500-model limit.');
+            finish(entries.map(model => ({ id: model.resolvedModel, label: model.displayName, efforts: model.supportedEffortLevels ?? [], defaultEffort: model.supportedEffortLevels?.includes('medium') ? 'medium' : model.supportedEffortLevels?.[0] ?? '', isDefault: model.value === 'default' })));
+          }
+        } catch (error) { finish(null, error instanceof HelperError ? error : new HelperError(`${providerName} returned an unreadable model catalog. Update the CLI and retry.`)); }
+      }
+    });
+    if (provider === 'codex') sendRequest({ id: 1, method: 'initialize', params: { clientInfo: { name: 'priorities', version: '0.5.5' } } });
+    else sendRequest({ type: 'control_request', request_id: 'catalog', request: { subtype: 'initialize' } });
+  });
+}
+
 async function handle(request) {
   try {
-    temporaryDirectory = mkdtempSync(join(tmpdir(), `review-focus-${provider}-`));
-    chmodSync(temporaryDirectory, 0o700);
-    requestTimer = setTimeout(() => stop(`${providerName} took too long. Try again with a smaller pull request.`), request.type === 'status' ? 15000 : 600000);
+    try {
+      temporaryDirectory = mkdtempSync(join(tmpdir(), `review-focus-${provider}-`));
+      chmodSync(temporaryDirectory, 0o700);
+    } catch (error) {
+      if (typeof error.code !== 'string') throw error;
+      throw new HelperError('The local helper could not create its private working directory. Check local disk space and temporary-folder permissions.');
+    }
+    requestTimer = setTimeout(() => stop(`${providerName} took too long. Check its connection and try again.`), request.type === 'analyze' ? 600000 : request.type === 'models' ? 30000 : 15000);
     const statusArgs = provider === 'claude' ? ['--safe-mode', '--setting-sources', '', 'auth', 'status', '--json'] : ['login', 'status'];
-    const { code: statusCode, output } = await runCli(statusArgs, '', 16384, provider === 'codex');
+    const statusResult = await runCli(statusArgs, '', 16384);
     if (finished) return;
-    let authenticated = false;
-    if (provider === 'claude') {
-      try {
-        const status = JSON.parse(output);
-        authenticated = statusCode === 0 && status.loggedIn === true && status.authMethod === 'claude.ai' && status.apiProvider === 'firstParty';
-      } catch {}
-    } else authenticated = statusCode === 0 && output.split(/\r?\n/).some(line => line.trim() === 'Logged in using ChatGPT');
+    const status = loginStatus(statusResult);
     if (request.type === 'status') {
-      complete(authenticated ? { type: 'status', authenticated: true } : { type: 'status', authenticated: false, message: `Sign in with your ${providerName} account by running ${loginCommand}, then check the connection again.` });
+      complete({ type: 'status', ...status });
       return;
     }
-    if (!authenticated) {
-      complete({ type: 'error', message: `Sign in with your ${providerName} account by running ${loginCommand}, then try again.` });
+    if (!status.authenticated) {
+      complete({ type: 'error', message: status.message });
       return;
     }
-    const { args, outputPath } = analysisArguments(request);
-    const { code, output: analysisOutput } = await runCli(args, request.prompt.user, provider === 'claude' ? 4 * 1024 * 1024 : 0);
+    if (request.type === 'models') {
+      const models = await readModels();
+      const unique = [...new Map(models.map(model => [model.id, model])).values()];
+      const defaultModel = models.find(model => model.isDefault)?.id;
+      if (!unique.length || unique.some(model => typeof model.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/.test(model.id) || typeof model.label !== 'string' || model.label.length > 200 || !Array.isArray(model.efforts) || model.efforts.length > 20 || model.efforts.some(effort => typeof effort !== 'string' || !/^[a-z][a-z0-9_-]{0,29}$/.test(effort)) || typeof model.defaultEffort !== 'string' || model.defaultEffort && !model.efforts.includes(model.defaultEffort))) throw new HelperError(`${providerName} returned an unreadable model catalog. Update the CLI and retry.`);
+      complete({ type: 'models', models: unique.map(model => ({ ...model, isDefault: model.id === defaultModel })) });
+      return;
+    }
+    let analysis;
+    try { analysis = analysisArguments(request); } catch (error) {
+      if (typeof error.code !== 'string') throw error;
+      throw new HelperError('The local helper could not prepare its analysis files. Check local disk space and temporary-folder permissions.');
+    }
+    const { args, outputPath } = analysis;
+    const { code, output: analysisOutput, errorOutput } = await runCli(args, request.prompt.user, provider === 'claude' ? 4 * 1024 * 1024 : 0);
     if (finished) return;
     if (code !== 0) {
-      complete({ type: 'error', message: `${providerName} could not complete this analysis. Check ${statusCommand}, model access, and account limits, then try again.` });
+      complete({ type: 'error', message: cliFailure(`${errorOutput}\n${analysisOutput}`) ?? `${providerName} stopped before completing this analysis. Run the CLI in Terminal to inspect the failure, then retry. No review changes were applied.` });
       return;
     }
     if (outputPath && statSync(outputPath).size > maxOutputBytes - 128) {
@@ -181,7 +313,7 @@ async function handle(request) {
     }
     if (provider === 'claude') {
       if (!object(result) || result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false) {
-        complete({ type: 'error', message: 'Claude Code could not complete this analysis. Check model access and account limits, then try again.' });
+        complete({ type: 'error', message: cliFailure(analysisOutput) ?? 'Claude Code reported an unsuccessful analysis. Run the CLI in Terminal to inspect the failure, then retry. No review changes were applied.' });
         return;
       }
       result = result.structured_output;
@@ -191,8 +323,8 @@ async function handle(request) {
       return;
     }
     complete({ type: 'result', result });
-  } catch {
-    complete({ type: 'error', message: `The local ${providerName} helper could not complete the request. Check that ${providerName} is installed and signed in.` });
+  } catch (error) {
+    complete({ type: 'error', message: error instanceof HelperError ? error.message : `The local ${providerName} helper encountered an unexpected error. Reinstall the helper and retry.` });
   }
 }
 

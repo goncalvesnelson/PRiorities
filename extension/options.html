@@ -11,7 +11,7 @@
   <main>
     <p class="eyebrow">PRiorities</p>
     <h1>Choose your review assistant.</h1>
-    <p class="intro">Choose the CLI for new reviews and manage saved reviews.</p>
+    <p class="intro">Choose your model, adjust what stays visible, and manage saved reviews.</p>
 
     <form id="settings-form">
       <label for="provider">Local CLI</label>
@@ -24,8 +24,15 @@
       <p class="hint">Uses your existing CLI login. To sign in, run <code id="login-command">codex login</code> in Terminal, then check the connection again.</p>
 
       <label for="model">Model</label>
-      <input id="model" name="model" type="text" placeholder="Codex default" maxlength="100" autocomplete="off" spellcheck="false" aria-describedby="model-help" disabled>
-      <p id="model-help" class="hint">Leave blank for Codex’s built-in default, or enter a model ID available to your account. Reviews use isolated sessions with the captured PR context.</p>
+      <select id="model" name="model" aria-describedby="model-help" disabled></select>
+      <div id="custom-model-field" hidden>
+        <label for="custom-model">Custom model ID</label>
+        <input id="custom-model" type="text" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Enter a specific model version" disabled>
+      </div>
+      <p id="model-help" class="hint">Loading models from your local CLI…</p>
+      <label for="effort">Reasoning effort</label>
+      <select id="effort" name="effort" aria-describedby="effort-help" disabled></select>
+      <p id="effort-help" class="hint">Choose how much reasoning the model should use.</p>
 
       <div class="privacy">
         <strong>Code is sent only when you start analysis.</strong>
@@ -44,9 +51,37 @@
       <p id="status" role="status" aria-live="polite"></p>
     </form>
 
+    <form id="review-preferences-form" class="cache-settings">
+      <h2>What should stay visible?</h2>
+      <label for="review-focus">Review focus</label>
+      <select id="review-focus" disabled>
+        <option value="selective">Selective — the decisions that matter most</option>
+        <option value="balanced">Balanced — decisions and supporting context</option>
+        <option value="thorough">Thorough — more changes to inspect</option>
+      </select>
+      <p class="hint">Guides the AI's selection. It does not prove that hidden changes are safe.</p>
+      <fieldset id="always-show" disabled>
+        <legend>Always keep these change types visible</legend>
+        <div id="change-types"></div>
+        <p class="hint">Applies to analyzed files. Unresolved edits and discussion rows always stay visible. Generated files still require Review anyway.</p>
+      </fieldset>
+      <details class="prompt-settings">
+        <summary>Advanced: edit analysis prompts</summary>
+        <p class="hint">Replace the instructions for each pass. Source handling, output validation, and your always-visible choices remain enforced.</p>
+        <label for="classification-prompt">Classification instructions</label>
+        <textarea id="classification-prompt" rows="9" maxlength="12000" disabled></textarea>
+        <button type="button" class="secondary" id="reset-classification" disabled>Reset classification prompt</button>
+        <label for="prioritization-prompt">Prioritization instructions</label>
+        <textarea id="prioritization-prompt" rows="12" maxlength="12000" disabled></textarea>
+        <button type="button" class="secondary" id="reset-prioritization" disabled>Reset prioritization prompt</button>
+      </details>
+      <div class="actions"><button id="save-review-preferences" type="submit" disabled>Save review preferences</button></div>
+      <p id="review-preferences-status" role="status"></p>
+    </form>
+
     <form id="cache-form" class="cache-settings">
       <h2>Saved reviews</h2>
-      <p class="hint">Matching reviews reopen without new model calls. The cache stores review explanations and selected code excerpts on this browser. Changes to commits, captured context, provider or model require a fresh review.</p>
+      <p class="hint">Matching reviews reopen without new model calls. The cache stores review explanations and selected code excerpts on this browser. Changes to commits, captured context, provider, model, effort or review preferences require a fresh review.</p>
       <p id="cache-usage" role="status">Checking saved reviews…</p>
       <progress id="cache-usage-bar" max="100" value="0" aria-label="Review cache usage"></progress>
       <label for="cache-limit">Cache limit (MB)</label>
@@ -64,9 +99,9 @@
       <ol>
         <li>Choose a connected CLI, save your settings, then open a GitHub PR’s <strong>Files changed</strong> tab.</li>
         <li>Choose <strong>Analyze PR</strong> in PRiorities.</li>
-        <li>Read the review decisions, expand supporting evidence, or switch back to the full GitHub diff.</li>
+        <li>Read the review decisions and use GitHub's <strong>Viewed</strong> checkbox as you finish each file. Open <strong>Details</strong> for source evidence or switch back to the full GitHub diff whenever needed.</li>
       </ol>
-      <p class="hint">PRiorities does not post comments, approve changes, or mark files reviewed. Its prioritization is a suggestion; all changed code remains accessible.</p>
+      <p class="hint">Your review checkmarks use GitHub's Viewed state. AI analysis never marks a file reviewed for you. PRiorities does not post comments or approve changes.</p>
     </section>
   </main>
 </body>
