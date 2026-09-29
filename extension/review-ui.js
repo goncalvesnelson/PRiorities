@@ -1208,9 +1208,15 @@ export function startReviewUI() {
   }
 
   function mount() {
-    if (host.isConnected || !isDiffPage()) return;
+    if (!isDiffPage()) return;
+    const list = document.querySelector('[data-testid="progressive-diffs-list"], .js-diff-progressive-container');
+    if (list?.parentElement) {
+      if (list.previousElementSibling !== host) list.before(host);
+      return;
+    }
+    if (host.isConnected) return;
     const firstFile = findNativeFiles(document)[0]?.element;
-    const anchor = firstFile?.closest('.js-diff-progressive-container') ?? firstFile?.parentElement;
+    const anchor = firstFile?.parentElement;
     if (anchor?.parentElement && anchor !== document.body) anchor.before(host);
     else {
       const main = document.querySelector('main, [role="main"]');

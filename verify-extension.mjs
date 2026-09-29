@@ -276,7 +276,11 @@ async function handleEvent(message) {
         route.diffContents[0].newTreeEntry = { isGenerated: true };
         route.diffContents[0].diffLines = [];
       }
-      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range'].includes(changesMode));
+      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range', 'collapsed-first'].includes(changesMode));
+      if (changesMode === 'collapsed-first') {
+        let index = 0;
+        body = body.replace(/<table\b[^>]*>.*?<\/table>/gs, table => index++ < 2 ? '' : table);
+      }
     } else if (changesMode && url.pathname === changes.root + '/page_data/diff_entries') {
       const paths = url.searchParams.get('paths').split(',').map(decodeURIComponent);
       const isRange = url.searchParams.get('range') === selectedRange;
@@ -479,6 +483,37 @@ try {
   assert.equal(await evaluate('document.querySelector("#effort").value'), 'high');
   await writeFile('/tmp/review-focus-extension-settings.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
   await page('Fetch.enable', { patterns: [{ urlPattern: 'https://github.com/*' }, { urlPattern: 'https://example.com/*' }] });
+  changesMode = 'collapsed-first';
+  await page('Page.navigate', { url: prUrl + '/changes' });
+  await waitFor(() => evaluate('Boolean(document.querySelector("#review-focus-extension"))'), 'toolbar above initially collapsed files');
+  const toolbarPlacement = () => evaluate(`(() => {
+    const toolbar = document.querySelector('#review-focus-extension');
+    const list = document.querySelector('[data-testid="progressive-diffs-list"]');
+    const files = [...list.querySelectorAll('section[role="region"]')];
+    return {
+      filesBefore: files.filter(file => file.compareDocumentPosition(toolbar) & Node.DOCUMENT_POSITION_FOLLOWING).length,
+      beforeList: list.previousElementSibling === toolbar,
+      toolbarCount: document.querySelectorAll('#review-focus-extension').length,
+      collapsedCount: files.filter(file => !file.querySelector('table')).length
+    };
+  })()`);
+  assert.deepEqual(await toolbarPlacement(), { filesBefore: 0, beforeList: true, toolbarCount: 1, collapsedCount: 2 }, 'The toolbar must precede the entire list when the first files have no diff tables.');
+  await evaluate(`window.placementToolbar = document.querySelector('#review-focus-extension'); document.querySelector('[data-testid="progressive-diffs-list"] table').remove()`);
+  await waitFor(async () => (await toolbarPlacement()).collapsedCount === 3, 'all files collapsed');
+  assert.deepEqual(await toolbarPlacement(), { filesBefore: 0, beforeList: true, toolbarCount: 1, collapsedCount: 3 });
+  await evaluate(`(() => {
+    const list = document.querySelector('[data-testid="progressive-diffs-list"]');
+    const replacement = list.cloneNode(true);
+    list.replaceWith(replacement);
+    replacement.prepend(window.placementToolbar);
+  })()`);
+  await waitFor(async () => (await toolbarPlacement()).beforeList, 'toolbar reanchored when GitHub replaces the file list');
+  assert.equal(await evaluate('document.querySelector("#review-focus-extension") === window.placementToolbar'), true, 'Repositioning must preserve the toolbar and its session state.');
+  assert.equal((await toolbarPlacement()).toolbarCount, 1);
+  await page('Page.reload');
+  await waitFor(() => evaluate('Boolean(document.querySelector("#review-focus-extension"))'), 'toolbar placement after reload');
+  assert.equal((await toolbarPlacement()).beforeList, true);
+  changesMode = '';
   await page('Page.navigate', { url: prUrl + '/files' });
   const shadow = 'document.querySelector("#review-focus-extension")?.shadowRoot';
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('Ready to analyze')`), 'the installed content script');
