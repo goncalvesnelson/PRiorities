@@ -1,8 +1,8 @@
-import { defaultReviewPreferences } from './extension/review-preferences.js';
+import { defaultReviewPreferences, isProtectedPath } from './extension/review-preferences.js';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { analyzeWithCLI, getCLIModels, getCLIStatus } from './extension/cli-client.js';
-import { analysisSchema, classificationSchema, makePrompt, validateSnapshot } from './extension/review-data.js';
+import { analysisSchema, classificationSchema, makePrompt, sourceRows, validateSnapshot } from './extension/review-data.js';
 
 const snapshot = validateSnapshot({
   url: 'https://github.com/example/repository/pull/7',
@@ -427,9 +427,11 @@ try {
   assert.deepEqual(stageRequests[1].schema, analysisSchema);
   const { changedPaths: classifiedPaths, ...classificationEvidence } = JSON.parse(stageRequests[0].prompt.user);
   assert.deepEqual(classifiedPaths, ['account.js']);
-  const { classifications: sentClassifications, ...reviewEvidence } = JSON.parse(stageRequests[1].prompt.user);
+  assert.ok(!Object.hasOwn(classificationEvidence, 'title') && !Object.hasOwn(classificationEvidence, 'description'), 'Classification must judge the code without the author’s framing.');
+  const { classifications: sentClassifications, citableLines, ...reviewEvidence } = JSON.parse(stageRequests[1].prompt.user);
   assert.deepEqual(sentClassifications, classifications.edits);
-  assert.deepEqual(reviewEvidence, classificationEvidence, 'The PR review must retain the source evidence and add only validated classifications.');
+  assert.deepEqual(citableLines, { 'account.js': { before: [[1, 1]], after: [[1, 2]] } }, 'The PR review must list the only lines it may cite.');
+  assert.deepEqual(reviewEvidence, { ...classificationEvidence, title: snapshot.title, description: snapshot.description }, 'The PR review must retain the source evidence and add only intent, validated classifications and citable lines.');
   assert.deepEqual(fileStates(reviewPort, 'account.js'), ['queued', 'classifying', 'classified']);
   const classifiedFile = reviewPort.messages.findIndex(message => message.state === 'classified');
   const prReview = reviewPort.messages.findIndex(message => message.stage === 'checking');
@@ -519,8 +521,7 @@ try {
     assert.deepEqual(evidence.changedPaths, manyDecisions.files.map(file => file.path));
     assert.equal(evidence.context.length, 1);
     assert.equal(evidence.context[0].path, evidence.files[0].path);
-    assert.equal(evidence.title, manyDecisions.title);
-    assert.equal(evidence.description, manyDecisions.description);
+    assert.ok(!Object.hasOwn(evidence, 'title') && !Object.hasOwn(evidence, 'description'), 'Each file classification must judge the code without the author’s framing.');
     assert.equal(evidence.baseSha, manyDecisions.baseSha);
     assert.equal(evidence.headSha, manyDecisions.headSha);
   }
@@ -628,6 +629,22 @@ try {
     assert.match(rejected.messages.at(-1).message, error, name);
     assert.ok(!rejected.messages.some(message => message.analysis || message.type === 'result'), `${name} must not reach the folding UI.`);
   }
+
+  const handlerPath = 'src/portfolio/ports/balance_message_handler.go';
+  const context = (oldLine, newLine) => ({ type: 'context', text: `line ${newLine}`, oldLine, newLine });
+  const uncapturedSnapshot = validateSnapshot({ ...snapshot, files: [{ path: handlerPath, hunks: [
+    { header: '@@ -10,3 +10,3 @@', items: [context(10, 10), { type: 'edit', id: 'handler-1', rows: [{ type: 'delete', text: 'old', oldLine: 11, newLine: null }, { type: 'add', text: 'new', oldLine: null, newLine: 11 }] }, context(12, 12)] },
+    { header: '@@ -98,6 +99,7 @@', items: [context(98, 99), context(99, 100), context(100, 101), { type: 'edit', id: 'handler-2', rows: [{ type: 'add', text: 'added', oldLine: null, newLine: 102 }] }, context(101, 103), context(102, 104), context(103, 105)] }
+  ] }] });
+  const handlerClassifications = ['handler-1', 'handler-2'].map(editId => ({ ...classifications.edits[0], editId }));
+  const citable = JSON.parse(makePrompt(uncapturedSnapshot, handlerClassifications).user).citableLines[handlerPath];
+  assert.deepEqual(citable, { before: [[10, 12], [98, 103]], after: [[10, 12], [99, 105]] }, 'Without full source, only diff rows can be cited, one range per hunk.');
+  for (const side of ['before', 'after']) {
+    for (const [startLine, endLine] of citable[side]) assert.equal(sourceRows(uncapturedSnapshot, { path: handlerPath, side, startLine, endLine }).length, endLine - startLine + 1, 'Every listed range must pass excerpt validation.');
+  }
+  assert.throws(() => sourceRows(uncapturedSnapshot, { path: handlerPath, side: 'after', startLine: 99, endLine: 106 }), /cites source that was not read: src\/portfolio\/ports\/balance_message_handler\.go:106/);
+  const capturedSnapshot = { ...uncapturedSnapshot, context: [{ path: handlerPath, side: 'after', text: Array.from({ length: 120 }, (_, index) => `line ${index + 1}`).join('\n') + '\n' }] };
+  assert.deepEqual(JSON.parse(makePrompt(capturedSnapshot, handlerClassifications).user).citableLines[handlerPath], { before: [[10, 12], [98, 103]], after: [[1, 120]] }, 'Captured full source makes the whole side citable.');
 
   const requestCount = requests.length;
   const mismatched = await beginReview({ ...snapshot, url: 'https://github.com/another/repo/pull/9' });
@@ -1147,9 +1164,20 @@ try {
   assert.match((await sendMessage({ type: 'get-settings' })).connectionError, /Claude Code helper is not installed/);
   assert.equal((await sendMessage({ type: 'get-settings', provider: 'codex' })).configured, true, 'A missing Claude helper must not break Codex.');
 
-  const customPreferences = { focus: 'balanced', alwaysShow: ['behavior'], classificationPrompt: 'Classify each supplied edit for the fixture.', prioritizationPrompt: 'Prioritize the supplied fixture decisions.' };
+  for (const [path, patterns, expected] of [
+    ['go.mod', ['go.mod'], true], ['services/api/go.mod', ['go.mod'], true], ['go.mod.bak', ['go.mod'], false], ['notgo.mod', ['go.mod'], false],
+    ['db/migrations/001.sql', ['migrations/'], true], ['migrations/001.sql', ['migrations/'], true], ['premigrations/001.sql', ['migrations/'], false],
+    ['.github/workflows/ci.yml', ['.github/workflows/'], true], ['docs/.github/workflows.md', ['.github/workflows/'], false]
+  ]) assert.equal(isProtectedPath(path, patterns), expected, `${path} against ${patterns}`);
+  const savedPreferences = storage.reviewPreferences;
+  storage.reviewPreferences = { focus: 'thorough', alwaysShow: ['test'], classificationPrompt: '', prioritizationPrompt: '' };
+  assert.deepEqual((await sendMessage({type:'get-review-preferences'})).preferences.protectedPaths, defaultReviewPreferences().protectedPaths, 'Preferences saved before protected paths existed must load with the defaults.');
+  storage.reviewPreferences = savedPreferences;
+  const customPreferences = { focus: 'balanced', alwaysShow: ['behavior'], protectedPaths: ['go.mod', 'db/migrations/'], classificationPrompt: 'Classify each supplied edit for the fixture.', prioritizationPrompt: 'Prioritize the supplied fixture decisions.' };
   assert.match((await sendMessage({type:'save-review-preferences',preferences:customPreferences},contentSender)).error, /Only the settings page/);
   assert.match((await sendMessage({type:'save-review-preferences',preferences:{...customPreferences,alwaysShow:['unknown']}})).error, /supported change types/);
+  assert.match((await sendMessage({type:'save-review-preferences',preferences:{...customPreferences,protectedPaths:['x'.repeat(201)]}})).error, /protected paths/);
+  assert.deepEqual((await sendMessage({type:'save-review-preferences',preferences:{...customPreferences,protectedPaths:[' /go.mod ', '', 'go.mod', 'db/migrations/']}})).preferences.protectedPaths, ['go.mod', 'db/migrations/'], 'Protected paths are trimmed, deduplicated and blank lines dropped.');
   assert.match((await sendMessage({type:'save-review-preferences',preferences:{...customPreferences,classificationPrompt:'x'.repeat(12001)}})).error, /12,000/);
   assert.deepEqual((await sendMessage({type:'save-review-preferences',preferences:customPreferences})).preferences, customPreferences);
   assert.deepEqual((await sendMessage({type:'get-review-preferences'})).preferences, customPreferences);

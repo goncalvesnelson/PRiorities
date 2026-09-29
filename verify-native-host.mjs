@@ -150,7 +150,15 @@ for await (const chunk of process.stdin) prompt += chunk;
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args, config, schema, prompt, instructions, cwd: process.cwd(), directoryMode: statSync(process.cwd()).mode & 0o777, fileMode: statSync(instructionsPath).mode & 0o777, environment: Object.keys(process.env) }) + '\\n');
 const result = schema.properties.edits ? { edits: [{ editId: 'sample-edit', kinds: ['behavior'], reason: 'A guard changes the result.', uncertainty: '' }] } : { summary: 'Review the guard.', topics: [] };
 const output = content => claude ? process.stdout.write(content) : writeFileSync(value('--output-last-message'), content);
-if (control.mode === 'wait') {
+if (control.mode === 'events') {
+  console.error(prompt + ' PRIVATE REPOSITORY SOURCE test-secret-key');
+  const events = Buffer.from(control.events.map(event => typeof event === 'string' ? event : JSON.stringify(event)).join('\\n'));
+  for (let offset = 0; offset < events.length; offset += 97) {
+    await new Promise(resolve => process.stdout.write(events.subarray(offset, offset + 97), resolve));
+  }
+  output(JSON.stringify(result));
+  process.exitCode = control.code;
+} else if (control.mode === 'wait') {
   const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   writeFileSync(${JSON.stringify(startedPath)}, JSON.stringify({ pid: process.pid, descendant: descendant.pid, cwd: process.cwd() }));
   process.on('SIGTERM', () => {});
@@ -160,7 +168,7 @@ if (control.mode === 'wait') {
   process.exit(1);
 } else if (control.mode === 'diagnostic' || control.mode === 'diagnostic-envelope') {
   if (claude) console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,errors:[control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path']}));
-  else console.error(control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path');
+  else console.log(JSON.stringify({type:'turn.failed',error:{message:control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path'}}));
   process.exit(control.mode === 'diagnostic-envelope' ? 0 : 1);
 } else if (control.mode === 'invalid') output('not json');
 else if (control.mode === 'huge') output(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: { content: 'x'.repeat(1024 * 1024) } }));
@@ -247,7 +255,7 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
       assert.equal(record.directoryMode, 0o700);
       assert.equal(record.fileMode, 0o600);
       if (provider === 'codex') {
-        for (const flag of ['--strict-config', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check']) assert.ok(record.args.includes(flag));
+        for (const flag of ['--json', '--strict-config', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check']) assert.ok(record.args.includes(flag));
         assert.equal(record.args[record.args.indexOf('--sandbox') + 1], 'read-only');
         assert.equal(record.config.forced_login_method, undefined);
         assert.equal(JSON.parse(record.config.approval_policy), 'never');
@@ -359,6 +367,39 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
       }
     }
 
+    if (provider === 'codex') {
+      const keywords = 'unauthorized quota TLS certificate rate limit';
+      const agentMessage = { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ type: 'error', message: keywords }) } };
+      for (const padding of ['', 'x'.repeat(20_000)]) {
+        const echoedRequest = { ...request, prompt: { ...request.prompt, user: `${keywords} ${padding}` } };
+        for (const [events, expected] of [
+          [[agentMessage], /stopped before completing/],
+          [[agentMessage, { type: 'error', message: 'Unexpected internal failure.' }], /stopped before completing/],
+          [[agentMessage, { type: 'error', message: 'Connection failed: ECONNRESET.' }], /could not reach its service/],
+          [[{ type: 'error', message: 'rate limit' }, agentMessage, { type: 'turn.failed', error: { message: 'Unsupported reasoning effort.' } }], /rejected the selected effort/]
+        ]) {
+          await control('events', true, {}, { events, code: 1 });
+          const response = await exchange(installed.launcherPath, echoedRequest);
+          assert.equal(response.type, 'error');
+          assert.match(response.message, expected);
+          assert.doesNotMatch(response.message, /test-secret-key|PRIVATE REPOSITORY/);
+        }
+      }
+      for (const [events, expected] of [
+        [[{ type: 'turn.failed', error: { message: 'model_not_found' } }], /could not use the selected model/],
+        [['not json'], /unreadable analysis events/],
+        [[{ type: 'error', message: { private: keywords } }], /unreadable analysis error/],
+        [[{ type: 'item.completed', item: { type: 'agent_message', text: 'x'.repeat(5 * 1024 * 1024) } }], /too large for Chrome/]
+      ]) {
+        await control('events', true, {}, { events, code: 0 });
+        const response = await exchange(installed.launcherPath, request);
+        assert.equal(response.type, 'error');
+        assert.match(response.message, expected);
+      }
+      await control('events', true, {}, { events: [{ type: 'error', message: 'Connection failed.' }, agentMessage, { type: 'turn.completed', usage: {} }], code: 0 });
+      assert.equal((await exchange(installed.launcherPath, request)).type, 'result', 'A successful turn must not inherit an earlier recovered error or agent message.');
+    }
+
     for (const cancellation of ['disconnect', 'signal', 'second-request']) {
       await rm(startedPath, { force: true });
       await control('wait');
@@ -390,14 +431,34 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
   assert.equal(JSON.parse(await readFile(installations[0].manifestPath, 'utf8')).name, 'com.review_focus.codex');
   await assert.rejects(installNativeHost({ provider: 'unexpected', executablePath: fakeCliPath }), /Unsupported/);
   await assert.rejects(installNativeHost({ provider: 'claude', executablePath: 'relative' }), /absolute/);
+  for (const provider of ['codex', 'claude']) {
+    const stableCli = join(root, `${provider}-stable`);
+    const releases = [join(root, `${provider}-release-1`), join(root, `${provider}-release-2`)];
+    for (const [index, release] of releases.entries()) {
+      const status = provider === 'claude' ? JSON.stringify({ loggedIn: index === 0, authMethod: 'claude.ai', apiProvider: 'firstParty' }) : index === 0 ? 'Logged in using ChatGPT' : 'Not logged in';
+      await writeFile(release, `#!${process.execPath}\nconsole.${provider === 'claude' ? 'log' : 'error'}(${JSON.stringify(status)});\n`, { mode: 0o755 });
+    }
+    await symlink(releases[0], stableCli);
+    const installed = await installNativeHost({ provider, browserProfileDirectory: join(root, `${provider}-update-profile`), executablePath: stableCli });
+    assert.equal(installed.executablePath, stableCli);
+    assert.equal((await exchange(installed.launcherPath, { type: 'status' })).authenticated, true);
+    await rm(stableCli);
+    await symlink(releases[1], stableCli);
+    await rm(releases[0]);
+    const updated = await exchange(installed.launcherPath, { type: 'status' });
+    assert.equal(updated.type, 'status');
+    assert.equal(updated.authenticated, false, 'The installed helper must follow the updater’s stable CLI link after the old release is removed.');
+  }
   const cliDirectory = join(root, 'bin');
   await mkdir(cliDirectory);
   await symlink(fakeCliPath, join(cliDirectory, 'claude'));
   const installerHome = join(root, 'installer-home');
-  const installer = await promisify(execFile)(process.execPath, ['install-native-host.mjs'], { cwd: new URL('.', import.meta.url), env: { ...process.env, HOME: installerHome, PATH: cliDirectory } });
+  const installer = await promisify(execFile)(process.execPath, ['install-native-host.mjs'], { cwd: new URL('.', import.meta.url), env: { ...process.env, HOME: installerHome, PATH: `${cliDirectory}:./node_modules/.bin:/temporary-codex-path` } });
   assert.match(installer.stdout, /Skipped codex/);
   assert.match(installer.stdout, /com.review_focus.claude/);
   assert.equal(existsSync(join(installerHome, 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts', 'com.review_focus.claude.json')), true);
+  const launcher = await readFile(join(installerHome, 'Library', 'Application Support', 'Review Focus', 'native-host', 'review-focus-claude'), 'utf8');
+  assert.ok(!launcher.includes('./node_modules/.bin') && !launcher.includes('/temporary-codex-path'), 'The helper must not inherit transient or relative directories from the installer’s PATH.');
   console.log('Native host verification passed for Codex and Claude Code: framing, two-stage flow, private temporary files, login modes, safe actionable errors, catalog paging and limits, generated output boundaries, coexistence, single-provider installation, and process-group cancellation.');
 } finally {
   for (const child of liveChildren) child.kill('SIGTERM');

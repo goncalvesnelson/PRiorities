@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { access, chmod, copyFile, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +12,7 @@ function shellQuote(value) {
 
 async function executable(candidate) {
   await access(candidate, constants.X_OK);
-  return realpath(candidate);
+  return resolve(candidate);
 }
 
 async function findExecutable(provider) {
@@ -41,9 +41,10 @@ export async function installNativeHost({ provider = 'codex', browserProfileDire
   await copyFile(new URL('./native-host/host.mjs', import.meta.url), scriptPath);
   await chmod(scriptPath, 0o600);
   const launcherPath = join(installDirectory, `review-focus-${provider}`);
+  const launcherPathDirectories = [...new Set([dirname(installedNodePath), dirname(installedExecutablePath), '/usr/bin', '/bin', '/usr/sbin', '/sbin'])];
   const launcher = [
     '#!/bin/sh',
-    `export PATH=${shellQuote(`${dirname(installedNodePath)}:${process.env.PATH ?? '/usr/bin:/bin'}`)}`,
+    `export PATH=${shellQuote(launcherPathDirectories.join(delimiter))}`,
     ...(provider === 'codex' && process.env.CODEX_HOME ? [`export CODEX_HOME=${shellQuote(process.env.CODEX_HOME)}`] : []),
     ...(provider === 'claude' && process.env.CLAUDE_CONFIG_DIR ? [`export CLAUDE_CONFIG_DIR=${shellQuote(process.env.CLAUDE_CONFIG_DIR)}`] : []),
     `exec ${shellQuote(installedNodePath)} ${shellQuote(scriptPath)} ${shellQuote(provider)} ${shellQuote(installedExecutablePath)} "$@"`, ''

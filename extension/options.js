@@ -151,6 +151,7 @@ const classification = document.querySelector('#classification-prompt');
 const prioritization = document.querySelector('#prioritization-prompt');
 const preferencesStatus = document.querySelector('#review-preferences-status');
 const kinds = document.querySelector('#change-types');
+const protectedPaths = document.querySelector('#protected-paths');
 for (const kind of changeKinds.filter(kind => kind !== 'unknown')) {
   const label = document.createElement('label');
   const input = document.createElement('input');
@@ -168,6 +169,7 @@ async function updateReviewPreferences(message) {
     const preferences = result.preferences;
     focus.value = preferences.focus;
     for (const input of kinds.querySelectorAll('input')) input.checked = preferences.alwaysShow.includes(input.value);
+    protectedPaths.value = preferences.protectedPaths.join('\n');
     classification.value = preferences.classificationPrompt || classificationPrompt;
     prioritization.value = preferences.prioritizationPrompt || prioritizationPrompt;
     preferencesStatus.dataset.error = 'false';
@@ -187,6 +189,7 @@ preferencesForm.addEventListener('submit', event => {
   void updateReviewPreferences({ type: 'save-review-preferences', preferences: {
     focus: focus.value,
     alwaysShow: [...kinds.querySelectorAll('input:checked')].map(input => input.value),
+    protectedPaths: protectedPaths.value.split('\n'),
     classificationPrompt: classification.value.trim() === classificationPrompt ? '' : classification.value,
     prioritizationPrompt: prioritization.value.trim() === prioritizationPrompt ? '' : prioritization.value
   } });

@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
-import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { readFile, writeFile, mkdtemp, rm, cp, symlink } from 'node:fs/promises';
+import { spawn, execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { installNativeHost } from './install-native-host.mjs';
 import { deferred } from './test-fixtures/github-deferred.mjs';
 import { changes } from './test-fixtures/github-changes.mjs';
 
 const baseSha = '998fb692680cc20d70a805df8fa59cb1443bc897';
 const headSha = '9ed10330f92962e92c6b121fd0cf6588268e89a8';
+const rangeBase = 'a'.repeat(40);
+const rangeHead = 'c'.repeat(40);
+const selectedRange = `${rangeBase}..${rangeHead}`;
+const rangeEntries = changes.entries.slice(0, 5).map(entry => ({ ...entry, oldCommitOid: rangeBase, newCommitOid: rangeHead }));
 const prUrl = 'https://github.com/microsoft/vscode/pull/200000';
 const sourcePath = 'src/vs/editor/contrib/suggest/browser/suggestWidgetRenderer.ts';
 const classic = await readFile(new URL('test-fixtures/github-classic.html', import.meta.url), 'utf8');
@@ -76,10 +81,11 @@ if (mode === 'analysis-failed') process.exit(1);
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 const schema = isClaude ? JSON.parse(args[args.indexOf('--json-schema')+1]) : JSON.parse(await readFile(args[args.indexOf('--output-schema') + 1], 'utf8'));
+if (mode === 'generated-final-failed' && !schema.required.includes('edits')) process.exit(1);
 const evidence = JSON.parse(input);
 let labels = ${JSON.stringify(classifications)};
 let review = ${JSON.stringify(assessment)};
-if (mode === 'parallel' || mode === 'generated-review' || mode === 'many-decisions') {
+if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-final-failed' || mode === 'many-decisions') {
   labels = evidence.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => ({editId:item.id,kinds:['behavior'],reason:'Synthetic change.',uncertainty:''}))));
   review = { summary:'Synthetic parallel review.', topics:[{...review.topics[0],id:'parallel-change',priority:'supporting',title:'Synthetic supporting changes',editIds:labels.map(entry=>entry.editId),excerpts:[]}] };
 }
@@ -139,12 +145,15 @@ function checkEvidence(requests) {
     assert.equal(evidence.baseSha, baseSha);
     assert.equal(evidence.files[0].path, sourcePath);
     assert.equal(evidence.context.length, 1);
-    assert.ok(evidence.description.startsWith(description));
-    assert.ok(evidence.description.includes('Linked issue #901: https://github.com/microsoft/vscode/issues/901\nTitle: Suggestion font parity'));
-    assert.ok(evidence.description.includes('The widget must match the editor when font variations change.'));
-    assert.equal(evidence.description.split('Linked issue #901:').length, 2);
-    assert.equal(evidence.description.length - evidence.description.indexOf('\n\nLinked issue #901:'), 4000);
-    assert.ok(!evidence.description.includes('NOT_INCLUDED_'));
+    if (schema.required.includes('edits')) assert.equal(evidence.description, undefined, 'Classification must not receive the PR description or linked issues.');
+    else {
+      assert.ok(evidence.description.startsWith(description));
+      assert.ok(evidence.description.includes('Linked issue #901: https://github.com/microsoft/vscode/issues/901\nTitle: Suggestion font parity'));
+      assert.ok(evidence.description.includes('The widget must match the editor when font variations change.'));
+      assert.equal(evidence.description.split('Linked issue #901:').length, 2);
+      assert.equal(evidence.description.length - evidence.description.indexOf('\n\nLinked issue #901:'), 4000);
+      assert.ok(!evidence.description.includes('NOT_INCLUDED_'));
+    }
     assert.ok(evidence.evidenceLimits.some(warning => warning.includes('limited to 3 of 4')));
     assert.ok(evidence.evidenceLimits.some(warning => warning.includes('#901') && warning.includes('truncated')));
     assert.ok(evidence.evidenceLimits.some(warning => warning.includes('Could not read linked issue #902')));
@@ -233,12 +242,23 @@ async function handleEvent(message) {
   let status = 200;
   const headers = [];
   if (url.origin === 'https://github.com') {
-    if (changesMode && url.pathname === changes.root + '/files') {
+    if (changesMode === 'classic-range' && [changes.root + '/files/' + selectedRange, changes.root + '/commits/' + rangeHead].includes(url.pathname)) {
+      body = fixture.replaceAll(baseSha, rangeBase).replaceAll(headSha, rangeHead).replace('class="Counter">1', 'class="Counter">53') + '<span class="js-file-type-count" data-all-file-count-markup="(1)">(1)</span>';
+    } else if (changesMode && url.pathname === changes.root + '/files') {
       status = 302;
       headers.push({ name: 'Location', value: `https://github.com${changes.root}/changes${url.search}` });
       body = '';
-    } else if (changesMode && url.pathname === changes.root + '/changes') {
+    } else if (changesMode && (url.pathname === changes.root + '/changes' || url.pathname === changes.root + '/changes/' + selectedRange)) {
       const route = structuredClone(changes.route);
+      if (url.pathname.endsWith('/' + selectedRange)) {
+        route.comparison.selectedRange = { baseOid: rangeBase, headOid: rangeHead };
+        route.comparison.viewing = 'RANGE';
+        route.diffSummaries = route.diffSummaries.slice(0, 5);
+        route.diffContents = structuredClone(rangeEntries.slice(0, 3));
+        route.diffContents[0].isTooBig = true;
+        route.diffContents[0].diffLines = [];
+        if (changesMode === 'range-wrong-revision') route.diffContents[1].oldCommitOid = baseSha;
+      }
       if (changesMode === 'parallel' || changesMode === 'generated-review' || changesMode === 'all-generated') {
         route.diffSummaries = route.diffSummaries.slice(0,3);
         route.diffContents = route.diffContents.slice(0,3);
@@ -256,10 +276,15 @@ async function handleEvent(message) {
         route.diffContents[0].newTreeEntry = { isGenerated: true };
         route.diffContents[0].diffLines = [];
       }
-      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions'].includes(changesMode));
+      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range'].includes(changesMode));
     } else if (changesMode && url.pathname === changes.root + '/page_data/diff_entries') {
       const paths = url.searchParams.get('paths').split(',').map(decodeURIComponent);
-      const entries = structuredClone(changes.entries.filter(entry => paths.includes(entry.path)));
+      const isRange = url.searchParams.get('range') === selectedRange;
+      const entries = structuredClone((isRange ? rangeEntries : changes.entries).filter(entry => paths.includes(entry.path)));
+      if (isRange && paths.includes(changes.paths[0])) {
+        entries[0].isTooBig = true;
+        entries[0].diffLines = [];
+      }
       if (changesMode.startsWith('generated') && paths.includes(changes.paths[0])) {
         entries[0].newTreeEntry = { isGenerated: true };
         entries[0].diffLines = [];
@@ -285,7 +310,7 @@ async function handleEvent(message) {
     } else if (changesMode && url.pathname === changes.root + '/page_data/diff_entry_lines') {
       const entry = changes.entries.find(file => file.path === url.searchParams.get('path'));
       contentType = 'application/json';
-      body = JSON.stringify({ diffEntryLines: ['generated', 'generated-review'].includes(changesMode) ? entry?.diffLines : changesMode === 'generated-incomplete' ? entry?.diffLines.slice(0, -1) : [] });
+      body = JSON.stringify({ diffEntryLines: url.searchParams.get('range') === selectedRange || ['generated', 'generated-review'].includes(changesMode) ? entry?.diffLines : changesMode === 'generated-incomplete' ? entry?.diffLines.slice(0, -1) : [] });
     } else if (deferredMode && deferred.pages.has(url.pathname + url.search)) {
       body = deferred.pages.get(url.pathname + url.search);
     } else if (url.pathname.endsWith('/files')) {
@@ -304,7 +329,7 @@ async function handleEvent(message) {
         headers.push({ name: 'Location', value: 'https://github.com/other/repo/issues/903' });
         body = '';
       } else { status = 404; body = '<main>Issue unavailable in this fixture.</main>'; }
-    } else if (url.pathname.includes(`/blob/${headSha}/`)) {
+    } else if (url.pathname.includes(`/blob/${headSha}/`) || url.pathname.includes(`/blob/${rangeHead}/`) || url.pathname.includes(`/blob/${rangeBase}/`)) {
       status = transientSourceFailure ? 503 : 200;
       body = transientSourceFailure ? 'Temporary error' : sourcePage;
     }
@@ -326,6 +351,13 @@ async function waitFor(check, label) {
 }
 
 try {
+  const spacedCheckout = join(profile, 'checkout with spaces');
+  await cp(new URL('extension/', import.meta.url), join(spacedCheckout, 'extension'), { recursive: true });
+  await cp(new URL('build-extension.mjs', import.meta.url), join(spacedCheckout, 'build-extension.mjs'));
+  await symlink(fileURLToPath(new URL('node_modules/', import.meta.url)), join(spacedCheckout, 'node_modules'));
+  await rm(join(spacedCheckout, 'extension', 'background.bundle.js'));
+  await promisify(execFile)(process.execPath, ['build-extension.mjs'], { cwd: spacedCheckout });
+  assert.ok((await readFile(join(spacedCheckout, 'extension', 'background.bundle.js'), 'utf8')).length > 0, 'A checkout path containing spaces must produce the extension bundle.');
   await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: 'service_worker' }, { exclude: true }] });
   ({ id: extensionId } = await send('Extensions.loadUnpacked', { path: fileURLToPath(new URL('extension/', import.meta.url)) }));
   assert.equal(extensionId, 'bjmajanmepopjciklnijlfbdpafokfpe');
@@ -658,12 +690,45 @@ try {
   await writeFile('/tmp/review-focus-extension-dark.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
   await evaluate("document.querySelector('#fixture-dark-theme').remove()");
   console.log(`Compact review overview: ${initialLayout.height}px; explanations are visible beside the native diff.`);
+  assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-view-toggle button')].map(button=>button.textContent)`), ['Full diff', 'Explained', 'Folded']);
+  const requestsBeforeViews = (await modelRequests()).length;
+  await click('Explained');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'Explained must keep the full diff expanded.');
+  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-change-explanation').textContent`), assessment.topics[0].after);
+  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-reason').textContent`), assessment.topics[0].reason);
+  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-file-decisions').checkVisibility()`), true);
+  await writeFile('/tmp/priorities-explained.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+  await evaluate(`window.viewEvidence = ${fileShadow}.querySelector('.rf-evidence'); window.viewEvidence.open = true;`);
+  await click('Folded');
+  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-evidence') === window.viewEvidence && window.viewEvidence.open`), true, 'Explained and Folded share the same explanations and preserve expanded details.');
+  await evaluate('window.viewEvidence.open = false');
   await click('Full diff');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0);
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-result').checkVisibility()`), false);
   assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-file-decisions')`), null, 'Full diff removes the review explanations beside files.');
-  await click('Focused review');
+  await click('Folded');
   assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length > 10'));
+  await evaluate(`${shadow}.querySelector('.rf-view-toggle [aria-pressed=true]').focus()`);
+  for (const [key, code, view] of [['ArrowLeft',37,'Explained'], ['Home',36,'Full diff'], ['End',35,'Folded'], ['ArrowRight',39,'Full diff'], ['ArrowLeft',37,'Folded']]) {
+    await page('Input.dispatchKeyEvent', {type:'keyDown',key,windowsVirtualKeyCode:code});
+    await page('Input.dispatchKeyEvent', {type:'keyUp',key,windowsVirtualKeyCode:code});
+    assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-view-toggle button')].filter(button=>button.getAttribute('aria-pressed')==='true').map(button=>[button.textContent,button.tabIndex,button===${shadow}.activeElement])`), [[view,0,true]], 'Keyboard view selection must keep exactly one selected and focused control.');
+  }
+  assert.equal((await modelRequests()).length, requestsBeforeViews, 'Switching between all three views must reuse the same analysis.');
+  await evaluate(`(() => {
+    window.commentedLine = document.querySelectorAll('.review-focus-native-hidden')[3];
+    window.classicThread = document.createElement('tr');
+    window.classicThread.className = 'inline-comments';
+    window.classicThread.innerHTML = '<td colspan="3"><div class="review-thread-component">Check the behavior on this line.</div></td>';
+    window.commentedLine.after(window.classicThread);
+  })()`);
+  await waitFor(() => evaluate('!window.commentedLine.classList.contains("review-focus-native-hidden")'), 'classic comment keeps its preceding code line visible');
+  assert.equal(await evaluate('window.classicThread.checkVisibility() && window.commentedLine.checkVisibility()'), true);
+  await click('Explained');
+  await click('Folded');
+  assert.equal(await evaluate('!window.commentedLine.classList.contains("review-focus-native-hidden")'), true, 'Switching views must preserve the code attached to a sibling review thread.');
+  await evaluate('window.classicThread.remove()');
+  await waitFor(() => evaluate('window.commentedLine.classList.contains("review-focus-native-hidden")'), 'removed comment allows the supporting code to fold again');
 
   const humanReviewInputs = `[...${shadow}.querySelectorAll('.rf-reviewed-toggle input')]`;
   assert.equal(await evaluate(`${fileShadow}.querySelector('input[type=checkbox]')`), null, 'The diff panel must not duplicate GitHub’s Viewed checkbox.');
@@ -852,6 +917,8 @@ try {
   incomplete = false;
   modernMode = true;
   const moduleUrl = `chrome-extension://${extensionId}/github.js`;
+  await page('Page.reload');
+  await waitFor(() => evaluate(`import(${JSON.stringify(moduleUrl)}).then(module => module.readPageIdentity()?.headSha === 'c28cc8e5271452b5b4c347d46a63f717c29417d6')`), 'React capture fixture displayed');
   const modern = await evaluate(`(async()=>{
     const module=await import(${JSON.stringify(moduleUrl)});
     const doc=new DOMParser().parseFromString(${JSON.stringify(react)},'text/html');
@@ -886,7 +953,16 @@ try {
       if (!discussionRow.classList.contains('review-focus-native-hidden')) throw new Error('Removing discussion must allow the supporting row to fold again.');
     }
     folding.restore();
-    return {files:files.map(file=>({path:file.path,rows:file.rows.map(({oldLine,newLine,type,text})=>({oldLine,newLine,type,text}))})), snapshot, folded, repaired, restored:doc.querySelectorAll('.review-focus-native-hidden, .review-focus-native-fold').length};
+    const classifications=editIds.map(editId=>({editId,kinds:['behavior'],reason:'Fixture label.',uncertainty:''}));
+    const reviewFolding=createNativeFolding(doc,snapshot,{topics:[{priority:'review',title:'Fixture decision',editIds,excerpts:[]}],classifications});
+    const reviewFolded=reviewFolding.apply();
+    const reviewLabels=[...doc.querySelectorAll('.review-focus-native-reason')].map(label=>label.textContent);
+    reviewFolding.restore();
+    const protectedFolding=createNativeFolding(doc,snapshot,{topics:[{priority:'supporting',title:'Fixture changes',editIds,excerpts:[]}],classifications},()=>{},new Set(),[],['.github/workflows/']);
+    const protectedFolded=protectedFolding.apply();
+    const workflowHidden=files[0].rows.some(row=>row.element.classList.contains('review-focus-native-hidden'));
+    protectedFolding.restore();
+    return {files:files.map(file=>({path:file.path,rows:file.rows.map(({oldLine,newLine,type,text})=>({oldLine,newLine,type,text}))})), snapshot, folded, repaired, reviewFolded, reviewLabels, protectedFolded, workflowHidden, restored:doc.querySelectorAll('.review-focus-native-hidden, .review-focus-native-fold').length};
   })()`);
   assert.deepEqual(modern.files.map(file => file.path), ['.github/workflows/wait-for-checks.yml', '5854', 'play with this file, not readme']);
   assert.deepEqual(modern.files.map(file => file.rows.length), [5, 2, 2]);
@@ -899,8 +975,15 @@ try {
   assert.equal(modern.snapshot.headSha, 'c28cc8e5271452b5b4c347d46a63f717c29417d6');
   assert.deepEqual(modern.folded, { hidden: 9, hiddenChanges: 4, matched: 9, unmatched: 0, groups: 3 });
   assert.deepEqual(modern.repaired, modern.folded);
+  assert.equal(modern.reviewFolded.hiddenChanges, 0, 'Changed lines of a review decision must stay visible even outside its excerpts.');
+  assert.ok(modern.reviewLabels.every(label => /^\d+ context lines$/.test(label)), 'Only unchanged context may fold around a review decision.');
+  assert.equal(modern.workflowHidden, false, 'A protected path must never fold.');
+  assert.deepEqual([modern.protectedFolded.hidden, modern.protectedFolded.groups], [4, 2], 'Unprotected files still fold.');
   assert.equal(modern.restored, 0);
   assert.equal((await modelRequests()).length, afterUnresolved, 'Collecting issue context must not trigger additional model requests.');
+  modernMode = false;
+  await page('Page.reload');
+  await waitFor(() => evaluate(`import(${JSON.stringify(moduleUrl)}).then(module => module.readPageIdentity()?.headSha === ${JSON.stringify(headSha)})`), 'classic capture revision restored');
 
   const captureFixture = () => evaluate(`(async()=>{
     const module=await import(${JSON.stringify(moduleUrl)});
@@ -1018,11 +1101,11 @@ try {
     assert.equal(headers.get('x-fetch-nonce'), changes.fetchNonce);
     assert.equal(headers.get('x-github-client-version'), changes.release);
   }
-  assert.ok(changesRequests.some(request => new URL(request.url).pathname.endsWith('/files')));
-  for (const request of changesRequests.filter(request => new URL(request.url).pathname.endsWith('/files'))) {
+  const comparisonRequests = changesRequests.filter(request => new URL(request.url).pathname.endsWith('/changes'));
+  assert.equal(comparisonRequests.length, 2, 'Capture and its final revision check must fetch the displayed comparison route.');
+  for (const request of comparisonRequests) {
     assert.equal(new URL(request.url).searchParams.get('w'), '0', 'Capture must explicitly include whitespace changes.');
   }
-  assert.ok(changesRequests.some(request => new URL(request.url).pathname.endsWith('/changes')), 'The files URL redirects to the current Changes route even when unified view is requested.');
 
   changesMode = 'deferred-large';
   changesRequests.length = 0;
@@ -1112,7 +1195,16 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'restore excluded-file controls');
   assert.equal((await modelRequests()).length, beforeGenerated + defaultRequests.length);
   const beforeOptIn = (await modelRequests()).length;
+  await writeFile(modeFile, 'generated-final-failed');
   await evaluate('[...document.querySelector(".review-focus-file-status[data-state=excluded]").shadowRoot.querySelectorAll("button")].find(button=>button.textContent==="Review anyway").click()');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'Opting in a file must immediately restore folds from the previous assessment.');
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').textContent.length > 0 && !${shadow}.querySelector('.rf-analyze').disabled`), 'opt-in PR review failure');
+  await click('Explained');
+  await click('Folded');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'A failed replacement assessment must not reapply stale folding when the view changes.');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-result').checkVisibility()`), false, 'The failed replacement must not present the old summary as current.');
+  await writeFile(modeFile, 'generated-review');
+  await click('Retry review decisions');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && !${shadow}?.querySelector('.rf-generated-notice') && document.querySelectorAll('.review-focus-file-progress[data-state=complete]').length === 3 && !${shadow}?.querySelector('.rf-analyze')?.disabled`), 'forced generated file followed by an updated PR review');
   const forcedRequests = (await modelRequests()).slice(beforeOptIn);
   assert.equal(forcedRequests.length, 2, 'Opt-in runs only the chosen file’s classification and a new PR review.');
@@ -1712,6 +1804,7 @@ try {
   await page('Page.reload');
   await waitFor(() => evaluate('!document.querySelector("#save-review-preferences").disabled && document.querySelector("#review-focus").value === "thorough"'), 'review preferences survive reload');
   assert.equal(await evaluate('document.querySelector("#classification-prompt").value'), 'Classify every supplied edit. Explain missing evidence.');
+  assert.match(await evaluate('document.querySelector("#protected-paths").value'), /^package\.json\ngo\.mod\n[\s\S]*\nmigrations\/$/, 'Saving other preferences must keep the default protected paths.');
   await evaluate('document.querySelector(".prompt-settings").open=true; document.querySelector("#review-preferences-form").scrollIntoView({block:"start"})');
   await writeFile('/tmp/priorities-review-preferences.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
   const beforeCustomReview = (await modelRequests()).length;
@@ -1751,6 +1844,79 @@ try {
   assert.equal(await evaluate('document.querySelector("#model").value'), '__custom__');
   assert.equal(await evaluate('document.querySelector("#custom-model").value'), 'claude-specific-older-release');
   assert.equal(await evaluate('document.querySelector("#effort").value'), 'high');
+  const beforeRange = (await modelRequests()).length;
+  changesMode = 'classic-range';
+  await page('Page.navigate', { url: prUrl + '/files/' + selectedRange });
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze range' && !${shadow}.querySelector('.rf-analyze').disabled`), 'classic commit range ready');
+  const classicRange = await captureFixture();
+  assert.equal(classicRange.snapshot.baseSha, rangeBase);
+  assert.equal(classicRange.snapshot.headSha, rangeHead);
+  assert.equal(classicRange.snapshot.files.length, 1, 'Classic capture uses the selected comparison’s file inventory, not the full PR tab count.');
+  const rangeSourceRequests = changesRequests.map(request => request.url).filter(url => url.includes('/blob/'));
+  assert.ok(rangeSourceRequests.some(url => url.includes(`/blob/${rangeBase}/`)) && rangeSourceRequests.some(url => url.includes(`/blob/${rangeHead}/`)), 'Before and after source must use the selected commits.');
+  await page('Page.navigate', { url: prUrl + '/commits/' + rangeHead });
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze range' && !${shadow}.querySelector('.rf-analyze').disabled`), 'classic single-commit diff ready');
+  assert.deepEqual((await captureFixture()).snapshot.files, classicRange.snapshot.files);
+  changesMode = 'commit-range';
+  const rangeUrl = prUrl + '/changes/' + selectedRange;
+  await page('Page.navigate', { url: rangeUrl });
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze range' && !${shadow}.querySelector('.rf-analyze').disabled`), 'modern commit range ready');
+  changesRequests.length = 0;
+  const capturedRange = await captureFixture();
+  assert.equal(capturedRange.snapshot.baseSha, rangeBase);
+  assert.equal(capturedRange.snapshot.headSha, rangeHead);
+  assert.deepEqual(capturedRange.snapshot.files.map(file => file.path), changes.paths.slice(0, 5));
+  const rangeFetches = changesRequests.filter(request => request.url.includes('/page_data/')).map(request => new URL(request.url));
+  assert.ok(rangeFetches.some(url => url.pathname.endsWith('/diff_entries')) && rangeFetches.some(url => url.pathname.endsWith('/diff_entry_lines')));
+  assert.ok(rangeFetches.every(url => url.searchParams.get('range') === selectedRange), 'Every deferred file and Load diff request must retain the selected base and head.');
+  changesMode = 'range-wrong-revision';
+  assert.match((await captureFixture()).error, /changed while reading its diffs/, 'A full-PR file returned for a range must be rejected.');
+  changesMode = 'commit-range';
+  const changedDuringCapture = await evaluate(`(async () => {
+    const { capturePullRequest } = await import(${JSON.stringify(moduleUrl)});
+    const originalFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      if (args[0] === ${JSON.stringify(prUrl)}) history.replaceState(null, '', ${JSON.stringify(prUrl + '/changes')});
+      return response;
+    };
+    try { await capturePullRequest(); return ''; }
+    catch (error) { return error.message; }
+    finally { window.fetch = originalFetch; history.replaceState(null, '', ${JSON.stringify(rangeUrl)}); }
+  })()`);
+  assert.match(changedDuringCapture, /comparison changed while reading/);
+  assert.equal((await modelRequests()).length, beforeRange, 'Range capture and rejected comparisons must not start model calls.');
+  await writeFile(modeFile, 'many-decisions');
+  await writeFile(uxGate, 'waiting');
+  await click('Analyze range');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-file-progress-row[data-state=classified]') && ${shadow}.querySelector('.rf-file-progress-row[data-state=classifying]')`), 'range analysis stays active after its first file');
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-file-progress-row').length`), 5);
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-run-settings').textContent.includes('Range: aaaaaaaa…cccccccc')`));
+  const classifiedBeforeRangeReload = (await modelRequests()).length;
+  await page('Page.navigate', { url: prUrl + '/checks' });
+  await waitFor(() => evaluate('document.querySelector("h1")?.textContent === "Checks"'), 'Checks while a range is analyzing');
+  await page('Page.navigate', { url: rangeUrl });
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-file-progress-row[data-state=classified]') && ${shadow}.querySelector('.rf-file-progress-row[data-state=classifying]')`), 'range analysis reconnects after Checks');
+  await page('Page.reload');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-file-progress-row[data-state=classified]') && ${shadow}.querySelector('.rf-file-progress-row[data-state=classifying]')`), 'range analysis reconnects after reload');
+  assert.equal((await modelRequests()).length, classifiedBeforeRangeReload, 'Resuming a range must reuse completed classifications.');
+  await writeFile(uxGate, 'finish');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title') && !${shadow}.querySelector('.rf-analyze').disabled`), 'range review finishes');
+  const rangeRequests = (await modelRequests()).slice(beforeRange);
+  assert.equal(rangeRequests.length, 6);
+  assert.ok(rangeRequests.every(request => request.evidence.baseSha === rangeBase && request.evidence.headSha === rangeHead && request.evidence.files.every(file => changes.paths.slice(0, 5).includes(file.path))), 'All classifications and the final check must use only the selected comparison.');
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-provenance').textContent.includes('aaaaaaaa…cccccccc')`));
+  await page('Page.reload');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved range review available');
+  await click('Open saved review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'saved range review restored');
+  assert.equal((await modelRequests()).length, beforeRange + 6);
+  await page('Page.navigate', { url: prUrl + '/changes' });
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !${shadow}.querySelector('.rf-analyze').disabled`), 'range result is not offered as a full PR review');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'), 0, 'Range decisions must not fold the full PR.');
+  assert.equal((await modelRequests()).length, beforeRange + 6);
+  await evaluate(`history.replaceState(null, '', '/changes/files/pull/200000/changes'); window.dispatchEvent(new PopStateEvent('popstate'));`);
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !${shadow}.querySelector('.rf-analyze').disabled && !${shadow}.querySelector('.rf-run-settings').textContent.includes('Range:')`), 'repository names must not be mistaken for a selected range');
   assert.ok(workers.length > 0);
   assert.deepEqual(eventErrors, []);
   assert.deepEqual(exceptions, []);

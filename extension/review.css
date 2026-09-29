@@ -28,7 +28,8 @@
 .rf-view-toggle { display: inline-flex; }
 .rf-view-toggle .rf-button { border-radius: 0; }
 .rf-view-toggle .rf-button:first-child { border-radius: 5px 0 0 5px; }
-.rf-view-toggle .rf-button:last-child { border-radius: 0 5px 5px 0; margin-left: -1px; }
+.rf-view-toggle .rf-button + .rf-button { margin-left: -1px; }
+.rf-view-toggle .rf-button:last-child { border-radius: 0 5px 5px 0; }
 .rf-button.rf-progress-toggle { color: var(--rf-muted); background: transparent; border-color: transparent; font-size: 12px; font-weight: 400; white-space: normal; text-align: left; }
 .rf-progress-toggle::after { content: "⌄"; padding-left: 6px; }
 .rf-progress-toggle[aria-expanded="true"]::after { content: "⌃"; }
