@@ -40,6 +40,7 @@
         <details>
           <summary>How reviews run</summary>
           <p>Up to three files are reviewed at once, then related changes are checked together. Generated files stay out of analysis until you choose Review anyway.</p>
+          <p>Files are classified from code alone; the PR description and linked issues are used only when choosing review decisions.</p>
           <p>Your login stays with the CLI. No API key or local repository checkout is needed.</p>
         </details>
       </div>
@@ -63,8 +64,11 @@
       <fieldset id="always-show" disabled>
         <legend>Always keep these change types visible</legend>
         <div id="change-types"></div>
-        <p class="hint">Applies to analyzed files. Unresolved edits and discussion rows always stay visible. Generated files still require Review anyway.</p>
+        <p class="hint">Applies to analyzed files. Unresolved edits, changed lines in review decisions, and discussion rows always stay visible. Generated files still require Review anyway.</p>
       </fieldset>
+      <label for="protected-paths">Always keep these files visible</label>
+      <textarea id="protected-paths" rows="6" spellcheck="false" aria-describedby="protected-paths-help" disabled></textarea>
+      <p id="protected-paths-help" class="hint">One path per line, matched at any depth. End a line with / to cover a whole folder. These files never fold, whatever the AI decides.</p>
       <details class="prompt-settings">
         <summary>Advanced: edit analysis prompts</summary>
         <p class="hint">Replace the instructions for each pass. Source handling, output validation, and your always-visible choices remain enforced.</p>

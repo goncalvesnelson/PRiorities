@@ -40,9 +40,10 @@ a:hover { text-decoration: underline; }
 #change-types { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 #change-types label { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 400; }
 #change-types input { width: auto; margin: 0; }
+.prompt-settings { margin-top: 20px; }
 .prompt-settings summary { cursor: pointer; }
 .prompt-settings label { margin-top: 20px; }
-.prompt-settings textarea { resize: vertical; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
+.prompt-settings textarea, #protected-paths { resize: vertical; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
 .prompt-settings button { margin-top: 8px; }
 #review-preferences-status { font-size: 13px; min-height: 1.6em; }
 #review-preferences-status[data-error="true"] { color: #a23137; }

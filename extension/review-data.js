@@ -99,18 +99,36 @@ export function validateSnapshot(input) {
   return input;
 }
 
+function capturedSide(snapshot, file, side) {
+  const key = side === 'before' ? 'oldLine' : 'newLine';
+  const rows = file.hunks.flatMap(hunk => hunk.items.flatMap(item => item.type === 'edit' ? item.rows : [item])).filter(row => row[key] !== null);
+  const lines = snapshot.context.find(source => source.path === file.path && source.side === side)?.text.split('\n') ?? [];
+  const lineCount = lines.length - (lines.at(-1) === '' ? 1 : 0);
+  return { key, rows, lines, lineCount };
+}
+
+function citableRanges(snapshot, file, side) {
+  const { key, rows, lineCount } = capturedSide(snapshot, file, side);
+  const ranges = rows.map(row => [row[key], row[key]]);
+  if (lineCount > 0) ranges.push([1, lineCount]);
+  const merged = [];
+  for (const [start, end] of ranges.sort((a, b) => a[0] - b[0])) {
+    const last = merged.at(-1);
+    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
 export function sourceRows(snapshot, excerpt) {
   const file = snapshot.files.find(file => file.path === excerpt.path);
   if (!file) throw new Error(`The assessment references an unknown file: ${excerpt.path}`);
-  const key = excerpt.side === 'before' ? 'oldLine' : 'newLine';
-  const rows = file.hunks.flatMap(hunk => hunk.items.flatMap(item => item.type === 'edit' ? item.rows : [item]));
-  const source = snapshot.context.find(source => source.path === excerpt.path && source.side === excerpt.side);
-  const lines = source?.text.split('\n');
+  const { key, rows, lines, lineCount } = capturedSide(snapshot, file, excerpt.side);
   const result = [];
   for (let line = excerpt.startLine; line <= excerpt.endLine; line++) {
     const row = rows.find(row => row[key] === line);
     if (row) result.push({ ...row });
-    else if (lines && line <= lines.length - (lines.at(-1) === '' ? 1 : 0)) result.push({ type: 'context', text: lines[line - 1], oldLine: excerpt.side === 'before' ? line : null, newLine: excerpt.side === 'after' ? line : null });
+    else if (line <= lineCount) result.push({ type: 'context', text: lines[line - 1], oldLine: excerpt.side === 'before' ? line : null, newLine: excerpt.side === 'after' ? line : null });
     else throw new Error(`The assessment cites source that was not read: ${excerpt.path}:${line}`);
   }
   return result;
@@ -183,7 +201,7 @@ function promptEvidence(snapshot) {
 }
 
 export function makeClassificationPrompt(snapshot, changedPaths = [], preferences = defaultReviewPreferences()) {
-  const evidence = promptEvidence(snapshot);
+  const { title, description, ...evidence } = promptEvidence(snapshot);
   const system = `${preferences.classificationPrompt || classificationPrompt}\n\n${evidenceRules}`;
   return { system, user: JSON.stringify({ ...evidence, ...(changedPaths.length ? { changedPaths } : {}) }) };
 }
@@ -191,6 +209,7 @@ export function makeClassificationPrompt(snapshot, changedPaths = [], preference
 export function makePrompt(snapshot, classifications, preferences = defaultReviewPreferences()) {
   const evidence = promptEvidence(snapshot);
   const inventory = validateClassifications({ edits: classifications }, snapshot);
-  const system = `${preferences.prioritizationPrompt || prioritizationPrompt}\n\n${focusInstructions[preferences.focus]}\n${preferences.alwaysShow.length ? `The user requires edits classified as ${preferences.alwaysShow.join(', ')} to remain visible. Explain these changes and their significance without inventing risks.` : ''}\n${evidenceRules}\nSelect decisions and source by consequence and evidence, without a target number of topics, excerpts, or lines. Do not suppress consequential changes to meet a size target or add lower-priority code to fill space. Show the source needed to assess each decision and preserve consequential uncertainty. Defer changes only for a source-grounded reason.`;
-  return { system, user: JSON.stringify({ ...evidence, classifications: inventory }) };
+  const system = `${preferences.prioritizationPrompt || prioritizationPrompt}\n\n${focusInstructions[preferences.focus]}\n${preferences.alwaysShow.length ? `The user requires edits classified as ${preferences.alwaysShow.join(', ')} to remain visible. Explain these changes and their significance without inventing risks.` : ''}\n${evidenceRules}\nSelect decisions and source by consequence and evidence, without a target number of topics, excerpts, or lines. Do not suppress consequential changes to meet a size target or add lower-priority code to fill space. Show the source needed to assess each decision and preserve consequential uncertainty. Defer changes only for a source-grounded reason.\ncitableLines lists, for each path and side, the inclusive [start, end] line ranges that were captured. Every excerpt must lie entirely within one of those ranges for its path and side. Other lines were not captured and cannot be cited; record them as missing evidence instead.`;
+  const citableLines = Object.fromEntries(snapshot.files.map(file => [file.path, { before: citableRanges(snapshot, file, 'before'), after: citableRanges(snapshot, file, 'after') }]));
+  return { system, user: JSON.stringify({ ...evidence, citableLines, classifications: inventory }) };
 }

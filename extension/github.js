@@ -50,6 +50,11 @@ function changesRoute(doc) {
 export function readPageIdentity(doc = document, href = location.href) {
   const identity = pullRequestLocation(href);
   if (!identity) return null;
+  const comparison = changesRoute(doc)?.comparison;
+  if (comparison) {
+    const selected = comparison.selectedRange ?? (comparison.viewing === 'FULL' ? comparison.fullDiff : null);
+    return { ...identity, baseSha: shaPattern.test(selected?.baseOid) ? selected.baseOid : null, headSha: shaPattern.test(selected?.headOid) ? selected.headOid : null };
+  }
   for (const element of doc.querySelectorAll('[data-url]')) {
     const url = new URL(element.getAttribute('data-url'), identity.url);
     if (url.origin !== 'https://github.com' || !url.pathname.startsWith(`/${identity.owner}/${identity.repo}/`)) continue;
@@ -161,6 +166,11 @@ function fileDiff(file) {
 }
 
 function expectedFileCount(doc) {
+  const types = [...doc.querySelectorAll('.js-file-type-count[data-all-file-count-markup]')];
+  if (types.length) {
+    const counts = types.map(type => Number(/^\(([\d,]+)\)$/.exec(type.getAttribute('data-all-file-count-markup'))?.[1].replace(/,/g, '')));
+    if (counts.every(count => Number.isSafeInteger(count) && count >= 0)) return counts.reduce((sum, count) => sum + count, 0);
+  }
   const count = doc.querySelector('#files_tab_counter, [data-tab-item="files-tab"] .Counter, a[href$="/files"] .Counter, a[href$="/changes"] .Counter');
   const value = Number(count?.textContent.replace(/,/g, '').trim());
   return Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -240,15 +250,17 @@ async function fetchChangeData(doc, identity, endpoint, params, signal) {
   try { return JSON.parse(text); } catch { throw new Error('GitHub returned unreadable diff data. No analysis was sent.'); }
 }
 
-function fetchChangeEntries(doc, identity, paths, signal) {
-  const params = new URLSearchParams({ paths: paths.map(encodeURIComponent).join(','), w: '0', range: identity.headSha });
+function fetchChangeEntries(doc, identity, range, paths, signal) {
+  const params = new URLSearchParams({ paths: paths.map(encodeURIComponent).join(','), w: '0', range });
   return fetchChangeData(doc, identity, 'diff_entries', params, signal);
 }
 
 async function loadChanges(doc, route, identity, signal, onProgress) {
   const { diffSummaries, diffContents, comparison, pageLimits } = route;
   if (!Array.isArray(diffSummaries) || !diffSummaries.length || diffSummaries.length > 100 || !Array.isArray(diffContents)) throw new Error('Expected a complete inventory of 1–100 changed files. No analysis was sent.');
-  if (comparison?.viewing !== 'FULL' || comparison.fullDiff?.baseOid !== identity.baseSha || comparison.fullDiff?.headOid !== identity.headSha || pageLimits?.filesLimitExceeded || pageLimits?.linesChangedLimitExceeded) throw new Error('GitHub supplied a partial comparison. Open the full PR with whitespace changes shown and retry.');
+  const selected = comparison?.selectedRange ?? (comparison?.viewing === 'FULL' ? comparison.fullDiff : null);
+  if (selected?.baseOid !== identity.baseSha || selected?.headOid !== identity.headSha || pageLimits?.filesLimitExceeded || pageLimits?.linesChangedLimitExceeded) throw new Error('GitHub supplied an incomplete comparison. Load the selected diff with whitespace changes shown and retry.');
+  const range = identity.baseSha === comparison.fullDiff?.baseOid ? identity.headSha : `${identity.baseSha}..${identity.headSha}`;
   const summaries = new Map();
   for (const summary of diffSummaries) {
     if (!summary || typeof summary.path !== 'string' || summaries.has(summary.path) || ![summary.linesAdded, summary.linesDeleted, summary.linesChanged].every(count => Number.isSafeInteger(count) && count >= 0) || summary.linesChanged !== summary.linesAdded + summary.linesDeleted) throw new Error('GitHub returned an invalid or duplicate file inventory. No analysis was sent.');
@@ -270,18 +282,18 @@ async function loadChanges(doc, route, identity, signal, onProgress) {
   onProgress(`Reading all ${summaries.size} changed files…`);
   for (let offset = 0; offset < missing.length; offset += 4) {
     const paths = missing.slice(offset, offset + 4);
-    addEntries(await fetchChangeEntries(doc, identity, paths, signal), paths);
+    addEntries(await fetchChangeEntries(doc, identity, range, paths, signal), paths);
     onProgress(`Reading changed files: ${entries.size} of ${summaries.size}…`);
   }
   for (const entry of [...entries.values()].filter(needsDiffText)) {
     onProgress(`Loading deferred diff for ${entry.path}…`);
     const paths = [entry.path];
-    const batch = await fetchChangeEntries(doc, identity, paths, signal);
+    const batch = await fetchChangeEntries(doc, identity, range, paths, signal);
     entries.delete(entry.path);
     addEntries(batch, paths);
     const loaded = entries.get(entry.path);
     if (!needsDiffText(loaded)) continue;
-    const params = new URLSearchParams({ path: entry.path, w: '0', range: identity.headSha });
+    const params = new URLSearchParams({ path: entry.path, w: '0', range });
     const data = await fetchChangeData(doc, identity, 'diff_entry_lines', params, signal);
     if (!Array.isArray(data?.diffEntryLines) || !data.diffEntryLines.length) throw new Error(`GitHub has not supplied the full text diff for ${entry.path}. Load it and retry.`);
     entries.set(entry.path, { ...loaded, diffLines: data.diffEntryLines, isTooBig: false, truncatedReason: null });
@@ -375,13 +387,16 @@ async function linkedIssueContext(body, identity, warnings, signal) {
 }
 
 export async function capturePullRequest({ onProgress = () => {}, signal } = {}) {
-  const initial = pullRequestLocation(location.href);
+  const initial = readPageIdentity(document, location.href);
   if (!initial) throw new Error('Open a GitHub pull request first.');
-  const filesUrl = initial.url + '/files?diff=unified&w=0';
-  onProgress('Reading the complete pull request…');
+  const pathname = location.pathname;
+  if (!/^\/[^/]+\/[^/]+\/pull\/\d+\/(?:(?:files|changes)(?:\/|$)|commits\/[a-f0-9]{40}(?:\/|$))/.test(pathname)) throw new Error('Open the pull request’s Files changed tab first.');
+  const filesUrl = `${location.origin}${pathname}?diff=unified&w=0`;
+  onProgress('Reading the complete selected diff…');
   const doc = await fetchDocument(filesUrl, signal);
-  const identity = readPageIdentity(doc, initial.url);
+  const identity = readPageIdentity(doc, filesUrl);
   if (!identity?.baseSha || !identity.headSha) throw new Error('GitHub did not identify the commits in this diff. Refresh Files changed and retry.');
+  if (initial.baseSha && initial.baseSha !== identity.baseSha || initial.headSha && initial.headSha !== identity.headSha) throw new Error('The comparison changed while reading its diffs. Analyze again to review the selected commits.');
   const { files, warnings } = await loadFiles(doc, identity, signal, onProgress);
   const title = doc.querySelector('.js-issue-title, [data-testid="issue-title"]')?.textContent.trim() ?? doc.title.replace(/ · Pull Request.*$/, '');
   onProgress(`Reading context for ${files.length} changed files…`);
@@ -420,7 +435,7 @@ export async function capturePullRequest({ onProgress = () => {}, signal } = {})
   }
   if (runtime.length > 6) warnings.push(`Full source was collected for 6 of ${runtime.length} runtime files. Other files are represented by their complete diff.`);
   onProgress('Checking that the PR has not changed…');
-  const latest = readPageIdentity(await fetchDocument(filesUrl, signal), initial.url);
-  if (latest?.headSha !== identity.headSha || latest?.baseSha !== identity.baseSha || pullRequestLocation(location.href)?.url !== initial.url) throw new Error('The pull request changed while reading it. Analyze again to review the latest version.');
+  const latest = readPageIdentity(await fetchDocument(filesUrl, signal), filesUrl);
+  if (latest?.headSha !== identity.headSha || latest?.baseSha !== identity.baseSha || location.pathname !== pathname) throw new Error('The comparison changed while reading it. Analyze again to review the selected commits.');
   return validateSnapshot({ url: initial.url, title, description, baseSha: identity.baseSha, headSha: identity.headSha, files, context, warnings });
 }

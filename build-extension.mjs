@@ -1,11 +1,12 @@
 import { build } from 'esbuild';
 import { readFile, access } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 
 const root = new URL('./extension/', import.meta.url);
 const manifest = JSON.parse(await readFile(new URL('manifest.json', root), 'utf8'));
 await build({
-  entryPoints: [new URL('background.js', root).pathname],
-  outfile: new URL('background.bundle.js', root).pathname,
+  entryPoints: [fileURLToPath(new URL('background.js', root))],
+  outfile: fileURLToPath(new URL('background.bundle.js', root)),
   bundle: true,
   format: 'esm',
   platform: 'browser',

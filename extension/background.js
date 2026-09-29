@@ -48,7 +48,7 @@ function validEffort(effort) {
 async function readReviewPreferences() {
   await storageReady;
   const stored = await chrome.storage.local.get('reviewPreferences');
-  return stored.reviewPreferences === undefined ? defaultReviewPreferences() : validateReviewPreferences(stored.reviewPreferences);
+  return stored.reviewPreferences === undefined ? defaultReviewPreferences() : validateReviewPreferences({ ...defaultReviewPreferences(), ...stored.reviewPreferences });
 }
 
 async function connectionStatus(provider, refreshConnection) {

@@ -1,5 +1,6 @@
 import { capturePullRequest, findNativeFiles, readPageIdentity } from './github.js';
 import { isGeneratedFile } from './review-data.js';
+import { isProtectedPath } from './review-preferences.js';
 
 const hiddenClass = 'review-focus-native-hidden';
 const ownedAttribute = 'data-review-focus-owned';
@@ -25,7 +26,7 @@ function disclosure(label, className = '') {
 }
 
 function isDiffPage() {
-  return /^\/[^/]+\/[^/]+\/pull\/\d+\/(?:files|changes)(?:\/|$)/.test(location.pathname);
+  return /^\/[^/]+\/[^/]+\/pull\/\d+\/(?:(?:files|changes)(?:\/|$)|commits\/[a-f0-9]{40}(?:\/|$))/.test(location.pathname);
 }
 
 function rowKey(row) {
@@ -42,19 +43,21 @@ function rowSelected(row, excerpts) {
 function topicLabel(topics) {
   const unique = [...new Set(topics.filter(Boolean))];
   if (!unique.length) return 'Surrounding context';
-  const prefix = unique.every(topic => topic.priority === 'supporting') ? 'Supporting changes' : 'Additional evidence';
-  return `${prefix}: ${unique.map(topic => topic.title).join('; ')}`;
+  return `Supporting changes: ${unique.map(topic => topic.title).join('; ')}`;
 }
 
-export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}, revealed = new Set(), alwaysShow = []) {
+export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}, revealed = new Set(), alwaysShow = [], protectedPaths = []) {
   const topicsByEdit = new Map(analysis.topics.flatMap(topic => topic.editIds.map(id => [id, topic])));
   const keptEdits = new Set(analysis.classifications.filter(entry => entry.kinds.some(kind => kind === 'unknown' || alwaysShow.includes(kind))).map(entry => entry.editId));
   const fileRows = new Map(snapshot.files.map(file => {
     const rows = new Map();
+    const protectedFile = isProtectedPath(file.path, protectedPaths);
     for (const hunk of file.hunks) {
       for (const item of hunk.items) {
+        const topic = topicsByEdit.get(item.id);
+        const kept = protectedFile || keptEdits.has(item.id) || topic?.priority === 'review';
         for (const row of item.type === 'edit' ? item.rows : [item]) {
-          if (row.type !== 'marker') rows.set(rowKey(row), { row, topic: topicsByEdit.get(item.id), kept: keptEdits.has(item.id) });
+          if (row.type !== 'marker') rows.set(rowKey(row), { row, topic, kept });
         }
       }
     }
@@ -111,7 +114,7 @@ export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}
     if (first.tagName === 'TR') container.colSpan = Math.max(1, [...first.cells].reduce((sum, cell) => sum + cell.colSpan, 0));
     const body = element('div', 'review-focus-native-fold-body');
     const reason = topicLabel(rows.map(row => row.topic));
-    const label = element('span', 'review-focus-native-reason', `${rows.length} ${reason.startsWith('Surrounding') ? 'context' : reason.startsWith('Supporting') ? 'supporting' : 'additional evidence'} lines`);
+    const label = element('span', 'review-focus-native-reason', `${rows.length} ${reason.startsWith('Surrounding') ? 'context' : 'supporting'} lines`);
     label.title = reason;
     const toggle = button('', () => setExpanded(fold, !revealed.has(fold.key)), 'review-focus-native-toggle');
     const fold = { key: JSON.stringify([path, rowKey(rows[0]), rowKey(rows.at(-1))]), marker, toggle, rows, reason, changed: rows.filter(row => row.type !== 'context').length };
@@ -128,7 +131,7 @@ export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}
     const layout = files.flatMap(file => [file.element, file.path, ...file.rows.flatMap(row => {
       let next = row.element.nextElementSibling;
       while (next?.hasAttribute(ownedAttribute)) next = next.nextElementSibling;
-      return [row.element, row.element.parentElement, next, rowKey(row), row.element.getAttribute('role'), Boolean(row.element.querySelector('form, textarea, .review-thread-component, .js-comment-container'))];
+      return [row.element, row.element.parentElement, next, rowKey(row), row.element.getAttribute('role'), Boolean(row.element.querySelector('form, textarea, .review-thread-component, .js-comment-container') || next?.matches('tr.inline-comments'))];
     })]);
     const intactFolds = folds.every(fold => fold.marker.nextElementSibling === fold.rows[0].element);
     if (intactFolds && appliedLayout?.length === layout.length && layout.every((value, index) => value === appliedLayout[index])) return counts();
@@ -147,7 +150,7 @@ export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}
       for (const row of file.rows) {
         const match = expected.get(rowKey(row));
         const supported = row.element.tagName === 'TR' || row.element.getAttribute('role') === 'row';
-        const hasDiscussion = row.element.querySelector('form, textarea, .review-thread-component, .js-comment-container');
+        const hasDiscussion = row.element.querySelector('form, textarea, .review-thread-component, .js-comment-container') || row.element.nextElementSibling?.matches('tr.inline-comments');
         if (!match || !supported || elementCounts.get(row.element) !== 1 || hasDiscussion) {
           unmatched++;
           flush();
@@ -267,17 +270,31 @@ export function startReviewUI() {
   const alternateReview = button('Run fresh review', () => analyzePullRequest(savedReview && missedSavedReviews.has(savedReview.candidate) ? { cacheOnly: true } : { force: true }));
   const cancel = button('Cancel', () => cancelAnalysis());
   const settings = button('Settings', () => openSettings());
-  const focused = button('Focused review', () => setMode('focused'));
+  const focused = button('Folded', () => setMode('focused'));
+  const explained = button('Explained', () => setMode('explained'));
   const full = button('Full diff', () => setMode('full'));
+  full.title = 'All code, without PRiorities explanations.';
+  explained.title = 'All code, with PRiorities explanations beside each file.';
+  focused.title = 'PRiorities explanations, with supporting code folded.';
   const retryFinal = button('Retry review decisions', () => retryReview());
   retryFinal.hidden = true;
   cancel.hidden = true;
-  focused.hidden = true;
-  full.hidden = true;
   const viewToggle = element('div', 'rf-view-toggle');
   viewToggle.setAttribute('role', 'group');
-  viewToggle.setAttribute('aria-label', 'Diff view');
-  viewToggle.append(focused, full);
+  viewToggle.setAttribute('aria-label', 'Review view');
+  const viewButtons = [full, explained, focused];
+  viewToggle.append(...viewButtons);
+  viewToggle.addEventListener('keydown', event => {
+    const index = viewButtons.indexOf(event.target);
+    if (index < 0) return;
+    const next = event.key === 'ArrowRight' ? (index + 1) % viewButtons.length
+      : event.key === 'ArrowLeft' ? (index + viewButtons.length - 1) % viewButtons.length
+      : event.key === 'Home' ? 0 : event.key === 'End' ? viewButtons.length - 1 : undefined;
+    if (next === undefined) return;
+    event.preventDefault();
+    viewButtons[next].focus();
+    viewButtons[next].click();
+  });
   const menu = disclosure('⋯', 'rf-menu');
   const menuToggle = menu.querySelector('summary');
   menuToggle.setAttribute('aria-label', 'More actions');
@@ -334,11 +351,15 @@ export function startReviewUI() {
     const activeEffort = reviewProviderName ? reviewEffort : effort;
     const settingsChanged = Boolean(reviewProviderName && model &&
       (reviewProviderName !== providerName || reviewModel !== model || reviewEffort !== effort));
+    const rangeSelected = /\/pull\/\d+\/(?:files|changes|commits)\/[^/]+/.test(location.pathname);
+    const analyzeLabel = rangeSelected ? 'Analyze range' : 'Analyze PR';
+    const comparison = snapshot ?? currentIdentity;
     const primaryAction = !analysis || settingsChanged;
     runSettings.textContent = `${reviewProviderName || providerName} · ${activeModel || 'Choose a model in Settings'}${activeModel ? ` · Effort: ${activeEffort || 'model default'}` : ''}${reviewPreferences ? ` · Focus: ${reviewPreferences.focus}` : ''}`;
+    if (rangeSelected) runSettings.textContent += comparison?.baseSha && comparison.headSha ? ` · Range: ${comparison.baseSha.slice(0, 8)}…${comparison.headSha.slice(0, 8)}` : ' · Selected commits';
     analyze.disabled = busy;
     analyze.hidden = busy;
-    analyze.textContent = canOpenSavedReview() ? 'Open saved review' : settingsChanged ? 'Analyze PR' : attempted || cacheLookupFailed ? 'Run fresh review' : 'Analyze PR';
+    analyze.textContent = canOpenSavedReview() ? 'Open saved review' : settingsChanged ? analyzeLabel : attempted || cacheLookupFailed ? 'Run fresh review' : analyzeLabel;
     analyze.classList.toggle('rf-primary', primaryAction);
     if (!primaryAction && analyze.parentElement !== menuActions) menuActions.prepend(analyze);
     else if (primaryAction && analyze.parentElement !== buttons) buttons.insertBefore(analyze, cancel);
@@ -346,12 +367,12 @@ export function startReviewUI() {
     alternateReview.textContent = savedReview && missedSavedReviews.has(savedReview.candidate) ? 'Retry saved review' : 'Run fresh review';
     cancel.hidden = !busy;
     cancel.disabled = pendingAction?.type === 'cancel';
-    focused.hidden = !analysis;
-    full.hidden = !analysis;
     viewToggle.hidden = !analysis;
     retryFinal.hidden = busy || !port || !['check-failed', 'cancelled'].includes(reviewStage) || [...fileStates.values()].some(file => !['classified', 'complete', 'skipped', 'excluded'].includes(file.state));
     focused.setAttribute('aria-pressed', String(mode === 'focused'));
+    explained.setAttribute('aria-pressed', String(mode === 'explained'));
     full.setAttribute('aria-pressed', String(mode === 'full'));
+    for (const control of viewButtons) control.tabIndex = control.getAttribute('aria-pressed') === 'true' ? 0 : -1;
     errorNode.hidden = !error;
     if (errorNode.textContent !== error) errorNode.textContent = error;
     welcome.hidden = busy || Boolean(analysis) || fileStates.size > 0;
@@ -361,7 +382,7 @@ export function startReviewUI() {
     const classified = classifiedCount();
     const stage = openingSavedReview || !snapshot ? 0 : reviewStage === 'checking' ? 2 : 1;
     phase.textContent = [reviewStage === 'reconnecting' ? 'Reconnecting to analysis' : openingSavedReview ? 'Opening saved review' : 'Reading this pull request', 'Classifying files', 'Choosing review decisions'][stage];
-    progressDetail.textContent = stage === 1 ? `${classified} of ${total} files classified` : stage === 2 ? 'Every file is classified; reading the whole PR' : reviewStage === 'reconnecting' ? 'Checking for work already running in this tab' : openingSavedReview ? 'Checking the saved review against the current context' : 'Capturing the complete diff and context';
+    progressDetail.textContent = stage === 1 ? `${classified} of ${total} files classified` : stage === 2 ? 'Every file is classified; comparing the changes' : reviewStage === 'reconnecting' ? 'Checking for work already running in this tab' : openingSavedReview ? 'Checking the saved review against the current context' : 'Capturing the complete diff and context';
     renderProgressSummary();
     if (stage === 1 && total) { progressBar.max = total; progressBar.value = classified; }
     else progressBar.removeAttribute('value');
@@ -371,8 +392,8 @@ export function startReviewUI() {
     if (busy && snapshot && !error && !pendingAction) nextStatus = `${phase.textContent}. ${progressDetail.textContent}.`;
     if (!busy && !status) nextStatus = !configured
       ? `Connect your local ${providerName} helper in Settings, then analyze this PR.`
-      : `Ready to analyze this PR with ${providerName}${model ? ` (${model})` : ''}. Analysis starts only when you click Analyze PR.`;
-    if (settingsChanged && !busy && !pendingAction && !error) nextStatus = `Settings changed. Analyze PR will use ${providerName} (${model}), effort: ${effort || 'model default'}.`;
+      : `Ready to analyze ${rangeSelected ? 'these commits' : 'this PR'} with ${providerName}${model ? ` (${model})` : ''}. Analysis starts only when you click ${analyzeLabel}.`;
+    if (settingsChanged && !busy && !pendingAction && !error) nextStatus = `Settings changed. ${analyzeLabel} will use ${providerName} (${model}), effort: ${effort || 'model default'}.`;
     const split = [...document.querySelectorAll('table[data-diff-anchor] tr.diff-line-row')].some(row => row.querySelectorAll('.diff-text').length > 1);
     if (analysis && mode === 'focused' && split) nextStatus += ' GitHub is in split view. Choose Unified in its diff view settings to collapse lines.';
     if (statusNode.textContent !== nextStatus) statusNode.textContent = nextStatus;
@@ -380,7 +401,7 @@ export function startReviewUI() {
     statusNode.classList.toggle('rf-visually-hidden', Boolean(ordinaryStatus));
     const foldingDetail = result.querySelector('.rf-folding-detail');
     if (foldingDetail) foldingDetail.textContent = status;
-    result.hidden = mode === 'full';
+    result.hidden = mode === 'full' || !finalResult;
   }
 
   async function loadSettings(refreshConnection = false) {
@@ -516,6 +537,7 @@ export function startReviewUI() {
     fileFilter = 'all';
     busy = true;
     finalResult = false;
+    applyFolding();
     error = '';
     reviewStage = 'files';
     pendingAction = { type: 'file', path, message: `Analyzing ${path}…` };
@@ -767,19 +789,20 @@ export function startReviewUI() {
         if (wasFocused) (record.actions.firstElementChild ?? progressToggle).focus({ preventScroll: true });
         record.action = action;
       }
-      const topics = file.state === 'complete' && analysis ? fileTopics(native.path) : [];
+      const topics = file.state === 'complete' && analysis && finalResult ? fileTopics(native.path) : [];
       const existingDetails = record.content.querySelector('.rf-file-decisions');
       if (existingDetails) existingDetails.hidden = observedReviews.get(native.path) === true;
       const sameTopics = record.topics?.length === topics.length && topics.every((topic, index) => topic === record.topics[index]);
-      if (record.state === file.state && record.message === file.message && sameTopics && record.mode === mode) continue;
+      const showExplanations = mode !== 'full' && finalResult;
+      if (record.state === file.state && record.message === file.message && sameTopics && record.showExplanations === showExplanations) continue;
       record.state = file.state;
       record.message = file.message;
       record.topics = topics;
-      record.mode = mode;
+      record.showExplanations = showExplanations;
       record.node.dataset.state = file.state;
       record.content.replaceChildren();
       if (['failed', 'cancelled', 'skipped'].includes(file.state) && file.message) record.content.append(element('p', 'rf-file-message', file.message));
-      if (file.state !== 'complete' || mode === 'full' || !analysis) {
+      if (file.state !== 'complete' || !showExplanations || !analysis) {
         record.node.hidden = !record.content.childElementCount;
         continue;
       }
@@ -795,6 +818,7 @@ export function startReviewUI() {
       }
       const keptKinds = [...new Set([...locations.values()].filter(entry => entry.file.path === native.path).flatMap(entry => entry.classification?.kinds.filter(kind => reviewPreferences?.alwaysShow.includes(kind)) ?? []))];
       if (keptKinds.length) details.append(element('p', 'rf-kept-visible rf-caption', `Your settings keep ${keptKinds.join(', ')} edits visible.`));
+      if (isProtectedPath(native.path, reviewPreferences?.protectedPaths ?? [])) details.append(element('p', 'rf-kept-visible rf-caption', 'Your protected paths keep this file visible.'));
       for (const topic of topics) details.append(renderTopic(topic, locations));
       record.content.append(details);
     }
@@ -928,6 +952,7 @@ export function startReviewUI() {
         if (!openingSavedReview && ['queued', 'classifying'].includes(message.state)) {
           busy = true;
           finalResult = false;
+          applyFolding();
           reviewStage = 'files';
         }
         status = message.state === 'failed' ? 'A file needs another attempt. Completed classifications are kept.' : 'Review decisions follow once every file is classified.';
@@ -975,7 +1000,7 @@ export function startReviewUI() {
         }
         error = '';
         status = '';
-        folding = createNativeFolding(document, reviewedSnapshot(), analysis, () => updateFoldingStatus(), revealed, reviewPreferences?.alwaysShow);
+        folding = createNativeFolding(document, reviewedSnapshot(), analysis, () => updateFoldingStatus(), revealed, reviewPreferences?.alwaysShow, reviewPreferences?.protectedPaths);
         renderAnalysis();
         renderFileProgress();
         applyFolding();
@@ -1039,6 +1064,8 @@ export function startReviewUI() {
     const total = reviewedSnapshot().files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
     if (mode === 'full') {
       status = 'Full diff restored. GitHub’s review controls and viewed state are unchanged.';
+    } else if (mode === 'explained') {
+      status = 'All code is visible, with PRiorities explanations beside each file.';
     } else if (!verifiedPage()) {
       status = 'Assessment ready. GitHub’s visible revision could not be verified, so the native diff stays expanded.';
     } else {
@@ -1054,7 +1081,7 @@ export function startReviewUI() {
 
   function applyFolding() {
     if (!folding) return;
-    if (mode === 'focused' && verifiedPage()) folding.apply();
+    if (mode === 'focused' && finalResult && verifiedPage()) folding.apply();
     else folding.restore();
     updateFoldingStatus();
   }
@@ -1171,7 +1198,7 @@ export function startReviewUI() {
     const details = element('div', 'rf-review-details');
     details.append(element('p', 'rf-folding-detail', status));
     if (cacheMessage) details.append(element('p', 'rf-cache-detail', cacheMessage));
-    details.append(element('p', 'rf-provenance', `Analyzed ${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}, effort: ${reviewEffort || 'model default'}.`));
+    details.append(element('p', 'rf-provenance', `Analyzed ${snapshot.baseSha.slice(0, 8)}…${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}, effort: ${reviewEffort || 'model default'}.`));
     if (snapshot.warnings?.length) {
       details.append(element('strong', '', 'Capture limitations'));
       for (const warning of snapshot.warnings) details.append(element('p', '', warning));
@@ -1215,7 +1242,7 @@ export function startReviewUI() {
       cancelAnalysis('Analysis cancelled because the pull request changed.', true);
       clearReview();
       attempted = false;
-      status = changedPr ? '' : 'The PR revision changed. Analyze again before focusing this diff.';
+      status = changedPr ? '' : 'The PR revision changed or a different commit range was selected. Analyze again before focusing this diff.';
       error = '';
     } else if (busy && !snapshot && pathKey && nextPath !== pathKey) {
       cancelAnalysis('Navigation cancelled capture. Analyze again on this page.', true);

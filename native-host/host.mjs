@@ -132,6 +132,22 @@ function cliFailure(output) {
   return null;
 }
 
+function codexFailure(output) {
+  let failure = null;
+  for (const line of output.split(/\r?\n/).filter(line => line.trim())) {
+    let event;
+    try { event = JSON.parse(line); } catch {
+      throw new HelperError('Codex returned unreadable analysis events. Update the CLI and retry. No review changes were applied.');
+    }
+    if (event?.type === 'turn.completed') failure = null;
+    if (!['error', 'turn.failed'].includes(event?.type)) continue;
+    const message = event.type === 'turn.failed' ? event.error?.message : event.message;
+    if (typeof message !== 'string') throw new HelperError('Codex returned an unreadable analysis error. Update the CLI and retry.');
+    failure = cliFailure(message) ?? 'Codex stopped before completing this analysis. Run the CLI in Terminal to inspect the failure, then retry. No review changes were applied.';
+  }
+  return failure;
+}
+
 function loginStatus({ code, output, errorOutput }) {
   const diagnostics = `${output}\n${errorOutput}`;
   let loggedIn;
@@ -181,7 +197,7 @@ function analysisArguments(request) {
   for (const feature of ['shell_tool', 'apps', 'plugins', 'hooks', 'browser_use', 'browser_use_external', 'computer_use', 'multi_agent', 'multi_agent_v2', 'image_generation', 'view_image', 'request_permissions_tool', 'sleep_tool', 'send_message_to_user_async', 'memories', 'external_agent_memory_import', 'goals', 'token_budget', 'tool_suggest', 'skill_search', 'skill_mcp_dependency_install']) {
     configuration[`features.${feature}`] = false;
   }
-  const args = ['exec', '--strict-config', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', '--output-schema', schemaPath, '--output-last-message', outputPath];
+  const args = ['exec', '--json', '--strict-config', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--color', 'never', '--output-schema', schemaPath, '--output-last-message', outputPath];
   for (const [key, value] of Object.entries(configuration)) args.push('-c', `${key}=${JSON.stringify(value)}`);
   if (request.model) args.push('--model', request.model);
   if (request.effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(request.effort)}`);
@@ -296,10 +312,11 @@ async function handle(request) {
       throw new HelperError('The local helper could not prepare its analysis files. Check local disk space and temporary-folder permissions.');
     }
     const { args, outputPath } = analysis;
-    const { code, output: analysisOutput, errorOutput } = await runCli(args, request.prompt.user, provider === 'claude' ? 4 * 1024 * 1024 : 0);
+    const { code, output: analysisOutput, errorOutput } = await runCli(args, request.prompt.user, 4 * 1024 * 1024);
     if (finished) return;
-    if (code !== 0) {
-      complete({ type: 'error', message: cliFailure(`${errorOutput}\n${analysisOutput}`) ?? `${providerName} stopped before completing this analysis. Run the CLI in Terminal to inspect the failure, then retry. No review changes were applied.` });
+    const failure = provider === 'codex' ? codexFailure(analysisOutput) : cliFailure(`${errorOutput}\n${analysisOutput}`);
+    if (code !== 0 || provider === 'codex' && failure) {
+      complete({ type: 'error', message: failure ?? `${providerName} stopped before completing this analysis. Run the CLI in Terminal to inspect the failure, then retry. No review changes were applied.` });
       return;
     }
     if (outputPath && statSync(outputPath).size > maxOutputBytes - 128) {
