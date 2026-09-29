@@ -15,7 +15,7 @@ export function pullRequestLocation(href) {
 function embeddedData(doc) {
   const result = [];
   for (const script of doc.querySelectorAll('script[type="application/json"][data-target$="embeddedData"]')) {
-    try { result.push(JSON.parse(script.textContent)); } catch { /* GitHub can replace a data script during navigation. */ }
+    try { result.push(JSON.parse(script.textContent)); } catch {}
   }
   return result;
 }
@@ -396,6 +396,11 @@ export async function capturePullRequest({ onProgress = () => {}, signal } = {})
   for (const file of runtime.slice(0, 6)) {
     for (const side of ['after', 'before']) {
       if (signal?.aborted) throw new DOMException('Analysis canceled.', 'AbortError');
+      const emptySide = side === 'before' ? /^@@ -0,0 / : / \+0,0 @@/;
+      if (file.hunks.length === 1 && emptySide.test(file.hunks[0].header)) {
+        context.push({ path: file.path, side, text: '' });
+        continue;
+      }
       const sha = side === 'after' ? identity.headSha : identity.baseSha;
       const path = file.path.split('/').map(encodeURIComponent).join('/');
       try {

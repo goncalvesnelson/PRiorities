@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { endianness, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -14,10 +14,11 @@ const littleEndian = endianness() === 'LE';
 const controlPath = join(root, 'control.json');
 const callsPath = join(root, 'calls.jsonl');
 const statusCallsPath = join(root, 'status-calls.jsonl');
+const catalogCallsPath = join(root, 'catalog-calls.jsonl');
 const startedPath = join(root, 'started.json');
 const fakeCliPath = join(root, "fake cli ' `$safe`.mjs");
 const schema = { type: 'object', properties: { edits: { type: 'array', items: { type: 'object' } } }, required: ['edits'], additionalProperties: false };
-const request = { type: 'analyze', model: '', prompt: { system: 'Classify every supplied edit.', user: 'A synthetic changed-line fixture.' }, schema };
+const request = { type: 'analyze', model: '', effort: '', prompt: { system: 'Classify every supplied edit.', user: 'A synthetic changed-line fixture.' }, schema };
 const liveChildren = new Set();
 const untrustedEnvironment = {
   OPENAI_API_KEY: 'test-secret-key', CODEX_API_KEY: 'test-secret-key',
@@ -38,9 +39,9 @@ function frame(value) {
   return Buffer.concat([header, body]);
 }
 
-function openHost(launcherPath, extensionOrigin = origin) {
+function openHost(launcherPath, extensionOrigin = origin, environment = {}) {
   const child = spawn(launcherPath, [extensionOrigin], { env: {
-    ...process.env, ...untrustedEnvironment
+    ...process.env, ...untrustedEnvironment, ...environment
   }, stdio: ['pipe', 'pipe', 'pipe'] });
   liveChildren.add(child);
   let output = Buffer.alloc(0);
@@ -60,8 +61,8 @@ function openHost(launcherPath, extensionOrigin = origin) {
   return { child, completed };
 }
 
-async function exchange(launcherPath, value, fragmented = false, extensionOrigin = origin) {
-  const host = openHost(launcherPath, extensionOrigin);
+async function exchange(launcherPath, value, fragmented = false, extensionOrigin = origin, environment = {}) {
+  const host = openHost(launcherPath, extensionOrigin, environment);
   const bytes = Buffer.isBuffer(value) ? value : frame(value);
   if (fragmented) {
     for (const part of [bytes.subarray(0, 1), bytes.subarray(1, 3), bytes.subarray(3, 8), bytes.subarray(8)]) {
@@ -79,8 +80,8 @@ async function exchange(launcherPath, value, fragmented = false, extensionOrigin
   return JSON.parse(output.subarray(4).toString());
 }
 
-async function control(mode = 'success', authenticated = true, status = {}) {
-  await writeFile(controlPath, JSON.stringify({ mode, authenticated, status }));
+async function control(mode = 'success', authenticated = true, status = {}, details = {}) {
+  await writeFile(controlPath, JSON.stringify({ mode, authenticated, status, ...details }));
 }
 
 async function calls() {
@@ -109,12 +110,36 @@ const args = process.argv.slice(2);
 const claude = args.includes('--safe-mode');
 if (args.includes('status')) {
   appendFileSync(${JSON.stringify(statusCallsPath)}, JSON.stringify({ args, environment: Object.keys(process.env), cwd: process.cwd() }) + '\\n');
+  if (control.mode === 'status-incompatible') { console.error("error: unknown option '--safe-mode' PRIVATE STATUS test-secret-key"); process.exit(1); }
+  if (control.mode === 'status-failure') { console.error('PRIVATE STATUS test-secret-key'); process.exit(1); }
   if (claude) {
     console.error('PRIVATE STATUS test-secret-key');
     console.log(control.mode === 'invalid-status' ? 'not json' : JSON.stringify({ loggedIn: control.authenticated, authMethod: control.authenticated ? 'claude.ai' : 'api_key', apiProvider: 'firstParty', ...control.status }));
-  } else console.error(control.authenticated ? 'Logged in using ChatGPT' : 'Logged in using an API key - test-secret-key');
+  } else console.error(control.mode === 'invalid-status' ? 'unreadable test-secret-key' : control.mode === 'status-auth-mode' ? 'Logged in using an API key - test-secret-key' : control.authenticated ? 'Logged in using ChatGPT' : 'Not logged in');
   process.exit(0);
 }
+if (args.includes('app-server') || args.includes('--input-format')) {
+  const { createInterface } = await import('node:readline');
+  createInterface({input:process.stdin}).on('line', line => {
+    const message = JSON.parse(line);
+    appendFileSync(${JSON.stringify(catalogCallsPath)}, JSON.stringify(message) + '\\n');
+    if (control.mode === 'catalog-closed') { console.error('PRIVATE CATALOG test-secret-key'); process.exit(1); }
+    if (control.mode === 'catalog-invalid') { console.log('PRIVATE CATALOG test-secret-key'); return; }
+    if (control.mode === 'catalog-overflow') { console.log('x'.repeat(4 * 1024 * 1024)); return; }
+    if (claude) {
+      const models = control.mode === 'catalog-limit' ? Array.from({length:control.count}, (_, index) => ({value:index === 0 ? 'default' : 'model-' + index,resolvedModel:'model-' + index,displayName:'Test model',supportedEffortLevels:['low','high']})) : [{value:'default',resolvedModel:'test-model',displayName:'Test model',supportedEffortLevels:['low','high']},{value:'opus',resolvedModel:'test-model',displayName:'Test model',supportedEffortLevels:['low','high']}];
+      if (control.mode === 'catalog-shape') Object.assign(models[0], control.model);
+      console.log(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:'catalog',response:{models}}}));
+    } else if (message.method === 'initialize') console.log(JSON.stringify({id:1,...(control.mode === 'catalog-initialize-failure' ? {error:{message:'PRIVATE CATALOG test-secret-key'}} : {result:{}})}));
+    else if (message.method === 'model/list') {
+      const offset = Number(message.params.cursor ?? 0);
+      const data = control.mode === 'catalog-limit' ? Array.from({length:Math.min(100, control.count - offset)}, (_, index) => ({model:'model-' + (offset + index),displayName:'Test model',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}],defaultReasoningEffort:'high',isDefault:offset + index === 0})) : [{model:message.params.cursor ? 'older-model' : 'test-model',displayName:'Test model',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}],defaultReasoningEffort:'high',isDefault:!message.params.cursor}];
+      const nextCursor = control.mode === 'catalog-repeat' ? 'repeat' : control.mode === 'catalog-pages' && !message.params.cursor ? 'older' : control.mode === 'catalog-limit' && offset + 100 < control.count ? String(offset + 100) : null;
+      if (control.mode === 'catalog-shape') Object.assign(data[0], control.model);
+      console.log(JSON.stringify({id:2,result:{data,nextCursor}}));
+    }
+  });
+} else {
 const value = flag => args[args.indexOf(flag) + 1];
 const config = Object.fromEntries(args.flatMap((arg, index) => arg === '-c' ? [args[index + 1].split(/=(.*)/s).slice(0, 2)] : []));
 const instructionsPath = claude ? value('--system-prompt-file') : JSON.parse(config.model_instructions_file);
@@ -133,6 +158,10 @@ if (control.mode === 'wait') {
 } else if (control.mode === 'failure') {
   console.error('PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path');
   process.exit(1);
+} else if (control.mode === 'diagnostic' || control.mode === 'diagnostic-envelope') {
+  if (claude) console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,errors:[control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path']}));
+  else console.error(control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path');
+  process.exit(control.mode === 'diagnostic-envelope' ? 0 : 1);
 } else if (control.mode === 'invalid') output('not json');
 else if (control.mode === 'huge') output(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: { content: 'x'.repeat(1024 * 1024) } }));
 else if (control.mode === 'overflow') output('x'.repeat(5 * 1024 * 1024));
@@ -141,6 +170,7 @@ else if (control.mode === 'error-success') output(JSON.stringify({ type: 'result
 else if (control.mode === 'missing-output') output(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(result) }));
 else if (control.mode === 'nonobject') output(claude ? JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: [] }) : '[]');
 else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_error: false, structured_output: result } : result));
+}
 `, { mode: 0o700 });
   await chmod(fakeCliPath, 0o700);
   const installations = [];
@@ -156,10 +186,52 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
     assert.equal(manifest.path, installed.launcherPath);
     assert.deepEqual(await exchange(installed.launcherPath, { type: 'status' }, true), { type: 'status', authenticated: true });
 
+    const catalog = await exchange(installed.launcherPath, {type:'models'});
+    assert.deepEqual(catalog, {type:'models',models:[{id:'test-model',label:'Test model',efforts:['low','high'],defaultEffort:provider === 'claude' ? 'low' : 'high',isDefault:true}]});
+    if (provider === 'codex') {
+      await rm(catalogCallsPath, { force: true });
+      await control('catalog-pages');
+      const pages = await exchange(installed.launcherPath, { type: 'models' });
+      assert.deepEqual(pages.models.map(model => model.id), ['test-model', 'older-model']);
+      assert.deepEqual(pages.models.map(model => model.isDefault), [true, false]);
+      const catalogCalls = (await readFile(catalogCallsPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      assert.deepEqual(catalogCalls.filter(call => call.method === 'model/list').map(call => call.params), [{ limit: 100, includeHidden: true }, { limit: 100, includeHidden: true, cursor: 'older' }]);
+    }
+    await control('catalog-limit', true, {}, { count: 500 });
+    const fullCatalog = await exchange(installed.launcherPath, { type: 'models' });
+    assert.equal(fullCatalog.models.length, 500);
+    assert.equal(fullCatalog.models.at(-1).id, 'model-499');
+    await control('catalog-limit', true, {}, { count: 501 });
+    const excessiveCatalog = await exchange(installed.launcherPath, { type: 'models' });
+    assert.equal(excessiveCatalog.type, 'error');
+    assert.match(excessiveCatalog.message, /500-model limit/);
+    const catalogFailures = [
+      ['catalog-invalid', /unreadable model catalog/],
+      ['catalog-overflow', /catalog is too large/],
+      ['catalog-closed', /closed before returning its models/],
+      ...(provider === 'codex' ? [['catalog-repeat', /repeated a model catalog page/], ['catalog-initialize-failure', /could not initialize its model catalog/]] : [])
+    ];
+    for (const [mode, expected] of catalogFailures) {
+      await control(mode);
+      const failedCatalog = await exchange(installed.launcherPath, { type: 'models' });
+      assert.equal(failedCatalog.type, 'error');
+      assert.match(failedCatalog.message, expected);
+      assert.doesNotMatch(failedCatalog.message, /test-secret-key|PRIVATE CATALOG|signed in/);
+    }
+    for (const model of provider === 'claude'
+      ? [{ resolvedModel: 'invalid-model', displayName: 'x'.repeat(201) }, { resolvedModel: 'invalid-model', supportedEffortLevels: Array(21).fill('low') }]
+      : [{ displayName: 'x'.repeat(201) }, { supportedReasoningEfforts: Array(21).fill({ reasoningEffort: 'low' }) }, { defaultReasoningEffort: 'unsupported' }]) {
+      await control('catalog-shape', true, {}, { model });
+      const failedCatalog = await exchange(installed.launcherPath, { type: 'models' });
+      assert.equal(failedCatalog.type, 'error');
+      assert.match(failedCatalog.message, /unreadable model catalog/);
+    }
+    assert.equal((await calls()).length, 0, 'Listing models must never start analysis.');
+    await control();
     const first = await exchange(installed.launcherPath, request, true);
     assert.equal(first.type, 'result');
     assert.equal(first.result.edits[0].editId, 'sample-edit');
-    const prioritization = { ...request, model: 'test-model', prompt: { system: 'Prioritize the classified edits.', user: JSON.stringify({ evidence: request.prompt.user, classifications: first.result.edits }) }, schema: { type: 'object', properties: { summary: { type: 'string' }, topics: { type: 'array', items: { type: 'object' } } }, required: ['summary', 'topics'], additionalProperties: false } };
+    const prioritization = { ...request, model: 'test-model', effort: 'high', prompt: { system: 'Prioritize the classified edits.', user: JSON.stringify({ evidence: request.prompt.user, classifications: first.result.edits }) }, schema: { type: 'object', properties: { summary: { type: 'string' }, topics: { type: 'array', items: { type: 'object' } } }, required: ['summary', 'topics'], additionalProperties: false } };
     assert.deepEqual(await exchange(installed.launcherPath, prioritization), { type: 'result', result: { summary: 'Review the guard.', topics: [] } });
     const recorded = await calls();
     assert.equal(recorded.length, 2);
@@ -182,9 +254,11 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
         assert.equal(record.config['features.shell_tool'], 'false');
         assert.equal(record.config['features.skip_host_skill_discovery'], 'true');
         assert.equal(record.config.project_doc_max_bytes, '0');
+        assert.equal(record.config.model_reasoning_effort, record === recorded[1] ? '"high"' : undefined);
       } else {
         for (const flag of ['--safe-mode', '--print', '--strict-mcp-config', '--disable-slash-commands', '--no-chrome', '--no-session-persistence']) assert.ok(record.args.includes(flag));
         for (const [flag, value] of [['--tools', ''], ['--setting-sources', ''], ['--mcp-config', '{"mcpServers":{}}'], ['--permission-mode', 'dontAsk'], ['--permission-prompts', 'none'], ['--output-format', 'json']]) assert.equal(record.args[record.args.indexOf(flag) + 1], value);
+        assert.equal(record.args.includes('--effort') ? record.args[record.args.indexOf('--effort') + 1] : undefined, record === recorded[1] ? 'high' : undefined);
         assert.ok(!record.args.includes('--bare'));
         assert.ok(!record.args.includes('--dangerously-skip-permissions'));
       }
@@ -194,22 +268,53 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
     await control('success', false);
     const unsigned = await exchange(installed.launcherPath, { type: 'status' });
     assert.equal(unsigned.authenticated, false);
+    assert.match(unsigned.message, /^Sign in/);
     assert.ok(unsigned.message.includes(provider === 'claude' ? 'claude auth login' : 'codex login'));
     assert.ok(!unsigned.message.includes('test-secret-key'));
     assert.equal((await exchange(installed.launcherPath, request)).type, 'error');
     assert.equal((await calls()).length, 2);
     if (provider === 'claude') {
-      for (const status of [{ authMethod: 'api_key' }, { authMethod: 'console' }, { apiProvider: 'bedrock' }, { loggedIn: false }]) {
+      for (const status of [{ authMethod: 'api_key' }, { authMethod: 'console' }, { apiProvider: 'bedrock' }]) {
         await control('success', true, status);
-        assert.equal((await exchange(installed.launcherPath, { type: 'status' })).authenticated, false);
+        const unsupported = await exchange(installed.launcherPath, { type: 'status' });
+        assert.equal(unsupported.authenticated, false);
+        assert.match(unsupported.message, /requires a Claude subscription login through claude.ai/);
+        assert.doesNotMatch(unsupported.message, /^Sign in/);
         assert.equal((await exchange(installed.launcherPath, request)).type, 'error');
       }
-      await control('invalid-status');
-      assert.equal((await exchange(installed.launcherPath, { type: 'status' })).authenticated, false);
+      await control('success', true, { authMethod: null });
+      const malformedStatus = await exchange(installed.launcherPath, { type: 'status' });
+      assert.equal(malformedStatus.type, 'error');
+      assert.match(malformedStatus.message, /unreadable login status/);
+    } else {
+      await control('status-auth-mode');
+      const unsupported = await exchange(installed.launcherPath, { type: 'status' });
+      assert.equal(unsupported.authenticated, false);
+      assert.match(unsupported.message, /requires a ChatGPT login/);
+      assert.doesNotMatch(unsupported.message, /^Sign in|test-secret-key/);
       assert.equal((await exchange(installed.launcherPath, request)).type, 'error');
-      assert.equal((await calls()).length, 2);
     }
+    for (const [mode, expected] of [['invalid-status', /unreadable login status/], ['status-incompatible', /does not support a required CLI option/], ['status-failure', /could not check its login/]]) {
+      await control(mode);
+      for (const attempted of [{ type: 'status' }, request]) {
+        const failedStatus = await exchange(installed.launcherPath, attempted);
+        assert.equal(failedStatus.type, 'error');
+        assert.match(failedStatus.message, expected);
+        assert.doesNotMatch(failedStatus.message, /^Sign in|test-secret-key|PRIVATE STATUS/);
+      }
+    }
+    assert.equal((await calls()).length, 2);
     await control();
+    const unavailableDirectory = await exchange(installed.launcherPath, { type: 'status' }, false, origin, { TMPDIR: join(root, 'missing-temporary-directory') });
+    assert.equal(unavailableDirectory.type, 'error');
+    assert.match(unavailableDirectory.message, /could not create its private working directory/);
+    assert.doesNotMatch(unavailableDirectory.message, /signed in/);
+    await rename(fakeCliPath, `${fakeCliPath}.unavailable`);
+    try {
+      const unavailableCli = await exchange(installed.launcherPath, { type: 'status' });
+      assert.equal(unavailableCli.type, 'error');
+      assert.match(unavailableCli.message, /could not be started.*Reinstall the helper/);
+    } finally { await rename(`${fakeCliPath}.unavailable`, fakeCliPath); }
     assert.equal((await exchange(installed.launcherPath, { type: 'status' }, false, 'chrome-extension://other/')).type, 'error');
     for (const invalid of [Buffer.from('{'), Buffer.from([0xff]), JSON.stringify({ ...request, model: '--dangerous' }), JSON.stringify({ ...request, schema: [] }), JSON.stringify({ ...request, unexpected: true }), JSON.stringify({ ...request, provider: provider === 'claude' ? 'codex' : 'claude' })]) {
       const payload = Buffer.isBuffer(invalid) ? invalid : Buffer.from(invalid);
@@ -233,6 +338,25 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
       assert.ok(!JSON.stringify(response).includes('test-secret-key'));
       assert.ok(!JSON.stringify(response).includes('PRIVATE REPOSITORY'));
       assert.equal(existsSync((await calls()).at(-1).cwd), false);
+    }
+    for (const [diagnostic, expected] of [
+      ['model_not_found: The model does not exist.', /could not use the selected model/],
+      ["There's an issue with the selected model (custom-model). It may not exist or you may not have access to it.", /could not use the selected model/],
+      ['Unsupported reasoning effort for selected model.', /rejected the selected effort/],
+      ['rate_limit_error: Too many requests.', /account or rate limit/],
+      ["You've hit your limit · resets 5pm", /account or rate limit/],
+      ['Connection failed: ECONNRESET.', /could not reach its service/],
+      ['authentication_error: token expired.', /rejected the login credentials/],
+      ["error: unexpected argument '--permission-prompts' found", /does not support a required CLI option/]
+    ]) {
+      for (const mode of provider === 'claude' ? ['diagnostic', 'diagnostic-envelope'] : ['diagnostic']) {
+        await control(mode, true, {}, { diagnostic });
+        const failedAnalysis = await exchange(installed.launcherPath, request);
+        assert.equal(failedAnalysis.type, 'error');
+        assert.match(failedAnalysis.message, expected);
+        assert.doesNotMatch(failedAnalysis.message, /test-secret-key|PRIVATE REPOSITORY|\/private\/sensitive/);
+        assert.equal(existsSync((await calls()).at(-1).cwd), false);
+      }
     }
 
     for (const cancellation of ['disconnect', 'signal', 'second-request']) {
@@ -274,7 +398,7 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
   assert.match(installer.stdout, /Skipped codex/);
   assert.match(installer.stdout, /com.review_focus.claude/);
   assert.equal(existsSync(join(installerHome, 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts', 'com.review_focus.claude.json')), true);
-  console.log('Native host verification passed for Codex and Claude Code: framing, two-stage flow, private temporary files, login isolation, sanitized errors, generated output boundaries, coexistence, single-provider installation, and process-group cancellation.');
+  console.log('Native host verification passed for Codex and Claude Code: framing, two-stage flow, private temporary files, login modes, safe actionable errors, catalog paging and limits, generated output boundaries, coexistence, single-provider installation, and process-group cancellation.');
 } finally {
   for (const child of liveChildren) child.kill('SIGTERM');
   await rm(root, { recursive: true, force: true });

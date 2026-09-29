@@ -41,7 +41,6 @@ function nativeRequest(provider, request, signal) {
     const onAbort = () => finish(new Error('Analysis cancelled.'));
     const onDisconnect = () => finish(connectionError(label, chrome.runtime.lastError?.message));
     const onMessage = message => {
-      if (message?.type === 'progress') return;
       if (message?.type === 'error' && typeof message.message === 'string' && message.message.trim() && message.message.length <= 4000) {
         finish(new Error(message.message));
         return;
@@ -54,6 +53,10 @@ function nativeRequest(provider, request, signal) {
         finish(null, message.result);
         return;
       }
+      if (request.type === 'models' && message?.type === 'models' && Array.isArray(message.models) && message.models.length > 0 && message.models.length <= 500 && message.models.every(model => model && typeof model.id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/.test(model.id) && typeof model.label === 'string' && model.label.length <= 200 && Array.isArray(model.efforts) && model.efforts.length <= 20 && model.efforts.every(effort => typeof effort === 'string' && /^[a-z][a-z0-9_-]{0,29}$/.test(effort)) && typeof model.defaultEffort === 'string' && (!model.defaultEffort || model.efforts.includes(model.defaultEffort)) && typeof model.isDefault === 'boolean')) {
+        finish(null, message.models);
+        return;
+      }
       finish(new Error(`The local ${label} helper returned an unreadable response.`));
     };
 
@@ -61,6 +64,7 @@ function nativeRequest(provider, request, signal) {
     port.onDisconnect.addListener(onDisconnect);
     signal?.addEventListener('abort', onAbort, { once: true });
     if (request.type === 'status') timeout = setTimeout(() => finish(new Error(`The local ${label} helper did not respond. Check its installation and your login.`)), 15_000);
+    if (request.type === 'models') timeout = setTimeout(() => finish(new Error(`The local ${label} helper did not return its models. Check its connection and try again.`)), 35_000);
     try {
       port.postMessage(request);
     } catch (error) {
@@ -73,6 +77,10 @@ export function getCLIStatus(provider) {
   return nativeRequest(provider, { type: 'status' });
 }
 
-export function analyzeWithCLI({ provider, model, prompt, schema, signal }) {
-  return nativeRequest(provider, { type: 'analyze', model, prompt, schema }, signal);
+export function getCLIModels(provider) {
+  return nativeRequest(provider, { type: 'models' });
+}
+
+export function analyzeWithCLI({ provider, model, effort = '', prompt, schema, signal }) {
+  return nativeRequest(provider, { type: 'analyze', model, effort, prompt, schema }, signal);
 }

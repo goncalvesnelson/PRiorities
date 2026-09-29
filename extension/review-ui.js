@@ -24,6 +24,10 @@ function disclosure(label, className = '') {
   return node;
 }
 
+function isDiffPage() {
+  return /^\/[^/]+\/[^/]+\/pull\/\d+\/(?:files|changes)(?:\/|$)/.test(location.pathname);
+}
+
 function rowKey(row) {
   return JSON.stringify([row.type, row.oldLine ?? null, row.newLine ?? null, row.text]);
 }
@@ -42,15 +46,15 @@ function topicLabel(topics) {
   return `${prefix}: ${unique.map(topic => topic.title).join('; ')}`;
 }
 
-export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}, revealed = new Set()) {
+export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}, revealed = new Set(), alwaysShow = []) {
   const topicsByEdit = new Map(analysis.topics.flatMap(topic => topic.editIds.map(id => [id, topic])));
-  const unresolvedEdits = new Set(analysis.classifications.filter(entry => entry.kinds.includes('unknown')).map(entry => entry.editId));
+  const keptEdits = new Set(analysis.classifications.filter(entry => entry.kinds.some(kind => kind === 'unknown' || alwaysShow.includes(kind))).map(entry => entry.editId));
   const fileRows = new Map(snapshot.files.map(file => {
     const rows = new Map();
     for (const hunk of file.hunks) {
       for (const item of hunk.items) {
         for (const row of item.type === 'edit' ? item.rows : [item]) {
-          if (row.type !== 'marker') rows.set(rowKey(row), { row, topic: topicsByEdit.get(item.id), unresolved: unresolvedEdits.has(item.id) });
+          if (row.type !== 'marker') rows.set(rowKey(row), { row, topic: topicsByEdit.get(item.id), kept: keptEdits.has(item.id) });
         }
       }
     }
@@ -68,8 +72,10 @@ export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}
   const folds = [];
   let matched = 0;
   let unmatched = 0;
+  let appliedLayout;
 
   function restore() {
+    appliedLayout = undefined;
     for (const row of hidden) row.classList.remove(hiddenClass);
     hidden.clear();
     for (const fold of folds) fold.marker.remove();
@@ -89,8 +95,9 @@ export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}
       if (expanded) hidden.delete(row.element);
       else hidden.add(row.element);
     }
-    fold.toggle.textContent = `${expanded ? 'Collapse' : 'Show'} ${fold.rows.length} lines`;
+    fold.toggle.textContent = expanded ? 'Hide' : 'Show';
     fold.toggle.setAttribute('aria-expanded', String(expanded));
+    fold.toggle.setAttribute('aria-label', `${expanded ? 'Hide' : 'Show'} ${fold.rows.length} lines. ${fold.reason}`);
     onChange(counts());
   }
 
@@ -103,10 +110,12 @@ export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}
     const container = doc.createElement(first.tagName === 'TR' ? 'td' : 'div');
     if (first.tagName === 'TR') container.colSpan = Math.max(1, [...first.cells].reduce((sum, cell) => sum + cell.colSpan, 0));
     const body = element('div', 'review-focus-native-fold-body');
-    const label = element('span', 'review-focus-native-reason', topicLabel(rows.map(row => row.topic)));
+    const reason = topicLabel(rows.map(row => row.topic));
+    const label = element('span', 'review-focus-native-reason', `${rows.length} ${reason.startsWith('Surrounding') ? 'context' : reason.startsWith('Supporting') ? 'supporting' : 'additional evidence'} lines`);
+    label.title = reason;
     const toggle = button('', () => setExpanded(fold, !revealed.has(fold.key)), 'review-focus-native-toggle');
-    const fold = { key: JSON.stringify([path, rowKey(rows[0]), rowKey(rows.at(-1))]), marker, toggle, rows, changed: rows.filter(row => row.type !== 'context').length };
-    body.append(toggle, label);
+    const fold = { key: JSON.stringify([path, rowKey(rows[0]), rowKey(rows.at(-1))]), marker, toggle, rows, reason, changed: rows.filter(row => row.type !== 'context').length };
+    body.append(label, toggle);
     container.append(body);
     marker.append(container);
     first.before(marker);
@@ -115,10 +124,19 @@ export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}
   }
 
   function apply() {
+    const files = findNativeFiles(doc);
+    const layout = files.flatMap(file => [file.element, file.path, ...file.rows.flatMap(row => {
+      let next = row.element.nextElementSibling;
+      while (next?.hasAttribute(ownedAttribute)) next = next.nextElementSibling;
+      return [row.element, row.element.parentElement, next, rowKey(row), row.element.getAttribute('role'), Boolean(row.element.querySelector('form, textarea, .review-thread-component, .js-comment-container'))];
+    })]);
+    const intactFolds = folds.every(fold => fold.marker.nextElementSibling === fold.rows[0].element);
+    if (intactFolds && appliedLayout?.length === layout.length && layout.every((value, index) => value === appliedLayout[index])) return counts();
     restore();
+    appliedLayout = layout;
     matched = 0;
     unmatched = 0;
-    for (const file of findNativeFiles(doc)) {
+    for (const file of files) {
       const expected = fileRows.get(file.path);
       if (!expected) continue;
       const excerpts = excerptsByPath.get(file.path) ?? [];
@@ -136,7 +154,7 @@ export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}
           continue;
         }
         matched++;
-        if (match.unresolved || rowSelected(match.row, excerpts)) {
+        if (match.kept || rowSelected(match.row, excerpts)) {
           flush();
           continue;
         }
@@ -198,19 +216,24 @@ export function startReviewUI() {
   let port;
   let controller;
   let operation = 0;
+  let settingsRequest = 0;
   let busy = false;
   let mode = 'focused';
   let identityKey = '';
   let pathKey = '';
+  let resumeProbe = '';
   let currentIdentity;
   let configured = false;
   let model = '';
+  let effort = '';
   let status = '';
   let error = '';
   let timer;
   let destroyed = false;
   const fileStates = new Map();
   const filePanels = new Map();
+  const observedReviews = new Map();
+  let reviewControls = new Map();
   const revealed = new Set();
   let finalResult = false;
   let reviewStage = '';
@@ -218,95 +241,160 @@ export function startReviewUI() {
   let providerName = 'selected CLI';
   let reviewProviderName = '';
   let reviewModel = '';
+  let reviewEffort = '';
+  let reviewPreferences;
   let savedReview;
+  const missedSavedReviews = new Set();
+  let pendingAction;
   let cacheMessage = '';
+  let cacheWarning = false;
+  let cacheLookupFailed = false;
+  let openingSavedReview = false;
   let cacheProbe = '';
   let cacheProbeVersion = 0;
   let fileFilter = 'all';
+  let fileListOpen = false;
 
   const header = element('div', 'rf-toolbar');
   const brand = element('strong', 'rf-brand', 'PRiorities');
+  const progressToggle = button('', () => { fileListOpen = !fileListOpen; renderFileProgress(); }, 'rf-progress-toggle');
+  progressToggle.setAttribute('aria-controls', 'rf-file-progress');
+  progressToggle.hidden = true;
   const buttons = element('div', 'rf-actions');
-  const analyze = button('Analyze PR', () => analyzePullRequest({ cacheOnly: Boolean(savedReview && !analysis), force: attempted && !savedReview }), 'rf-primary rf-analyze');
-  const freshReview = button('Run fresh review', () => analyzePullRequest({ force: true }));
+  const analyze = button('Analyze PR', () => analyzePullRequest({ cacheOnly: canOpenSavedReview(), force: (attempted || cacheLookupFailed) && !canOpenSavedReview() }), 'rf-primary rf-analyze');
+  const alternateReview = button('Run fresh review', () => analyzePullRequest(savedReview && missedSavedReviews.has(savedReview.candidate) ? { cacheOnly: true } : { force: true }));
   const cancel = button('Cancel', () => cancelAnalysis());
   const settings = button('Settings', () => openSettings());
   const focused = button('Focused review', () => setMode('focused'));
   const full = button('Full diff', () => setMode('full'));
-  const retryFinal = button('Retry cross-file check', () => retryReview());
+  const retryFinal = button('Retry review decisions', () => retryReview());
   retryFinal.hidden = true;
   cancel.hidden = true;
   focused.hidden = true;
   full.hidden = true;
-  buttons.append(focused, full, analyze, freshReview, cancel, retryFinal, settings);
-  header.append(brand, buttons);
+  const viewToggle = element('div', 'rf-view-toggle');
+  viewToggle.setAttribute('role', 'group');
+  viewToggle.setAttribute('aria-label', 'Diff view');
+  viewToggle.append(focused, full);
+  const menu = disclosure('⋯', 'rf-menu');
+  const menuToggle = menu.querySelector('summary');
+  menuToggle.setAttribute('aria-label', 'More actions');
+  menuToggle.title = 'More actions';
+  const menuActions = element('div', 'rf-menu-actions');
+  menuActions.append(alternateReview, settings);
+  menu.append(menuActions);
+  menuActions.addEventListener('click', event => { if (event.target.closest('button')) menu.open = false; });
+  shadow.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !menu.open) return;
+    menu.open = false;
+    menuToggle.focus();
+    event.stopPropagation();
+  });
+  document.addEventListener('pointerdown', event => {
+    if (menu.open && !event.composedPath().includes(menu)) menu.open = false;
+  });
+  shadow.addEventListener('focusin', event => {
+    if (menu.open && !menu.contains(event.target)) menu.open = false;
+  });
+  buttons.append(viewToggle, analyze, cancel, retryFinal, menu);
+  header.append(brand, progressToggle, buttons);
   const statusNode = element('p', 'rf-status');
   statusNode.setAttribute('role', 'status');
   statusNode.setAttribute('aria-live', 'polite');
   const errorNode = element('p', 'rf-error');
   errorNode.setAttribute('role', 'alert');
   const result = element('div', 'rf-result');
-  const welcome = element('p', 'rf-welcome', 'Start with the changes that need a decision. Generated files are skipped, and every line stays accessible.');
+  const welcome = element('p', 'rf-welcome', 'Focus on the changes that need you. Every line stays accessible.');
   const progressPanel = element('div', 'rf-progress-panel');
   const phase = element('strong', 'rf-phase');
   const progressDetail = element('span', 'rf-progress-detail');
   const progressHeading = element('div', 'rf-progress-heading');
   progressHeading.append(phase, progressDetail);
   const progressBar = element('progress', 'rf-progress-bar');
-  progressBar.setAttribute('aria-label', 'File reviews complete');
-  const stages = element('ol', 'rf-stages');
-  for (const label of ['Read PR', 'Review files', 'Check related changes']) stages.append(element('li', '', label));
-  progressPanel.append(progressHeading, progressBar, stages);
+  progressBar.setAttribute('aria-label', 'Files classified');
+  progressPanel.append(progressHeading, progressBar);
   const cacheNotice = element('p', 'rf-cache-notice');
-  const fileProgress = disclosure('File progress', 'rf-file-progress');
+  const runSettings = element('p', 'rf-run-settings rf-caption');
+  const fileProgress = element('div', 'rf-file-progress');
+  fileProgress.id = 'rf-file-progress';
   fileProgress.hidden = true;
-  panel.append(header, welcome, progressPanel, statusNode, cacheNotice, errorNode, fileProgress, result);
+  const secondary = element('div', 'rf-secondary');
+  secondary.append(runSettings, result);
+  panel.append(header, secondary, welcome, progressPanel, statusNode, cacheNotice, errorNode, fileProgress);
+
+  function canOpenSavedReview() {
+    return Boolean(savedReview && !analysis && !missedSavedReviews.has(savedReview.candidate));
+  }
 
   function renderControls() {
+    const activeModel = reviewProviderName ? reviewModel : model;
+    const activeEffort = reviewProviderName ? reviewEffort : effort;
+    const settingsChanged = Boolean(reviewProviderName && model &&
+      (reviewProviderName !== providerName || reviewModel !== model || reviewEffort !== effort));
+    const primaryAction = !analysis || settingsChanged;
+    runSettings.textContent = `${reviewProviderName || providerName} · ${activeModel || 'Choose a model in Settings'}${activeModel ? ` · Effort: ${activeEffort || 'model default'}` : ''}${reviewPreferences ? ` · Focus: ${reviewPreferences.focus}` : ''}`;
     analyze.disabled = busy;
-    analyze.textContent = savedReview && !analysis ? 'Open saved review' : attempted ? 'Run fresh review' : 'Analyze PR';
-    analyze.classList.toggle('rf-primary', !analysis);
-    freshReview.hidden = busy || !savedReview || Boolean(analysis);
+    analyze.hidden = busy;
+    analyze.textContent = canOpenSavedReview() ? 'Open saved review' : settingsChanged ? 'Analyze PR' : attempted || cacheLookupFailed ? 'Run fresh review' : 'Analyze PR';
+    analyze.classList.toggle('rf-primary', primaryAction);
+    if (!primaryAction && analyze.parentElement !== menuActions) menuActions.prepend(analyze);
+    else if (primaryAction && analyze.parentElement !== buttons) buttons.insertBefore(analyze, cancel);
+    alternateReview.hidden = busy || !savedReview || Boolean(analysis);
+    alternateReview.textContent = savedReview && missedSavedReviews.has(savedReview.candidate) ? 'Retry saved review' : 'Run fresh review';
     cancel.hidden = !busy;
+    cancel.disabled = pendingAction?.type === 'cancel';
     focused.hidden = !analysis;
     full.hidden = !analysis;
-    retryFinal.hidden = busy || !port || !['check-failed', 'cancelled'].includes(reviewStage) || [...fileStates.values()].some(file => !['complete', 'skipped', 'excluded'].includes(file.state)) || !analysis;
+    viewToggle.hidden = !analysis;
+    retryFinal.hidden = busy || !port || !['check-failed', 'cancelled'].includes(reviewStage) || [...fileStates.values()].some(file => !['classified', 'complete', 'skipped', 'excluded'].includes(file.state));
     focused.setAttribute('aria-pressed', String(mode === 'focused'));
     full.setAttribute('aria-pressed', String(mode === 'full'));
     errorNode.hidden = !error;
-    errorNode.textContent = error;
+    if (errorNode.textContent !== error) errorNode.textContent = error;
     welcome.hidden = busy || Boolean(analysis) || fileStates.size > 0;
-    progressPanel.hidden = !busy;
+    progressPanel.hidden = !busy || fileStates.size > 0;
     const states = [...fileStates.values()];
     const total = states.filter(file => !['skipped', 'excluded'].includes(file.state)).length;
-    const complete = states.filter(file => file.state === 'complete').length;
-    const stage = !snapshot ? 0 : reviewStage === 'checking' ? 2 : 1;
-    phase.textContent = ['Reading this pull request', 'Reviewing files', 'Checking related changes'][stage];
-    progressDetail.textContent = stage === 1 ? `${complete} of ${total} files ready` : stage === 2 ? 'File reviews are ready to read below' : reviewStage === 'restoring' ? 'Checking the saved review against the current context' : 'Capturing the complete diff and context';
-    if (stage === 1 && total) { progressBar.max = total; progressBar.value = complete; }
+    const classified = classifiedCount();
+    const stage = openingSavedReview || !snapshot ? 0 : reviewStage === 'checking' ? 2 : 1;
+    phase.textContent = [reviewStage === 'reconnecting' ? 'Reconnecting to analysis' : openingSavedReview ? 'Opening saved review' : 'Reading this pull request', 'Classifying files', 'Choosing review decisions'][stage];
+    progressDetail.textContent = stage === 1 ? `${classified} of ${total} files classified` : stage === 2 ? 'Every file is classified; reading the whole PR' : reviewStage === 'reconnecting' ? 'Checking for work already running in this tab' : openingSavedReview ? 'Checking the saved review against the current context' : 'Capturing the complete diff and context';
+    renderProgressSummary();
+    if (stage === 1 && total) { progressBar.max = total; progressBar.value = classified; }
     else progressBar.removeAttribute('value');
-    [...stages.children].forEach((step, index) => { step.dataset.state = index === stage ? 'current' : index < stage ? 'complete' : 'pending'; });
-    cacheNotice.hidden = !cacheMessage && !savedReview;
-    cacheNotice.textContent = cacheMessage || (savedReview ? `Saved review available from ${new Date(savedReview.savedAt).toLocaleString()}. Open it to verify the current context and reuse the results without a new model call.` : '');
-    if (busy || status) statusNode.textContent = status;
-    else if (!configured) statusNode.textContent = `Connect your local ${providerName} helper in Settings, then analyze this PR.`;
-    else statusNode.textContent = `Ready to analyze this PR with ${providerName}${model ? ` (${model})` : ''}. Analysis starts only when you click Analyze PR.`;
+    cacheNotice.hidden = Boolean(analysis) && !cacheWarning || !cacheMessage && !savedReview;
+    cacheNotice.textContent = cacheMessage || (savedReview ? `Saved ${new Date(savedReview.savedAt).toLocaleString()}. Opening checks the current context without a new model call.` : '');
+    let nextStatus = pendingAction?.message ?? status;
+    if (busy && snapshot && !error && !pendingAction) nextStatus = `${phase.textContent}. ${progressDetail.textContent}.`;
+    if (!busy && !status) nextStatus = !configured
+      ? `Connect your local ${providerName} helper in Settings, then analyze this PR.`
+      : `Ready to analyze this PR with ${providerName}${model ? ` (${model})` : ''}. Analysis starts only when you click Analyze PR.`;
+    if (settingsChanged && !busy && !pendingAction && !error) nextStatus = `Settings changed. Analyze PR will use ${providerName} (${model}), effort: ${effort || 'model default'}.`;
     const split = [...document.querySelectorAll('table[data-diff-anchor] tr.diff-line-row')].some(row => row.querySelectorAll('.diff-text').length > 1);
-    if (analysis && mode === 'focused' && split) statusNode.textContent += ' GitHub is in split view. Choose Unified in its diff view settings to collapse lines.';
+    if (analysis && mode === 'focused' && split) nextStatus += ' GitHub is in split view. Choose Unified in its diff view settings to collapse lines.';
+    if (statusNode.textContent !== nextStatus) statusNode.textContent = nextStatus;
+    const ordinaryStatus = (busy && snapshot || finalResult && verifiedPage() || !attempted && configured && !status) && !error && !pendingAction && !split && !(settingsChanged && !busy);
+    statusNode.classList.toggle('rf-visually-hidden', Boolean(ordinaryStatus));
+    const foldingDetail = result.querySelector('.rf-folding-detail');
+    if (foldingDetail) foldingDetail.textContent = status;
     result.hidden = mode === 'full';
   }
 
-  async function loadSettings() {
+  async function loadSettings(refreshConnection = false) {
+    const request = ++settingsRequest;
     try {
-      const settings = await chrome.runtime.sendMessage({ type: 'get-settings' });
+      const settings = await chrome.runtime.sendMessage({ type: 'get-settings', refreshConnection });
+      if (request !== settingsRequest || destroyed) return;
       if (settings?.error) throw new Error(settings.error);
-      if (!['codex', 'claude'].includes(settings?.provider)) throw new Error('Reload PRiorities in chrome://extensions, then refresh this PR. The background worker has not updated to local CLI support.');
+      if (!['codex', 'claude'].includes(settings?.provider)) throw new Error('The extension returned invalid provider settings.');
       providerName = settings.provider === 'claude' ? 'Claude Code' : 'Codex';
       configured = Boolean(settings?.configured);
       model = settings?.model ?? '';
+      effort = settings?.effort ?? '';
       void refreshSavedReview(true);
       renderControls();
     } catch (failure) {
+      if (request !== settingsRequest || destroyed) return;
       configured = false;
       model = '';
       error = `The extension could not read its settings. Reload this page after reloading the extension. ${failure.message}`;
@@ -314,20 +402,34 @@ export function startReviewUI() {
     }
   }
 
+  function refreshConnection() {
+    if (destroyed || document.hidden || busy && !snapshot || !identityKey) return;
+    void loadSettings();
+  }
+
   async function refreshSavedReview(force = false) {
-    if (busy || analysis) return;
+    if (busy || analysis || !isDiffPage()) return;
     const identity = readPageIdentity(document, location.href);
     if (!identity?.headSha || !identity.baseSha) return;
-    const key = JSON.stringify([identity.owner, identity.repo, identity.number, identity.baseSha, identity.headSha, providerName, model]);
+    const key = JSON.stringify([identity.owner, identity.repo, identity.number, identity.baseSha, identity.headSha, providerName, model, effort]);
     if (!force && key === cacheProbe) return;
     cacheProbe = key;
     const version = ++cacheProbeVersion;
     try {
       const cached = await chrome.runtime.sendMessage({ type: 'peek-review', baseSha: identity.baseSha, headSha: identity.headSha });
       if (version !== cacheProbeVersion || busy || analysis) return;
-      savedReview = cached?.available ? cached : undefined;
+      if (cached?.error) throw new Error(cached.error);
+      if (cacheLookupFailed) { cacheMessage = ''; cacheWarning = false; }
+      cacheLookupFailed = false;
+      savedReview = cached?.available ? { ...cached, candidate: JSON.stringify([key, cached.key, cached.savedAt]) } : undefined;
       renderControls();
-    } catch {}
+    } catch (failure) {
+      if (version !== cacheProbeVersion || busy || analysis) return;
+      cacheLookupFailed = true;
+      cacheWarning = true;
+      cacheMessage = failure.message;
+      renderControls();
+    }
   }
 
   async function openSettings() {
@@ -340,9 +442,9 @@ export function startReviewUI() {
     }
   }
 
-  function cancelAnalysis(message = 'Analysis cancelled. Completed file reviews remain available.', close = false) {
+  function cancelAnalysis(message = 'Analysis cancelled. Completed file classifications are kept.', close = false) {
     if (port && !close) {
-      status = 'Stopping active file reviews…';
+      pendingAction = { type: 'cancel', message: 'Stopping active analyses…' };
       renderControls();
       port.postMessage({ type: 'cancel' });
       return;
@@ -351,11 +453,12 @@ export function startReviewUI() {
     controller?.abort();
     controller = undefined;
     if (port) {
-      try { port.postMessage({ type: 'cancel' }); } catch { /* A disconnected worker has already stopped the request. */ }
+      try { port.postMessage({ type: 'discard' }); } catch {}
       port.disconnect();
       port = undefined;
     }
     busy = false;
+    pendingAction = undefined;
     status = message;
     renderControls();
   }
@@ -367,31 +470,40 @@ export function startReviewUI() {
     analysis = undefined;
     finalResult = false;
     reviewStage = '';
+    reviewProviderName = '';
+    reviewModel = '';
+    reviewEffort = '';
+    reviewPreferences = undefined;
+    pendingAction = undefined;
     savedReview = undefined;
     cacheMessage = '';
+    cacheWarning = false;
+    cacheLookupFailed = false;
+    openingSavedReview = false;
     cacheProbe = '';
     cacheProbeVersion++;
     fileFilter = 'all';
     fileStates.clear();
     revealed.clear();
-    for (const { node } of filePanels.values()) node.remove();
-    filePanels.clear();
+    removeFilePanels();
     fileProgress.hidden = true;
+    fileListOpen = false;
+    progressToggle.hidden = true;
     result.replaceChildren();
   }
 
   function retryReview(path) {
-    if (!port || !verifiedPage()) return;
+    if (!port || openingSavedReview || !verifiedPage()) return;
     busy = true;
     error = '';
     reviewStage = path ? 'files' : 'checking';
-    status = path ? `Retrying ${path}…` : 'Checking relationships across files…';
+    pendingAction = { type: path ? 'file' : 'check', path, message: path ? `Retrying ${path}…` : 'Retrying review decisions…' };
     port.postMessage(path ? { type: 'retry-file', path } : { type: 'retry-final' });
     renderControls();
   }
 
   function reviewGeneratedFile(path) {
-    if (!port || !verifiedPage() || fileStates.get(path)?.state !== 'excluded') return;
+    if (!port || openingSavedReview || !verifiedPage() || fileStates.get(path)?.state !== 'excluded') return;
     fileStates.set(path, { state: 'queued', message: 'Queued by your request.' });
     cacheMessage = '';
     fileFilter = 'all';
@@ -399,7 +511,7 @@ export function startReviewUI() {
     finalResult = false;
     error = '';
     reviewStage = 'files';
-    status = `Reviewing ${path}…`;
+    pendingAction = { type: 'file', path, message: `Analyzing ${path}…` };
     port.postMessage({ type: 'review-file', path });
     if (analysis) renderAnalysis();
     renderFileProgress();
@@ -411,7 +523,7 @@ export function startReviewUI() {
   }
 
   function fileLabel(file) {
-    return { queued: 'Waiting', classifying: 'Reading changes', prioritizing: 'Choosing review focus', complete: finalResult ? 'Review ready' : 'Ready · cross-file check pending', failed: 'Needs retry', cancelled: 'Cancelled', skipped: 'No text changes to analyze', excluded: 'Generated · not reviewed' }[file.state];
+    return { queued: 'AI waiting', classifying: 'AI classifying', classified: 'AI classified · review decisions pending', complete: 'AI ready', failed: 'AI needs retry', cancelled: 'AI cancelled', skipped: 'AI skipped · no text changes', excluded: 'AI skipped · generated' }[file.state];
   }
 
   function fileTopics(path) {
@@ -421,23 +533,115 @@ export function startReviewUI() {
     return analysis.topics.filter(topic => topic.editIds.some(id => ids.has(id)));
   }
 
+  function classifiedCount() {
+    return [...fileStates.values()].filter(file => ['classified', 'complete'].includes(file.state)).length;
+  }
+
   function fileCounts() {
     const states = [...fileStates.values()];
     const total = states.filter(file => !['skipped', 'excluded'].includes(file.state)).length;
-    const complete = states.filter(file => file.state === 'complete').length;
-    const active = states.filter(file => ['classifying', 'prioritizing'].includes(file.state)).length;
+    const active = states.filter(file => file.state === 'classifying').length;
+    const waiting = states.filter(file => file.state === 'queued').length;
     const failed = states.filter(file => file.state === 'failed').length;
     const excluded = generatedCount();
-    return `${complete} of ${total} file reviews ready${active ? ` · ${active} running` : ''}${failed ? ` · ${failed} failed` : ''}${excluded ? ` · ${excluded} generated ${excluded === 1 ? 'file' : 'files'} not reviewed` : ''}`;
+    return `${classifiedCount()} of ${total} files ${finalResult ? 'AI ready' : 'classified'}${active ? ` · ${active} classifying` : ''}${waiting ? ` · ${waiting} waiting` : ''}${failed ? ` · ${failed} failed` : ''}${excluded ? ` · ${excluded} generated ${excluded === 1 ? 'file' : 'files'} skipped by AI` : ''}`;
+  }
+
+  function renderProgressSummary() {
+    const states = [...fileStates.values()];
+    const reviewed = [...fileStates.keys()].filter(path => observedReviews.get(path) === true).length;
+    const unknown = [...fileStates.keys()].filter(path => !observedReviews.has(path)).length;
+    const total = states.filter(file => !['skipped', 'excluded'].includes(file.state)).length;
+    const phaseLabel = openingSavedReview ? 'Opening saved review' : reviewStage === 'checking' ? 'Review decisions' : reviewStage === 'check-failed' ? 'Review decisions failed' : reviewStage === 'cancelled' || !busy && states.some(file => file.state === 'cancelled') ? 'Cancelled' : states.some(file => file.state === 'failed') ? 'Needs retry' : busy ? 'Analyzing' : '';
+    progressToggle.hidden = !states.length;
+    const analyzed = total ? `${finalResult ? 'AI ready' : 'Classified'} ${classifiedCount()}/${total}` : `All ${states.length} files skipped`;
+    progressToggle.textContent = `${analyzed}${phaseLabel ? ` · ${phaseLabel}` : ''} · Viewed ${reviewed}/${states.length}${unknown ? ` (${unknown} unknown)` : ''}`;
+    progressToggle.title = `${fileCounts()}. ${reviewed} of ${states.length} files viewed in GitHub. ${fileListOpen ? 'Hide' : 'Show'} file progress.`;
+    progressToggle.setAttribute('aria-expanded', String(fileListOpen));
+  }
+
+  function nativeReviewControl(native) {
+    return native?.element.querySelector('input.js-reviewed-checkbox, button[aria-pressed][aria-label="Viewed"], button[aria-pressed][aria-label="Not Viewed"]');
+  }
+
+  function readReviewControls() {
+    const controls = new Map();
+    for (const native of findNativeFiles(document)) {
+      const control = nativeReviewControl(native);
+      if (!control) continue;
+      const reviewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
+      observedReviews.set(native.path, reviewed);
+      controls.set(native.path, { reviewed, disabled: control.disabled || control.getAttribute('aria-disabled') === 'true' });
+    }
+    const changed = controls.size !== reviewControls.size || [...controls].some(([path, state]) => {
+      const previous = reviewControls.get(path);
+      return !previous || state.reviewed !== previous.reviewed || state.disabled !== previous.disabled;
+    });
+    reviewControls = controls;
+    return changed;
+  }
+
+  function updateReviewToggle(label, path) {
+    const control = reviewControls.get(path);
+    const reviewed = observedReviews.get(path);
+    const input = label.querySelector('input');
+    input.checked = reviewed === true;
+    input.indeterminate = reviewed === undefined;
+    input.disabled = !control;
+    input.setAttribute('aria-disabled', String(!control || control.disabled));
+    label.dataset.reviewed = reviewed === undefined ? 'unknown' : String(reviewed);
+    const hint = label.querySelector('.rf-review-unavailable');
+    hint.hidden = Boolean(control && !control.disabled);
+    hint.textContent = control ? 'Unavailable in this view' : reviewed === undefined ? 'Status unavailable' : 'Load file to update';
+    label.title = control && !control.disabled ? 'Uses GitHub’s Viewed checkbox. AI analysis never changes your checkmark.' : 'Load this file in GitHub’s full diff to read or change its Viewed status.';
+  }
+
+  function reviewToggle(path) {
+    const label = element('label', 'rf-reviewed-toggle');
+    const input = element('input');
+    input.type = 'checkbox';
+    input.setAttribute('aria-label', `Reviewed by you: ${path}`);
+    input.addEventListener('click', event => {
+      if (!verifiedPage()) {
+        event.preventDefault();
+        checkPage();
+        return;
+      }
+      const native = findNativeFiles(document).find(file => file.path === path);
+      const control = nativeReviewControl(native);
+      if (!control || control.disabled || control.getAttribute('aria-disabled') === 'true') event.preventDefault();
+    });
+    input.addEventListener('change', () => {
+      if (!verifiedPage()) {
+        checkPage();
+        return;
+      }
+      const native = findNativeFiles(document).find(file => file.path === path);
+      const control = nativeReviewControl(native);
+      if (control && !control.disabled && control.getAttribute('aria-disabled') !== 'true') {
+        const reviewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
+        if (input.checked !== reviewed) control.click();
+      }
+      readReviewControls();
+      renderFileProgress();
+    });
+    label.append(input, element('span', '', 'Reviewed by you'), element('span', 'rf-review-unavailable'));
+    updateReviewToggle(label, path);
+    return label;
   }
 
   function renderFileProgress() {
-    const focusedFilter = shadow.activeElement?.closest('.rf-file-filters') ? shadow.activeElement.textContent : null;
-    fileProgress.hidden = !fileStates.size;
-    fileProgress.querySelector('summary').textContent = fileCounts();
-    for (const child of [...fileProgress.children].slice(1)) child.remove();
+    const focused = shadow.activeElement;
+    const focusedPath = focused?.closest('.rf-file-progress-row')?.dataset.path;
+    const focusedFilter = focused?.closest('.rf-file-filters') ? focused.textContent : null;
+    const previousScroll = fileProgress.querySelector('.rf-file-list')?.scrollTop ?? 0;
+    fileProgress.hidden = !fileStates.size || !fileListOpen;
+    renderProgressSummary();
+    fileProgress.replaceChildren();
+    fileProgress.append(element('p', 'rf-analysis-count rf-caption', fileCounts()));
+    fileProgress.append(element('p', 'rf-review-help rf-caption', 'Your checkmarks track your review in GitHub. AI ready means analysis finished.'));
     const filters = element('div', 'rf-file-filters');
-    for (const [value, label] of [['all', 'All files'], ['attention', 'Needs attention'], ['ready', 'Ready'], ['skipped', 'Skipped']]) {
+    for (const [value, label] of [['all', 'All files'], ['unreviewed', 'To review'], ['reviewed', 'Reviewed'], ['failed', 'AI needs retry']]) {
       const filter = button(label, () => { fileFilter = value; renderFileProgress(); });
       filter.setAttribute('aria-pressed', String(fileFilter === value));
       filters.append(filter);
@@ -445,23 +649,32 @@ export function startReviewUI() {
     fileProgress.append(filters);
     const rows = element('div', 'rf-file-list');
     for (const [path, file] of fileStates) {
-      if (fileFilter === 'ready' && file.state !== 'complete') continue;
-      if (fileFilter === 'skipped' && !['excluded', 'skipped'].includes(file.state)) continue;
-      if (fileFilter === 'attention' && !['failed', 'cancelled'].includes(file.state) && !fileTopics(path).some(topic => topic.priority === 'review')) continue;
+      if (fileFilter === 'reviewed' && observedReviews.get(path) !== true) continue;
+      if (fileFilter === 'unreviewed' && observedReviews.get(path) === true) continue;
+      if (fileFilter === 'failed' && !['failed', 'cancelled'].includes(file.state)) continue;
       const row = element('div', 'rf-file-progress-row');
       row.dataset.state = file.state;
+      row.dataset.path = path;
+      const label = element('span', 'rf-file-state', fileLabel(file));
+      label.dataset.state = file.state;
       row.append(button(path, () => {
         const native = findNativeFiles(document).find(entry => entry.path === path);
         native?.element.scrollIntoView({ block: 'start', behavior: 'auto' });
-      }, 'rf-file-path'), element('span', '', fileLabel(file)));
-      if (['failed', 'cancelled'].includes(file.state) && port) row.append(button('Retry file', () => retryReview(path)));
-      if (file.state === 'excluded' && port) row.append(button('Review anyway', () => reviewGeneratedFile(path)));
+      }, 'rf-file-path'), label, reviewToggle(path));
+      if (['failed', 'cancelled'].includes(file.state) && port && !openingSavedReview) row.append(button('Retry file', () => retryReview(path)));
+      if (file.state === 'excluded' && port && !openingSavedReview) row.append(button('Review anyway', () => reviewGeneratedFile(path)));
       if (['failed', 'cancelled'].includes(file.state) && file.message) row.append(element('span', 'rf-caption', file.message));
       rows.append(row);
     }
     if (!rows.childElementCount) rows.append(element('p', 'rf-caption', 'No files in this view.'));
     fileProgress.append(rows);
+    rows.scrollTop = previousScroll;
     if (focusedFilter) [...filters.children].find(filter => filter.textContent === focusedFilter)?.focus({ preventScroll: true });
+    if (focusedPath) {
+      const row = [...rows.children].find(row => row.dataset.path === focusedPath);
+      const replacement = focused.tagName === 'INPUT' ? row?.querySelector('input') : [...row?.querySelectorAll('button') ?? []].find(button => button.textContent === focused.textContent);
+      (replacement ?? filters.querySelector('[aria-pressed="true"]')).focus({ preventScroll: true });
+    }
     renderFilePanels();
   }
 
@@ -470,16 +683,33 @@ export function startReviewUI() {
     return new Map(snapshot.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit').map(edit => [edit.id, { file, edit, classification: classifications.get(edit.id) }]))));
   }
 
+  function removeFilePanels() {
+    for (const { node, badge } of filePanels.values()) {
+      node.remove();
+      badge.remove();
+    }
+    filePanels.clear();
+  }
+
   function renderFilePanels() {
+    if (!isDiffPage()) return;
+    let locations;
     for (const [container, record] of filePanels) {
-      if (container.isConnected && record.node.isConnected) continue;
+      if (container.isConnected) continue;
       record.node.remove();
+      record.badge.remove();
       filePanels.delete(container);
     }
     for (const native of findNativeFiles(document)) {
       const file = fileStates.get(native.path);
       if (!file) continue;
       let record = filePanels.get(native.element);
+      if (record && record.node.dataset.path !== native.path) {
+        record.node.remove();
+        record.badge.remove();
+        filePanels.delete(native.element);
+        record = undefined;
+      }
       if (!record) {
         const node = element('div', 'review-focus-file-progress');
         node.setAttribute(ownedAttribute, '');
@@ -490,53 +720,77 @@ export function startReviewUI() {
         style.href = chrome.runtime.getURL('review.css');
         const content = element('div', 'rf-panel rf-file-panel');
         root.append(style, content);
-        const header = native.element.querySelector('.file-header, [class*="diff-file-header"]');
-        if (header) header.after(node);
-        else if (native.element.tagName === 'TABLE') native.element.before(node);
-        else native.element.prepend(node);
-        record = { node, content };
+        const badge = element('span', 'review-focus-file-status');
+        badge.setAttribute(ownedAttribute, '');
+        badge.dataset.path = native.path;
+        const badgeRoot = badge.attachShadow({ mode: 'open' });
+        const heading = element('span', 'rf-panel rf-file-status');
+        const label = element('span', 'rf-file-state');
+        const actions = element('span', 'rf-file-actions');
+        heading.append(label, actions);
+        badgeRoot.append(style.cloneNode(), heading);
+        record = { node, content, badge, label, actions };
         filePanels.set(native.element, record);
       }
-      if (record.file === file && record.final === finalResult && record.mode === mode && record.connected === Boolean(port)) continue;
-      record.file = file;
-      record.final = finalResult;
+      const header = native.element.querySelector('.file-header, [class*="diff-file-header"]');
+      for (const orphan of native.element.querySelectorAll('.review-focus-file-status')) {
+        if (orphan !== record.badge) orphan.remove();
+      }
+      if (header && record.badge.parentElement !== header) header.append(record.badge);
+      if (!record.node.isConnected) {
+        if (header) {
+          const headerWrapper = header.closest('[data-diff-header-wrapper]') ?? header;
+          headerWrapper.after(record.node);
+        } else if (native.element.tagName === 'TABLE') native.element.before(record.node);
+        else native.element.prepend(record.node);
+      }
+      if (!header && record.badge.nextElementSibling !== record.node) record.node.before(record.badge);
+      record.badge.dataset.state = file.state;
+      record.label.dataset.state = file.state;
+      record.label.textContent = fileLabel(file);
+      record.label.title = file.message || 'AI analysis status. Your Viewed checkmark is independent.';
+      const action = port && !openingSavedReview
+        ? ['failed', 'cancelled'].includes(file.state) ? 'retry' : file.state === 'excluded' ? 'include' : ''
+        : '';
+      if (record.action !== action) {
+        const activeElement = record.badge.shadowRoot.activeElement;
+        const wasFocused = activeElement && activeElement === record.actions.firstElementChild;
+        record.actions.replaceChildren();
+        if (action) record.actions.append(button(action === 'retry' ? 'Retry file' : 'Review anyway', () => action === 'retry' ? retryReview(native.path) : reviewGeneratedFile(native.path), 'rf-link-button'));
+        if (wasFocused) (record.actions.firstElementChild ?? progressToggle).focus({ preventScroll: true });
+        record.action = action;
+      }
+      const topics = file.state === 'complete' && analysis ? fileTopics(native.path) : [];
+      const existingDetails = record.content.querySelector('.rf-file-decisions');
+      if (existingDetails) existingDetails.hidden = observedReviews.get(native.path) === true;
+      const sameTopics = record.topics?.length === topics.length && topics.every((topic, index) => topic === record.topics[index]);
+      if (record.state === file.state && record.message === file.message && sameTopics && record.mode === mode) continue;
+      record.state = file.state;
+      record.message = file.message;
+      record.topics = topics;
       record.mode = mode;
-      record.connected = Boolean(port);
       record.node.dataset.state = file.state;
       record.content.replaceChildren();
-      const heading = element('div', 'rf-file-heading');
-      heading.append(element('strong', '', 'PRiorities'), element('span', 'rf-file-state', fileLabel(file)));
-      if (['failed', 'cancelled'].includes(file.state) && port) heading.append(button('Retry file', () => retryReview(native.path)));
-      if (file.state === 'excluded' && port) heading.append(button('Review anyway', () => reviewGeneratedFile(native.path)));
-      record.content.append(heading);
       if (['failed', 'cancelled', 'skipped'].includes(file.state) && file.message) record.content.append(element('p', 'rf-file-message', file.message));
-      if (file.state !== 'complete' || mode === 'full' || !analysis) continue;
-      const topics = fileTopics(native.path);
-      const count = topics.filter(topic => topic.priority === 'review').length;
-      const details = disclosure(count ? `${count} review ${count === 1 ? 'decision' : 'decisions'} in this file` : 'Supporting changes · see why');
-      details.className = 'rf-file-decisions';
-      details.open = Boolean(count);
-      if (!finalResult) details.append(element('p', 'rf-caption', 'Initial file review. The cross-file check may revise these decisions.'));
-      for (const topic of topics) details.append(renderTopic(topic, editLocations(), true));
+      if (file.state !== 'complete' || mode === 'full' || !analysis) {
+        record.node.hidden = !record.content.childElementCount;
+        continue;
+      }
+      record.node.hidden = false;
+      const details = element('div', 'rf-file-decisions');
+      details.hidden = observedReviews.get(native.path) === true;
+      if (!locations) locations = editLocations();
+      const limits = [...new Set([...locations.values()].filter(entry => entry.file.path === native.path && entry.classification?.kinds.includes('unknown')).map(entry => entry.classification.uncertainty || entry.classification.reason))];
+      for (const limit of limits) {
+        const notice = element('p', 'rf-uncertainty rf-kept-visible');
+        notice.append(element('strong', '', 'Kept visible because evidence is incomplete: '), document.createTextNode(limit));
+        details.append(notice);
+      }
+      const keptKinds = [...new Set([...locations.values()].filter(entry => entry.file.path === native.path).flatMap(entry => entry.classification?.kinds.filter(kind => reviewPreferences?.alwaysShow.includes(kind)) ?? []))];
+      if (keptKinds.length) details.append(element('p', 'rf-kept-visible rf-caption', `Your settings keep ${keptKinds.join(', ')} edits visible.`));
+      for (const topic of topics) details.append(renderTopic(topic, locations));
       record.content.append(details);
     }
-  }
-
-  function applyFileResults() {
-    const complete = [...fileStates.entries()].filter(([, file]) => file.state === 'complete');
-    if (!complete.length) return;
-    const previous = analysis ?? { topics: [], classifications: [] };
-    const allocated = new Set(previous.classifications.map(entry => entry.editId));
-    const added = complete.filter(([, file]) => file.analysis?.classifications.some(entry => !allocated.has(entry.editId)));
-    analysis = {
-      summary: 'Completed file reviews appear beside their diffs. The final check will connect related changes across files.',
-      topics: [...previous.topics, ...added.flatMap(([path, file]) => file.analysis.topics.map(topic => ({ ...topic, id: `${path}:${topic.id}` })))],
-      classifications: [...previous.classifications, ...added.flatMap(([, file]) => file.analysis.classifications)]
-    };
-    folding?.restore();
-    folding = createNativeFolding(document, reviewedSnapshot(), analysis, () => updateFoldingStatus(), revealed);
-    result.replaceChildren(element('p', 'rf-provenance', 'Review completed files as they arrive. Pending and failed files stay expanded; the cross-file check may revise the focus.'));
-    applyFolding();
   }
 
   function reviewedSnapshot() {
@@ -546,12 +800,13 @@ export function startReviewUI() {
   function finishFailure(message, request) {
     if (operation !== request) return;
     busy = false;
+    pendingAction = undefined;
     error = message;
     status = 'Analysis did not finish. Check Settings or try again.';
     controller = undefined;
     if (port) { port.disconnect(); port = undefined; }
     for (const [path, file] of fileStates) {
-      if (['queued', 'classifying', 'prioritizing'].includes(file.state)) fileStates.set(path, { state: 'failed', message: 'The analysis connection closed. Analyze again to restart.' });
+      if (['queued', 'classifying'].includes(file.state)) fileStates.set(path, { state: 'failed', message: 'The analysis connection closed. Analyze again to restart.' });
     }
     renderFileProgress();
     renderControls();
@@ -559,17 +814,19 @@ export function startReviewUI() {
 
   async function analyzePullRequest({ force = false, cacheOnly = false } = {}) {
     if (busy) return;
+    const restoringReview = cacheOnly ? savedReview : undefined;
     cancelAnalysis('', true);
     clearReview();
+    openingSavedReview = cacheOnly;
     const request = ++operation;
     busy = true;
     status = 'Checking analysis settings…';
     renderControls();
-    await loadSettings();
+    await loadSettings(!cacheOnly);
     if (request !== operation) return;
-    if (!configured && !cacheOnly) {
+    if ((!configured || !model) && !cacheOnly) {
       busy = false;
-      error = `Connect ${providerName} in Settings first.`;
+      error = configured ? 'Choose a model and effort in Settings before analyzing.' : `Connect ${providerName} in Settings first.`;
       renderControls();
       await openSettings();
       return;
@@ -577,6 +834,7 @@ export function startReviewUI() {
     attempted = true;
     reviewProviderName = providerName;
     reviewModel = model;
+    reviewEffort = effort;
     reviewStage = cacheOnly ? 'restoring' : 'capture';
     busy = true;
     error = '';
@@ -597,86 +855,8 @@ export function startReviewUI() {
         const hasEdits = file.hunks.some(hunk => hunk.items.some(item => item.type === 'edit'));
         fileStates.set(file.path, { state: !hasEdits ? 'skipped' : isGeneratedFile(file) ? 'excluded' : 'queued' });
       }
-      const connection = chrome.runtime.connect({ name: 'review-focus' });
-      port = connection;
-      renderFileProgress();
-      connection.onMessage.addListener(message => {
-        if (request !== operation) return;
-        if (message.type === 'heartbeat') return;
-        if (message.type === 'session') {
-          reviewProviderName = message.provider === 'claude' ? 'Claude Code' : 'Codex';
-          reviewModel = message.model;
-          return;
-        }
-        if (message.type === 'cache-miss') {
-          cancelAnalysis('The saved review no longer matches the current PR context. Run a fresh review to continue.', true);
-          clearReview();
-          renderControls();
-          return;
-        }
-        const identity = readPageIdentity(document, location.href);
-        if (!identity || `${identity.owner}/${identity.repo}/${identity.number}` !== identityKey || identity.headSha && identity.headSha !== snapshot.headSha || identity.baseSha && identity.baseSha !== snapshot.baseSha) {
-          checkPage();
-          return;
-        }
-        if (message.type === 'file-progress') {
-          if (!fileStates.has(message.path)) return;
-          fileStates.set(message.path, message);
-          if (['queued', 'classifying', 'prioritizing'].includes(message.state)) {
-            busy = true;
-            finalResult = false;
-            reviewStage = 'files';
-          }
-          if (message.state === 'complete') applyFileResults();
-          status = message.state === 'failed' ? 'A file needs another attempt. Completed reviews remain available.' : 'Open a ready file to start reviewing while the others finish.';
-          renderFileProgress();
-          renderControls();
-        } else if (message.type === 'progress') {
-          reviewStage = message.stage;
-          status = message.message;
-          renderControls();
-        } else if (message.type === 'settled') {
-          busy = false;
-          reviewStage = message.state;
-          status = `${fileCounts()}. ${message.message}`;
-          error = message.state === 'check-failed' ? message.message : '';
-          renderFileProgress();
-          renderControls();
-        } else if (message.type === 'error') {
-          finishFailure(message.message, request);
-        } else if (message.type === 'result') {
-          busy = false;
-          controller = undefined;
-          folding?.restore();
-          snapshot = captured;
-          analysis = message.analysis;
-          finalResult = true;
-          reviewStage = 'complete';
-          cacheMessage = message.cache?.restored ? `Opened saved review from ${new Date(message.cache.savedAt).toLocaleString()}. Commits, context, provider and model match. No new model calls were made.`
-            : message.cache?.saved ? 'Review saved on this browser. Reopen this PR to reuse it, or run a fresh review anytime.' : message.cache?.message || '';
-          for (const [path, file] of fileStates) {
-            if (!['skipped', 'excluded'].includes(file.state)) fileStates.set(path, { ...file, state: 'complete', message: '' });
-          }
-          error = '';
-          status = '';
-          folding = createNativeFolding(document, reviewedSnapshot(), analysis, () => updateFoldingStatus(), revealed);
-          renderAnalysis();
-          renderFileProgress();
-          applyFolding();
-          renderControls();
-        }
-      });
-      connection.onDisconnect.addListener(() => {
-        if (request !== operation) return;
-        port = undefined;
-        if (busy) {
-          finishFailure('The analysis connection closed before the review finished. Completed files remain available. Analyze again to restart.', request);
-          return;
-        }
-        if (!finalResult) status = 'The analysis session closed. Completed files remain available. Analyze again to restart.';
-        renderFileProgress();
-        renderControls();
-      });
+      const connection = connectReview(request, { restoringReview, cacheOnly });
+      connection.postMessage({ type: 'discard' });
       connection.postMessage({ type: 'analyze', snapshot: captured, force, cacheOnly });
     } catch (failure) {
       if (request !== operation) return;
@@ -684,9 +864,164 @@ export function startReviewUI() {
     }
   }
 
+  function connectReview(request, { restoringReview, cacheOnly = false } = {}) {
+    const connection = chrome.runtime.connect({ name: 'review-focus' });
+    port = connection;
+    renderFileProgress();
+    connection.onMessage.addListener(message => {
+      if (request !== operation) return;
+      if (message.type === 'heartbeat') return;
+      if (message.type === 'no-session') {
+        port = undefined;
+        connection.disconnect();
+        busy = false;
+        reviewStage = '';
+        renderControls();
+        void refreshSavedReview();
+        return;
+      }
+      if (message.type === 'resumed') {
+        snapshot = message.snapshot;
+        attempted = true;
+        busy = true;
+        cacheOnly = message.restoring;
+        openingSavedReview = message.restoring;
+        mode = 'focused';
+        reviewStage = 'files';
+        fileStates.clear();
+        for (const file of snapshot.files) fileStates.set(file.path, { state: 'queued' });
+        status = 'Reconnected to the analysis already running in this tab.';
+        renderControls();
+        return;
+      }
+      if (message.type === 'session') {
+        reviewProviderName = message.provider === 'claude' ? 'Claude Code' : 'Codex';
+        reviewModel = message.model;
+        reviewEffort = message.effort;
+        reviewPreferences = message.review;
+        return;
+      }
+      if (message.type === 'cache-miss') {
+        if (restoringReview) missedSavedReviews.add(restoringReview.candidate);
+        cancelAnalysis('The saved review does not match the current commits, captured context or analysis settings. It is still saved. Run a fresh review, or choose Retry saved review in More actions (⋯) if a temporary fetch failed.', true);
+        clearReview();
+        savedReview = restoringReview;
+        renderControls();
+        return;
+      }
+      const identity = readPageIdentity(document, location.href);
+      if (message.type !== 'error' && (!identity || !snapshot || `${identity.owner}/${identity.repo}/${identity.number}` !== identityKey || isDiffPage() && (identity.headSha && identity.headSha !== snapshot.headSha || identity.baseSha && identity.baseSha !== snapshot.baseSha))) {
+        checkPage();
+        return;
+      }
+      if (message.type === 'file-progress') {
+        if (!fileStates.has(message.path)) return;
+        if (pendingAction?.type === 'file' && pendingAction.path === message.path) pendingAction = undefined;
+        fileStates.set(message.path, message);
+        if (!openingSavedReview && ['queued', 'classifying'].includes(message.state)) {
+          busy = true;
+          finalResult = false;
+          reviewStage = 'files';
+        }
+        status = message.state === 'failed' ? 'A file needs another attempt. Completed classifications are kept.' : 'Review decisions follow once every file is classified.';
+        renderFileProgress();
+        renderControls();
+      } else if (message.type === 'progress') {
+        if (pendingAction?.type === 'check' && message.stage === 'checking') pendingAction = undefined;
+        reviewStage = message.stage;
+        status = message.message;
+        renderControls();
+      } else if (message.type === 'settled') {
+        busy = false;
+        pendingAction = undefined;
+        reviewStage = message.state;
+        status = `${fileCounts()}. ${message.message}`;
+        error = message.state === 'check-failed' ? message.message : '';
+        renderFileProgress();
+        renderControls();
+      } else if (message.type === 'error') {
+        if (cacheOnly) {
+          if (restoringReview) missedSavedReviews.add(restoringReview.candidate);
+          cancelAnalysis('The saved review could not be opened.', true);
+          clearReview();
+          savedReview = restoringReview;
+          error = message.message;
+          renderControls();
+          return;
+        }
+        finishFailure(message.message, request);
+      } else if (message.type === 'result') {
+        busy = false;
+        openingSavedReview = false;
+        pendingAction = undefined;
+        if (restoringReview) missedSavedReviews.delete(restoringReview.candidate);
+        controller = undefined;
+        folding?.restore();
+        analysis = message.analysis;
+        finalResult = true;
+        reviewStage = 'complete';
+        cacheMessage = message.cache?.restored ? `Opened saved review from ${new Date(message.cache.savedAt).toLocaleString()}. Commits, context, provider, model, effort and review preferences match. No new model calls were made.`
+          : message.cache?.saved ? 'Review saved on this browser. Reopen this PR to reuse it, or run a fresh review anytime.' : message.cache?.message || '';
+        cacheWarning = !message.cache?.restored && !message.cache?.saved && Boolean(message.cache?.message);
+        for (const [path, file] of fileStates) {
+          if (!['skipped', 'excluded'].includes(file.state)) fileStates.set(path, { ...file, state: 'complete', message: '' });
+        }
+        error = '';
+        status = '';
+        folding = createNativeFolding(document, reviewedSnapshot(), analysis, () => updateFoldingStatus(), revealed, reviewPreferences?.alwaysShow);
+        renderAnalysis();
+        renderFileProgress();
+        applyFolding();
+        renderControls();
+      }
+    });
+    connection.onDisconnect.addListener(() => {
+      if (request !== operation || port !== connection) return;
+      port = undefined;
+      if (busy) {
+        finishFailure('The analysis connection closed. Reload this page to reconnect; completed classifications are kept.', request);
+        return;
+      }
+      if (!finalResult) status = 'The analysis session closed. Analyze again to restart.';
+      renderFileProgress();
+      renderControls();
+    });
+    return connection;
+  }
+
+  function resumeAnalysis(identity) {
+    const key = JSON.stringify([identityKey, identity.baseSha, identity.headSha]);
+    if (busy || port || snapshot || resumeProbe === key) return;
+    resumeProbe = key;
+    const request = ++operation;
+    busy = true;
+    reviewStage = 'reconnecting';
+    renderControls();
+    try {
+      connectReview(request).postMessage({ type: 'resume', baseSha: identity.baseSha, headSha: identity.headSha });
+    } catch (failure) {
+      finishFailure(failure.message, request);
+    }
+  }
+
+  function detachAnalysis() {
+    operation++;
+    controller?.abort();
+    controller = undefined;
+    if (port) {
+      const connection = port;
+      port = undefined;
+      connection.disconnect();
+    }
+    busy = false;
+    status = '';
+    resumeProbe = '';
+    clearReview();
+  }
+
   function verifiedPage() {
     const identity = readPageIdentity(document, location.href);
-    if (!snapshot || !identity) return false;
+    if (!snapshot || !identity || !isDiffPage()) return false;
     const path = new URL(snapshot.url).pathname.split('/').filter(Boolean);
     return identity.owner === path[0] && identity.repo === path[1] && String(identity.number) === path[3]
       && identity.headSha === snapshot.headSha && (!identity.baseSha || identity.baseSha === snapshot.baseSha);
@@ -706,14 +1041,14 @@ export function startReviewUI() {
         : 'Assessment ready. Open Files changed to focus the diff. Unrecognized layouts stay expanded.';
     }
     const excluded = generatedCount();
-    if (excluded) status += ` ${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} not reviewed.`;
+    if (excluded) status += ` ${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} skipped by AI.`;
     renderControls();
   }
 
   function applyFolding() {
     if (!folding) return;
-    folding.restore();
     if (mode === 'focused' && verifiedPage()) folding.apply();
+    else folding.restore();
     updateFoldingStatus();
   }
 
@@ -756,90 +1091,88 @@ export function startReviewUI() {
   function renderTopic(topic, editLocations, collapsed = false) {
     const supporting = topic.priority === 'supporting';
     const card = supporting || collapsed
-      ? disclosure(topic.title, `rf-topic ${supporting ? 'rf-supporting' : 'rf-review rf-more-review'}`)
+      ? disclosure(topic.title, `rf-topic ${supporting ? 'rf-supporting' : 'rf-review'}`)
       : element('article', 'rf-topic rf-review');
     card.dataset.topicId = topic.id;
-    if (!supporting && !collapsed) card.append(element('h3', 'rf-topic-title', topic.title));
     const body = element('div', 'rf-topic-body');
-    body.append(element('p', 'rf-reason', topic.reason));
-    const flow = element('dl', 'rf-before-after');
-    flow.append(element('dt', '', 'Before'), element('dd', '', topic.before));
-    flow.append(element('dt', '', 'After'), element('dd', '', topic.after));
-    body.append(flow);
-    if (topic.question) body.append(element('p', 'rf-question', topic.question));
+    const change = element('p', 'rf-change-explanation', topic.after);
+    const reason = element('p', 'rf-reason', topic.reason);
+    reason.title = supporting ? 'Why supporting' : 'Why shown';
+    body.append(change, reason);
     if (topic.uncertainty) {
       const uncertainty = element('p', 'rf-uncertainty');
       uncertainty.append(element('strong', '', 'Evidence limits: '), document.createTextNode(topic.uncertainty));
       body.append(uncertainty);
     }
-    for (const excerpt of topic.excerpts) body.append(renderExcerpt(excerpt));
-    const evidence = disclosure(`Supporting evidence · ${topic.editIds.length} edits · ${topic.changedLines} changed lines`, 'rf-evidence');
-    evidence.append(element('p', 'rf-evidence-summary', topic.evidenceSummary));
-    for (const id of topic.editIds) {
-      const { file, edit, classification } = editLocations.get(id);
-      const detail = disclosure(`${file.path} · ${edit.rows.filter(row => row.type !== 'marker').length} changed lines`, 'rf-edit');
-      detail.dataset.editId = id;
-      let rendered = false;
-      detail.addEventListener('toggle', () => {
-        if (!detail.open || rendered) return;
-        rendered = true;
+    const evidence = disclosure('Details', 'rf-evidence');
+    let rendered = false;
+    evidence.addEventListener('toggle', () => {
+      if (!evidence.open || rendered) return;
+      rendered = true;
+      if (!supporting && !collapsed) evidence.append(element('h3', 'rf-topic-title', topic.title));
+      if (topic.question) {
+        const question = element('p', 'rf-question');
+        question.append(element('strong', '', 'Check: '), document.createTextNode(topic.question));
+        evidence.append(question);
+      }
+      const before = element('p', 'rf-before');
+      before.append(element('strong', '', 'Before: '), document.createTextNode(topic.before));
+      evidence.append(before, element('p', 'rf-evidence-summary', topic.evidenceSummary));
+      for (const excerpt of topic.excerpts) evidence.append(renderExcerpt(excerpt));
+      for (const id of topic.editIds) {
+        const { file, edit, classification } = editLocations.get(id);
+        const detail = element('div', 'rf-edit');
+        detail.dataset.editId = id;
+        detail.append(element('strong', '', `${file.path} · ${edit.rows.filter(row => row.type !== 'marker').length} changed lines`));
         detail.append(element('p', 'rf-change-kind', `Change type: ${classification.kinds.join(', ')}`));
         detail.append(element('p', 'rf-change-reason', classification.reason));
         if (classification.uncertainty) detail.append(element('p', 'rf-uncertainty', classification.uncertainty));
-        detail.append(renderRows(edit.rows));
-      });
-      evidence.append(detail);
-    }
+        evidence.append(detail);
+      }
+    });
     body.append(evidence);
     card.append(body);
     return card;
   }
 
   function renderAnalysis() {
+    const open = result.querySelector('.rf-review-index')?.open ?? false;
     result.replaceChildren();
     const summary = element('div', 'rf-overview');
     const reviewTopics = analysis.topics.filter(topic => topic.priority === 'review');
     const supportingTopics = analysis.topics.filter(topic => topic.priority === 'supporting');
-    const initialTopics = reviewTopics.slice(0, 4);
-    const moreTopics = reviewTopics.slice(4);
-    const lines = initialTopics.flatMap(topic => topic.excerpts).reduce((sum, excerpt) => sum + excerpt.rows.length, 0);
     summary.append(element('h2', 'rf-overview-title', `${reviewTopics.length} review ${reviewTopics.length === 1 ? 'decision' : 'decisions'}`));
-    summary.append(element('p', '', analysis.summary));
+    summary.append(element('p', 'rf-summary', analysis.summary));
     const excluded = generatedCount();
-    if (excluded) summary.append(element('p', 'rf-generated-notice', `${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} not reviewed. Use Review anyway beside a file or in File progress to include it.`));
-    if (!finalResult) summary.append(element('p', 'rf-caption', 'The review scope has changed. Existing decisions remain available while the additional file and cross-file check run.'));
-    const attention = moreTopics.length
-      ? `Start with ${initialTopics.length} decisions and ${lines} source lines. ${moreTopics.length} more review ${moreTopics.length === 1 ? 'decision follows' : 'decisions follow'} below.`
-      : `${lines} source lines in selected excerpts.`;
-    summary.append(element('p', 'rf-caption', `${attention} Model judgment; collapsed changes still need your discretion.`));
+    if (excluded) summary.append(element('p', 'rf-generated-notice', `${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} skipped by AI. Use Review anyway beside a file to include it.`));
     const unresolved = analysis.classifications.filter(entry => entry.kinds.includes('unknown')).length;
-    if (unresolved) summary.append(element('p', 'rf-unresolved', `${unresolved} ${unresolved === 1 ? 'edit could' : 'edits could'} not be classified. Their changed lines stay visible in the GitHub diff.`));
-    result.append(summary);
+    if (unresolved) summary.append(element('p', 'rf-unresolved', `${unresolved} ${unresolved === 1 ? 'edit could' : 'edits could'} not be classified. Their changed lines stay visible.`));
+    const index = disclosure('Review summary', 'rf-review-index');
+    index.open = open;
+    index.append(summary);
+    index.append(element('p', 'rf-caption', 'Explanations appear beside each loaded file. This index also includes files GitHub has not loaded.'));
     const locations = editLocations();
-    if (!reviewTopics.length) result.append(element('p', 'rf-empty', 'No foreground review decisions were selected. Inspect the supporting changes below.'));
-    for (const topic of initialTopics) result.append(renderTopic(topic, locations));
-    if (moreTopics.length) {
-      const more = element('section', 'rf-more-review-section');
-      more.append(element('h3', 'rf-more-review-title', `More review decisions (${moreTopics.length})`));
-      for (const topic of moreTopics) more.append(renderTopic(topic, locations, true));
-      result.append(more);
+    for (const topic of [...reviewTopics, ...supportingTopics]) {
+      const entry = renderTopic(topic, locations, true);
+      const paths = [...new Set(topic.editIds.map(id => locations.get(id).file.path))];
+      entry.querySelector('summary').append(element('span', 'rf-index-paths', paths.join(', ')));
+      index.append(entry);
     }
-    if (supportingTopics.length) {
-      const supporting = element('section', 'rf-supporting-section');
-      supporting.append(element('h3', 'rf-supporting-title', `Supporting changes (${supportingTopics.length})`));
-      for (const topic of supportingTopics) supporting.append(renderTopic(topic, locations));
-      result.append(supporting);
-    }
+    if (!analysis.topics.length) index.append(element('p', 'rf-caption', 'No review decisions or supporting changes are ready yet.'));
+    const details = element('div', 'rf-review-details');
+    details.append(element('p', 'rf-folding-detail', status));
+    if (cacheMessage) details.append(element('p', 'rf-cache-detail', cacheMessage));
+    details.append(element('p', 'rf-provenance', `Analyzed ${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}, effort: ${reviewEffort || 'model default'}.`));
     if (snapshot.warnings?.length) {
-      const warnings = disclosure('Capture limitations', 'rf-capture-warnings');
-      for (const warning of snapshot.warnings) warnings.append(element('p', '', warning));
-      result.append(warnings);
+      details.append(element('strong', '', 'Capture limitations'));
+      for (const warning of snapshot.warnings) details.append(element('p', '', warning));
     }
-    result.append(element('p', 'rf-provenance', `Reviewed ${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}. No review comments or approvals are posted.`));
+    index.append(details);
+    result.append(index);
   }
 
   function mount() {
-    if (host.isConnected) return;
+    if (host.isConnected || !isDiffPage()) return;
     const firstFile = findNativeFiles(document)[0]?.element;
     const anchor = firstFile?.closest('.js-diff-progressive-container') ?? firstFile?.parentElement;
     if (anchor?.parentElement && anchor !== document.body) anchor.before(host);
@@ -853,20 +1186,22 @@ export function startReviewUI() {
     if (destroyed) return;
     const identity = readPageIdentity(document, location.href);
     if (!identity) {
-      cancelAnalysis('Analysis cancelled because you left the pull request.', true);
-      clearReview();
+      detachAnalysis();
       host.remove();
       attempted = false;
       identityKey = '';
       pathKey = '';
+      observedReviews.clear();
+      reviewControls.clear();
+      missedSavedReviews.clear();
       result.replaceChildren();
       return;
     }
     const nextIdentity = `${identity.owner}/${identity.repo}/${identity.number}`;
     const nextPath = `${location.pathname}${location.search}`;
     const changedPr = identityKey && identityKey !== nextIdentity;
-    const changedHead = snapshot && identity.headSha && identity.headSha !== snapshot.headSha;
-    const changedBase = snapshot && identity.baseSha && identity.baseSha !== snapshot.baseSha;
+    const changedHead = isDiffPage() && snapshot && identity.headSha && identity.headSha !== snapshot.headSha;
+    const changedBase = isDiffPage() && snapshot && identity.baseSha && identity.baseSha !== snapshot.baseSha;
     if (changedPr || changedHead || changedBase) {
       cancelAnalysis('Analysis cancelled because the pull request changed.', true);
       clearReview();
@@ -876,11 +1211,24 @@ export function startReviewUI() {
     } else if (busy && !snapshot && pathKey && nextPath !== pathKey) {
       cancelAnalysis('Navigation cancelled capture. Analyze again on this page.', true);
     }
+    if (changedPr || currentIdentity && (identity.headSha && identity.headSha !== currentIdentity.headSha || identity.baseSha && identity.baseSha !== currentIdentity.baseSha)) {
+      observedReviews.clear();
+      reviewControls.clear();
+      missedSavedReviews.clear();
+    }
     currentIdentity = identity;
     identityKey = nextIdentity;
     pathKey = nextPath;
+    if (!isDiffPage()) {
+      folding?.restore();
+      removeFilePanels();
+      host.remove();
+      return;
+    }
     mount();
-    renderFilePanels();
+    resumeAnalysis(identity);
+    if (readReviewControls()) renderFileProgress();
+    else renderFilePanels();
     applyFolding();
     renderControls();
     void refreshSavedReview();
@@ -894,32 +1242,34 @@ export function startReviewUI() {
   const observer = new MutationObserver(records => {
     const relevant = records.some(record => {
       if (record.target.nodeType === Node.ELEMENT_NODE && record.target.closest(`[${ownedAttribute}]`)) return false;
+      if (record.type === 'attributes') return record.target.matches('input.js-reviewed-checkbox, button[aria-pressed]');
       return [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType !== Node.ELEMENT_NODE || !node.hasAttribute(ownedAttribute));
     });
     if (relevant) scheduleCheck();
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-pressed', 'aria-label', 'aria-disabled', 'checked', 'disabled'] });
+  document.addEventListener('change', event => {
+    if (event.target.matches('input.js-reviewed-checkbox')) scheduleCheck();
+  });
   document.addEventListener('turbo:load', scheduleCheck);
   document.addEventListener('pjax:end', scheduleCheck);
   window.addEventListener('popstate', scheduleCheck);
-  window.addEventListener('focus', loadSettings);
+  window.addEventListener('focus', refreshConnection);
+  document.addEventListener('visibilitychange', refreshConnection);
   const interval = setInterval(() => {
     const identity = readPageIdentity(document, location.href);
-    if (location.pathname + location.search !== pathKey || identity?.headSha !== currentIdentity?.headSha || !host.isConnected) scheduleCheck();
+    if (location.pathname + location.search !== pathKey || identity?.headSha !== currentIdentity?.headSha || identity?.baseSha !== currentIdentity?.baseSha || isDiffPage() && !host.isConnected) scheduleCheck();
   }, 1500);
   window.addEventListener('pagehide', event => {
-    if (event.persisted) {
-      cancelAnalysis('Analysis cancelled because you left the page.', true);
-      folding?.restore();
-      return;
-    }
+    detachAnalysis();
+    if (event.persisted) return;
     destroyed = true;
     observer.disconnect();
+    window.removeEventListener('focus', refreshConnection);
+    document.removeEventListener('visibilitychange', refreshConnection);
     clearInterval(interval);
     clearTimeout(timer);
-    cancelAnalysis('', true);
-    folding?.restore();
-  }, { once: true });
+  });
   window.addEventListener('pageshow', scheduleCheck);
   loadSettings();
   checkPage();

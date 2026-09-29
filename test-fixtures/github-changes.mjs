@@ -45,7 +45,7 @@ const splitTables = entries.slice(0, 4).map(({ path, pathDigest }) => `<section 
 </section>`).join('');
 
 const unifiedTables = entries.slice(0, 3).map(({ path, pathDigest }) => `<section id="diff-${pathDigest}" role="region" aria-labelledby="${pathDigest}">
-  <div class="diff-file-header"><code>${path}</code></div>
+  <div data-diff-header-wrapper style="position:sticky;top:0;z-index:1;background:var(--bgColor-muted,#f6f8fa)"><div class="diff-file-header"><code>${path}</code><button class="js-expand-all-difflines-button" aria-label="Expand all lines: ${path}">Expand all</button></div></div>
   <table data-diff-anchor="diff-${pathDigest}"><tbody>
     <tr class="diff-line-row"><td class="new-diff-line-number">1</td><td class="new-diff-line-number empty-diff-line"></td><td class="diff-text-cell"><code class="diff-text deletion"><span class="diff-text-inner">before ${path}</span></code></td></tr>
     <tr class="diff-line-row"><td class="new-diff-line-number empty-diff-line"></td><td class="new-diff-line-number">1</td><td class="diff-text-cell"><code class="diff-text addition"><span class="diff-text-inner">after ${path}</span></code></td></tr>
