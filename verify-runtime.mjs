@@ -52,7 +52,8 @@ function stagedResponses(inventory, review) {
       ...topic, editIds: topic.editIds.filter(id => editIds.has(id)),
       excerpts: topic.excerpts.filter(excerpt => evidence.files.some(file => file.path === excerpt.path))
     }));
-    return { type: 'result', result: { ...review, topics } };
+    const finalClassifications = review.classifications ?? inventory.edits.filter(edit => editIds.has(edit.editId));
+    return { type: 'result', result: { ...review, topics, classifications: finalClassifications } };
   };
 }
 
@@ -437,10 +438,113 @@ try {
   const prReview = reviewPort.messages.findIndex(message => message.stage === 'checking');
   assert.ok(classifiedFile < prReview, 'Publish each classified file before the PR review.');
   assert.ok(!reviewPort.messages.some(message => message.type === 'file-progress' && Object.hasOwn(message, 'analysis')), 'Files publish only progress; review decisions arrive with the PR review.');
-  assert.deepEqual(result.analysis.classifications, classifications.edits, 'Mixed and unknown classifications must survive the PR review.');
+  assert.deepEqual(result.analysis.classifications, classifications.edits, 'Unchanged classifications must survive the PR review.');
   assert.equal(result.analysis.headSha, snapshot.headSha);
   assert.equal(result.analysis.topics[0].excerpts[0].rows[0].text, 'if (!account) return null;');
   assert.equal(result.analysis.topics[0].changedLines, 3);
+
+  const dependencySnapshot = validateSnapshot({ ...snapshot, title: 'Update the services dependency', description: 'Use services v118.', files: [
+    { path: 'client.go', hunks: [{ header: '@@ -1,2 +1,2 @@', items: [
+      { type: 'edit', id: 'services-import', rows: [
+        { type: 'delete', text: 'import "example.com/services/v109"', oldLine: 1, newLine: null },
+        { type: 'add', text: 'import "example.com/services/v118"', oldLine: null, newLine: 1 }
+      ] },
+      { type: 'edit', id: 'services-call', rows: [
+        { type: 'delete', text: 'client.ReadBalance()', oldLine: 2, newLine: null },
+        { type: 'add', text: 'client.GetBalance()', oldLine: null, newLine: 2 }
+      ] }
+    ] }] },
+    { path: 'go.mod', hunks: [{ header: '@@ -1 +1 @@', items: [{ type: 'edit', id: 'services-version', rows: [
+      { type: 'delete', text: 'require example.com/services/v109 v109.0.0', oldLine: 1, newLine: null },
+      { type: 'add', text: 'require example.com/services/v118 v118.11.0', oldLine: null, newLine: 1 }
+    ] }] }] },
+    { path: 'go.sum', hunks: [{ header: '@@ -1 +1 @@', items: [{ type: 'edit', id: 'services-checksum', rows: [
+      { type: 'delete', text: 'example.com/services/v109 v109.0.0 h1:old-checksum', oldLine: 1, newLine: null },
+      { type: 'add', text: 'example.com/services/v118 v118.11.0 h1:new-checksum', oldLine: null, newLine: 1 }
+    ] }] }] }
+  ] });
+  const dependencyInventory = { edits: [
+    { editId: 'services-import', kinds: ['configuration', 'unknown'], reason: 'The import changes from v109 to v118.', uncertainty: 'This file pass did not include go.mod, so the declared version cannot be checked.' },
+    { editId: 'services-call', kinds: ['interface', 'unknown'], reason: 'The client uses GetBalance instead of ReadBalance.', uncertainty: 'go.mod and the services implementation were not supplied.' },
+    { editId: 'services-version', kinds: ['configuration'], reason: 'The module requires services v118.11.0.', uncertainty: '' }
+  ] };
+  const dependencyReview = {
+    summary: 'The import matches go.mod; the dependency implementation remains unavailable.',
+    classifications: [
+      { ...dependencyInventory.edits[0], kinds: ['configuration'], reason: 'client.go imports services/v118 and go.mod declares services/v118 v118.11.0.', uncertainty: '' },
+      { ...dependencyInventory.edits[1], uncertainty: 'The external services implementation is not supplied, so GetBalance behavior cannot be confirmed.' },
+      dependencyInventory.edits[2]
+    ],
+    topics: [{ ...assessment.topics[0], id: 'services-bump', priority: 'supporting', title: 'Update the services dependency',
+      reason: 'The import and declared module version match. The external implementation remains unavailable.',
+      before: 'The client uses services v109.', after: 'The client uses services v118.', question: '',
+      uncertainty: 'The external services implementation is not supplied.', evidenceSummary: 'client.go and go.mod both use services/v118.',
+      editIds: dependencyInventory.edits.map(edit => edit.editId), excerpts: []
+    }]
+  };
+  nativeHandler = stagedResponses(dependencyInventory, dependencyReview);
+  const beforeDependencyReview = requests.length;
+  const dependencyPort = await beginReview(dependencySnapshot);
+  await waitForSettlement(dependencyPort);
+  const dependencyRequests = requests.slice(beforeDependencyReview);
+  assert.equal(dependencyRequests.length, 3, 'Reconciliation belongs in the existing PR review, without an extra model call.');
+  const clientEvidence = JSON.parse(dependencyRequests.find(request => request.schema.properties.edits && JSON.parse(request.prompt.user).files[0].path === 'client.go').prompt.user);
+  assert.deepEqual(clientEvidence.files.map(file => file.path), ['client.go']);
+  assert.ok(clientEvidence.changedPaths.includes('go.mod'));
+  assert.deepEqual(clientEvidence.dependencyDiffs.map(file => file.path), ['go.mod', 'go.sum'], 'Go imports must see their module and checksum changes during classification.');
+  const moduleEvidence = JSON.parse(dependencyRequests.find(request => request.schema.properties.edits && JSON.parse(request.prompt.user).files[0].path === 'go.mod').prompt.user);
+  assert.deepEqual(moduleEvidence.dependencyDiffs.map(file => file.path), ['go.sum'], 'The go.mod classification must receive go.sum as supporting evidence.');
+  assert.ok(JSON.stringify(moduleEvidence.dependencyDiffs).includes('h1:new-checksum'));
+  assert.ok(!JSON.stringify(moduleEvidence.dependencyDiffs).includes('services-checksum'), 'Context-only diffs must not supply extra edit IDs to classify.');
+  assert.deepEqual(fileStates(dependencyPort, 'go.sum'), ['excluded'], 'Using go.sum as context must not run a standalone classification.');
+  const combinedEvidence = JSON.parse(dependencyRequests.at(-1).prompt.user);
+  assert.deepEqual(combinedEvidence.files.map(file => file.path), ['client.go', 'go.mod']);
+  assert.deepEqual(combinedEvidence.dependencyDiffs, moduleEvidence.dependencyDiffs, 'The final review must retain the checksum evidence.');
+  assert.deepEqual(combinedEvidence.classifications, dependencyInventory.edits);
+  assert.deepEqual(dependencyPort.messages.at(-1).analysis.classifications, dependencyReview.classifications, 'The final review must resolve the stale go.mod warning while retaining only the missing dependency implementation.');
+
+  const checksumClassification = { editId: 'services-checksum', kinds: ['configuration'], reason: 'The checksum changes to services v118.11.0.', uncertainty: '' };
+  nativeHandler = stagedResponses({ edits: [...dependencyInventory.edits, checksumClassification] }, {
+    ...dependencyReview,
+    classifications: [...dependencyReview.classifications, checksumClassification],
+    topics: [{ ...dependencyReview.topics[0], editIds: [...dependencyReview.topics[0].editIds, checksumClassification.editId] }]
+  });
+  const beforeChecksumReview = requests.length;
+  const beforeChecksumMessages = dependencyPort.messages.length;
+  await dependencyPort.onMessage.emit({ type: 'review-file', path: 'go.sum' });
+  await waitForSettlement(dependencyPort, beforeChecksumMessages);
+  const checksumRequests = requests.slice(beforeChecksumReview);
+  assert.equal(checksumRequests.length, 2, 'Review anyway classifies the checksum file and repeats only the final PR pass.');
+  assert.deepEqual(JSON.parse(checksumRequests[0].prompt.user).files.map(file => file.path), ['go.sum']);
+  assert.deepEqual(JSON.parse(checksumRequests[0].prompt.user).dependencyDiffs.map(file => file.path), ['go.mod']);
+  assert.deepEqual(JSON.parse(checksumRequests[1].prompt.user).dependencyDiffs, [], 'Dependency files already under review must not be repeated as context.');
+  assert.equal(dependencyPort.messages.at(-1).analysis.classifications.length, 4);
+
+  const nestedSnapshot = structuredClone(dependencySnapshot);
+  const nestedFiles = structuredClone(dependencySnapshot.files);
+  for (const file of nestedFiles) {
+    file.path = `tools/${file.path}`;
+    for (const hunk of file.hunks) for (const item of hunk.items) if (item.type === 'edit') item.id = `tools-${item.id}`;
+  }
+  nestedSnapshot.files.push(...nestedFiles);
+  nativeHandler = stagedResponses({ edits: [...dependencyInventory.edits, ...dependencyInventory.edits.map(edit => ({ ...edit, editId: `tools-${edit.editId}` }))] }, {
+    ...dependencyReview,
+    classifications: [...dependencyReview.classifications, ...dependencyReview.classifications.map(edit => ({ ...edit, editId: `tools-${edit.editId}` }))],
+    topics: [...dependencyReview.topics, { ...dependencyReview.topics[0], id: 'tools-bump', editIds: dependencyReview.topics[0].editIds.map(id => `tools-${id}`) }]
+  });
+  const beforeNestedReview = requests.length;
+  const nestedPort = await beginReview(nestedSnapshot);
+  await waitForSettlement(nestedPort);
+  assert.equal(nestedPort.messages.at(-1).type, 'result');
+  const nestedRequests = requests.slice(beforeNestedReview);
+  for (const request of nestedRequests.filter(request => request.schema.properties.edits)) {
+    const evidence = JSON.parse(request.prompt.user);
+    const path = evidence.files[0].path;
+    const prefix = path.startsWith('tools/') ? 'tools/' : '';
+    const expected = [`${prefix}go.mod`, `${prefix}go.sum`].filter(related => related !== path);
+    assert.deepEqual(evidence.dependencyDiffs.map(file => file.path), expected, 'Each classification must see only its own Go module dependency diffs.');
+  }
+  assert.deepEqual(JSON.parse(nestedRequests.at(-1).prompt.user).dependencyDiffs.map(file => file.path), ['go.sum', 'tools/go.sum']);
 
   const largeSnapshot = { ...snapshot, files: Array.from({ length: 30 }, (_, index) => ({
     path: `account-${index}.js`, hunks: [{ header: '@@ -1 +1,3 @@', items: [{
@@ -593,6 +697,15 @@ try {
     assert.equal(rejected.messages.at(-1).state, 'incomplete', name);
     assert.match(rejected.messages.find(message => message.state === 'failed').message, error, name);
     assert.ok(!rejected.messages.some(message => message.stage === 'checking' || message.type === 'result'), name);
+
+    nativeHandler = stagedResponses(twoClassifications, { ...assessment, classifications: invalidInventory.edits });
+    const beforeFinal = requests.length;
+    const rejectedFinal = await beginReview(twoEdits);
+    await waitForSettlement(rejectedFinal);
+    assert.equal(requests.length - beforeFinal, 2, `${name} must also be rejected when returned by the PR review.`);
+    assert.equal(rejectedFinal.messages.at(-1).state, 'check-failed', name);
+    assert.match(rejectedFinal.messages.at(-1).message, error, name);
+    assert.ok(!rejectedFinal.messages.some(message => message.type === 'result'), 'Invalid final classifications must never reach the folding UI.');
   }
 
   const unresolved = { edits: [{ ...classifications.edits[0], kinds: ['interface', 'unknown'] }] };
@@ -610,6 +723,7 @@ try {
   }
 
   for (const [name, mutate, error] of [
+    ['missing revised classifications', review => { delete review.classifications; }, /account for every edit/],
     ['missing evidence', review => { review.topics[0].excerpts = []; }, /does not cite its changed code/],
     ['unread source', review => { review.topics[0].excerpts[0].startLine = 99; review.topics[0].excerpts[0].endLine = 99; }, /source that was not read/],
     ['unexplained deferral', review => { review.topics[0].priority = 'supporting'; review.topics[0].reason = ' '; }, /did not explain/],
@@ -619,7 +733,7 @@ try {
     ['zero line number', review => { review.topics[0].excerpts[0].startLine = 0; }, /invalid source excerpt/],
     ['range beyond captured source', review => { review.topics[0].excerpts[0].endLine = Number.MAX_SAFE_INTEGER; }, /source that was not read/]
   ]) {
-    const invalidReview = structuredClone(assessment);
+    const invalidReview = structuredClone({ ...assessment, classifications: classifications.edits });
     mutate(invalidReview);
     nativeHandler = request => ({ type: 'result', result: request.schema.properties.edits ? classifications : invalidReview });
     const source = ['if (!account) return null;', 'return account.balance;', ...Array.from({ length: 59 }, (_, index) => `supplied context ${index}`)].join('\n');
@@ -1379,6 +1493,21 @@ try {
 
   const originalDigest = crypto.subtle.digest;
   try {
+    nativeHandler = stagedResponses(dependencyInventory, dependencyReview);
+    const savedDependency = await beginReview(dependencySnapshot);
+    await waitForSettlement(savedDependency);
+    assert.equal(savedDependency.messages.at(-1).cache.saved, true);
+    assert.deepEqual(storedReview.analysis.classifications, dependencyReview.classifications, 'Save the revised inventory rather than the first-pass labels.');
+    await closeTab(savedDependency);
+    const beforeDependencyRestore = requests.length;
+    const restoredDependency = port();
+    await onConnect.emit(restoredDependency);
+    await restoredDependency.onMessage.emit({ type: 'analyze', snapshot: dependencySnapshot, cacheOnly: true });
+    assert.equal(restoredDependency.messages.at(-1).cache.restored, true);
+    assert.deepEqual(restoredDependency.messages.at(-1).analysis.classifications, dependencyReview.classifications, 'Restoring a review must not resurrect stale evidence gaps.');
+    assert.equal(requests.length, beforeDependencyRestore, 'Revised classifications restore without model calls.');
+    await closeTab(restoredDependency);
+
     storedReview = {
       analysis: largeResult.analysis,
       paths: largeSnapshot.files.map(file => file.path),

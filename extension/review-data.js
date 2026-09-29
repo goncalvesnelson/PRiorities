@@ -31,9 +31,10 @@ const excerptSchema = {
 };
 
 export const analysisSchema = {
-  type: 'object', additionalProperties: false, required: ['summary', 'topics'],
+  type: 'object', additionalProperties: false, required: ['summary', 'topics', 'classifications'],
   properties: {
     summary: textField,
+    classifications: classificationSchema.properties.edits,
     topics: {
       type: 'array', items: {
         type: 'object', additionalProperties: false,
@@ -152,6 +153,7 @@ export function validateClassifications(input, snapshot) {
 export function validateAnalysis(input, snapshot) {
   validateSnapshot(snapshot);
   if (!record(input) || typeof input.summary !== 'string' || !input.summary.trim() || input.summary.length > 3000 || !Array.isArray(input.topics) || !input.topics.length) throw new Error('The model returned an invalid review summary. Try analyzing again.');
+  const classifications = validateClassifications({ edits: input.classifications }, snapshot);
   const edits = new Map(allEdits(snapshot).map(edit => [edit.id, edit]));
   const assigned = new Set();
   const topicIds = new Set();
@@ -183,7 +185,7 @@ export function validateAnalysis(input, snapshot) {
     return { ...topic, changedLines, excerpts };
   });
   if (assigned.size !== edits.size) throw new Error('The assessment left some edits unaccounted for. Try analyzing again.');
-  return { summary: input.summary, topics, baseSha: snapshot.baseSha, headSha: snapshot.headSha };
+  return { summary: input.summary, topics, classifications, baseSha: snapshot.baseSha, headSha: snapshot.headSha };
 }
 
 function promptEvidence(snapshot) {
@@ -200,16 +202,38 @@ function promptEvidence(snapshot) {
   return { title: snapshot.title, description: snapshot.description, baseSha: snapshot.baseSha, headSha: snapshot.headSha, files, context: snapshot.context, evidenceLimits: snapshot.warnings };
 }
 
-export function makeClassificationPrompt(snapshot, changedPaths = [], preferences = defaultReviewPreferences()) {
-  const { title, description, ...evidence } = promptEvidence(snapshot);
-  const system = `${preferences.classificationPrompt || classificationPrompt}\n\n${evidenceRules}`;
-  return { system, user: JSON.stringify({ ...evidence, ...(changedPaths.length ? { changedPaths } : {}) }) };
+function dependencyDiffs(snapshot, reviewedFiles) {
+  const manifests = snapshot.files.filter(file => /(^|\/)go\.mod$/.test(file.path) && !isGeneratedFile(file)).sort((left, right) => right.path.length - left.path.length);
+  const relatedPaths = new Set();
+  for (const file of reviewedFiles) {
+    if (!/\.go$|(^|\/)go\.(mod|sum)$/.test(file.path)) continue;
+    const manifest = manifests.find(manifest => file.path.startsWith(manifest.path.slice(0, -'go.mod'.length)));
+    if (!manifest) continue;
+    relatedPaths.add(manifest.path);
+    relatedPaths.add(manifest.path.replace(/go\.mod$/, 'go.sum'));
+  }
+  const reviewedPaths = new Set(reviewedFiles.map(file => file.path));
+  return snapshot.files.filter(file => relatedPaths.has(file.path) && !reviewedPaths.has(file.path)).map(file => ({
+    path: file.path,
+    hunks: file.hunks.map(hunk => ({
+      header: hunk.header,
+      rows: hunk.items.flatMap(item => item.type === 'edit' ? item.rows : [item]).map(row => [row.type, row.oldLine, row.newLine, row.text])
+    }))
+  }));
 }
 
-export function makePrompt(snapshot, classifications, preferences = defaultReviewPreferences()) {
+const dependencyEvidenceRules = 'dependencyDiffs contains captured changes to the Go module manifest and checksum file related to the reviewed files. Inspect that evidence before claiming go.mod or go.sum is missing. These are supporting diffs, not extra edits to classify or assign to topics; only files supplies the edit IDs in scope. A checksum entry records module content, not API compatibility or runtime behavior.';
+
+export function makeClassificationPrompt(snapshot, changedPaths = [], preferences = defaultReviewPreferences(), captured = snapshot) {
+  const { title, description, ...evidence } = promptEvidence(snapshot);
+  const system = `${preferences.classificationPrompt || classificationPrompt}\n\n${evidenceRules}\n${dependencyEvidenceRules}`;
+  return { system, user: JSON.stringify({ ...evidence, dependencyDiffs: dependencyDiffs(captured, snapshot.files), ...(changedPaths.length ? { changedPaths } : {}) }) };
+}
+
+export function makePrompt(snapshot, classifications, preferences = defaultReviewPreferences(), captured = snapshot) {
   const evidence = promptEvidence(snapshot);
   const inventory = validateClassifications({ edits: classifications }, snapshot);
-  const system = `${preferences.prioritizationPrompt || prioritizationPrompt}\n\n${focusInstructions[preferences.focus]}\n${preferences.alwaysShow.length ? `The user requires edits classified as ${preferences.alwaysShow.join(', ')} to remain visible. Explain these changes and their significance without inventing risks.` : ''}\n${evidenceRules}\nSelect decisions and source by consequence and evidence, without a target number of topics, excerpts, or lines. Do not suppress consequential changes to meet a size target or add lower-priority code to fill space. Show the source needed to assess each decision and preserve consequential uncertainty. Defer changes only for a source-grounded reason.\ncitableLines lists, for each path and side, the inclusive [start, end] line ranges that were captured. Every excerpt must lie entirely within one of those ranges for its path and side. Other lines were not captured and cannot be cited; record them as missing evidence instead.`;
+  const system = `${preferences.prioritizationPrompt || prioritizationPrompt}\n\n${focusInstructions[preferences.focus]}\n${preferences.alwaysShow.length ? `The user requires edits classified as ${preferences.alwaysShow.join(', ')} to remain visible. Explain these changes and their significance without inventing risks.` : ''}\n${evidenceRules}\nReturn a complete revised classifications array with exactly one entry for every supplied edit ID, including unchanged classifications. Use the same change-kind vocabulary and fields (editId, kinds, reason, uncertainty); keep reason and uncertainty at most 2000 characters each. Reconcile each earlier uncertainty against all supplied diffs and context before choosing priorities. Remove unknown only when the combined source resolves every unclassified aspect, and explain that evidence in reason. If a gap is partly resolved, retain unknown and rewrite uncertainty to name only what is still missing. A file missing from one classification request may be present here: check the supplied files before repeating that it was not included. A dependency manifest can establish a declared version without establishing the external dependency behavior; do not treat the PR description, a matching version, or a supporting priority as proof that an evidence gap is resolved. Do not drop other applicable change kinds when resolving unknown. Final explanations, priorities and excerpts must agree with these revised classifications.\nSelect decisions and source by consequence and evidence, without a target number of topics, excerpts, or lines. Do not suppress consequential changes to meet a size target or add lower-priority code to fill space. Show the source needed to assess each decision and preserve consequential uncertainty. Defer changes only for a source-grounded reason. Order review decisions by consequence and logical dependency; this order guides the reader through the files. Within each topic, order editIds so the first occurrence of each file follows a useful reading sequence: required contracts or configuration, implementation, then validating tests where appropriate. Keep related edits in the same decision; file size and the number of mentions are not measures of importance.\ncitableLines lists, for each path and side, the inclusive [start, end] line ranges that were captured. Every excerpt must lie entirely within one of those ranges for its path and side. Other lines were not captured and cannot be cited; record them as missing evidence instead.`;
   const citableLines = Object.fromEntries(snapshot.files.map(file => [file.path, { before: citableRanges(snapshot, file, 'before'), after: citableRanges(snapshot, file, 'after') }]));
-  return { system, user: JSON.stringify({ ...evidence, citableLines, classifications: inventory }) };
+  return { system: `${system}\n${dependencyEvidenceRules}`, user: JSON.stringify({ ...evidence, dependencyDiffs: dependencyDiffs(captured, snapshot.files), citableLines, classifications: inventory }) };
 }

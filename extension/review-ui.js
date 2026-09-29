@@ -259,6 +259,8 @@ export function startReviewUI() {
   let cacheProbeVersion = 0;
   let fileFilter = 'all';
   let fileListOpen = false;
+  let reviewGroups = [];
+  let fileOrder = 'priority';
 
   const header = element('div', 'rf-toolbar');
   const brand = element('strong', 'rf-brand', 'PRiorities');
@@ -338,7 +340,23 @@ export function startReviewUI() {
   fileProgress.id = 'rf-file-progress';
   fileProgress.hidden = true;
   const secondary = element('div', 'rf-secondary');
-  secondary.append(runSettings, result);
+  const orderControl = element('select', 'rf-file-order');
+  orderControl.setAttribute('aria-label', 'File order');
+  orderControl.title = 'Priority order groups related files by review decision. GitHub order restores the captured file order.';
+  for (const [value, label] of [['priority', 'Priority order'], ['github', 'GitHub order']]) {
+    const option = element('option', '', label);
+    option.value = value;
+    orderControl.append(option);
+  }
+  orderControl.addEventListener('change', () => {
+    if (!isActive()) return;
+    keepReadingPosition(() => {
+      fileOrder = orderControl.value;
+      applyFileOrder();
+      renderFileProgress();
+    });
+  });
+  secondary.append(runSettings, orderControl, result);
   panel.append(header, secondary, welcome, progressPanel, statusNode, cacheNotice, errorNode, fileProgress);
 
   function canOpenSavedReview() {
@@ -402,6 +420,8 @@ export function startReviewUI() {
     const foldingDetail = result.querySelector('.rf-folding-detail');
     if (foldingDetail) foldingDetail.textContent = status;
     result.hidden = mode === 'full' || !finalResult;
+    orderControl.hidden = !finalResult || mode === 'full';
+    orderControl.value = fileOrder;
   }
 
   async function loadSettings(refreshConnection = false) {
@@ -492,6 +512,7 @@ export function startReviewUI() {
   }
 
   function clearReview() {
+    applyFileOrder(true);
     folding?.restore();
     folding = undefined;
     snapshot = undefined;
@@ -511,6 +532,7 @@ export function startReviewUI() {
     cacheProbe = '';
     cacheProbeVersion++;
     fileFilter = 'all';
+    reviewGroups = [];
     fileStates.clear();
     revealed.clear();
     removeFilePanels();
@@ -677,23 +699,32 @@ export function startReviewUI() {
     }
     fileProgress.append(filters);
     const rows = element('div', 'rf-file-list');
-    for (const [path, file] of fileStates) {
-      if (fileFilter === 'reviewed' && observedReviews.get(path) !== true) continue;
-      if (fileFilter === 'unreviewed' && observedReviews.get(path) === true) continue;
-      if (fileFilter === 'failed' && !['failed', 'cancelled'].includes(file.state)) continue;
-      const row = element('div', 'rf-file-progress-row');
-      row.dataset.state = file.state;
-      row.dataset.path = path;
-      const label = element('span', 'rf-file-state', fileLabel(file));
-      label.dataset.state = file.state;
-      row.append(button(path, () => {
-        const native = findNativeFiles(document).find(entry => entry.path === path);
-        native?.element.scrollIntoView({ block: 'start', behavior: 'auto' });
-      }, 'rf-file-path'), label, reviewToggle(path));
-      if (['failed', 'cancelled'].includes(file.state) && port && !openingSavedReview) row.append(button('Retry file', () => retryReview(path)));
-      if (file.state === 'excluded' && port && !openingSavedReview) row.append(button('Review anyway', () => reviewGeneratedFile(path)));
-      if (['failed', 'cancelled'].includes(file.state) && file.message) row.append(element('span', 'rf-caption', file.message));
-      rows.append(row);
+    const groups = priorityOrderActive() ? reviewGroups : [{ paths: [...fileStates.keys()] }];
+    for (const group of groups) {
+      let heading;
+      for (const path of group.paths) {
+        const file = fileStates.get(path);
+        if (fileFilter === 'reviewed' && observedReviews.get(path) !== true) continue;
+        if (fileFilter === 'unreviewed' && observedReviews.get(path) === true) continue;
+        if (fileFilter === 'failed' && !['failed', 'cancelled'].includes(file.state)) continue;
+        if (group.title && !heading) {
+          heading = element('h3', 'rf-file-group', group.title);
+          rows.append(heading);
+        }
+        const row = element('div', 'rf-file-progress-row');
+        row.dataset.state = file.state;
+        row.dataset.path = path;
+        const label = element('span', 'rf-file-state', fileLabel(file));
+        label.dataset.state = file.state;
+        row.append(button(path, () => {
+          const native = findNativeFiles(document).find(entry => entry.path === path);
+          native?.element.scrollIntoView({ block: 'start', behavior: 'auto' });
+        }, 'rf-file-path'), label, reviewToggle(path));
+        if (['failed', 'cancelled'].includes(file.state) && port && !openingSavedReview) row.append(button('Retry file', () => retryReview(path)));
+        if (file.state === 'excluded' && port && !openingSavedReview) row.append(button('Review anyway', () => reviewGeneratedFile(path)));
+        if (['failed', 'cancelled'].includes(file.state) && file.message) row.append(element('span', 'rf-caption', file.message));
+        rows.append(row);
+      }
     }
     if (!rows.childElementCount) rows.append(element('p', 'rf-caption', 'No files in this view.'));
     fileProgress.append(rows);
@@ -705,6 +736,77 @@ export function startReviewUI() {
       (replacement ?? filters.querySelector('[aria-pressed="true"]')).focus({ preventScroll: true });
     }
     renderFilePanels();
+  }
+
+  function buildReviewGroups() {
+    const locations = editLocations();
+    const assigned = new Set();
+    const groups = [];
+    const add = (title, paths) => {
+      const remaining = [...new Set(paths)].filter(path => !assigned.has(path));
+      if (!remaining.length) return;
+      for (const path of remaining) assigned.add(path);
+      groups.push({ title, paths: remaining });
+    };
+    const topicPaths = topic => [...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)];
+    for (const topic of analysis.topics.filter(topic => topic.priority === 'review')) add(topic.title, topicPaths(topic));
+    add('Unresolved evidence', analysis.classifications.filter(entry => entry.kinds.includes('unknown')).map(entry => locations.get(entry.editId).file.path));
+    for (const topic of analysis.topics.filter(topic => topic.priority === 'supporting')) add(topic.title, topicPaths(topic));
+    add('Not analyzed', [...fileStates.keys()]);
+    return groups;
+  }
+
+  function priorityOrderActive() {
+    return finalResult && mode !== 'full' && fileOrder === 'priority';
+  }
+
+  function keepReadingPosition(update) {
+    const reading = host.isConnected && host.getBoundingClientRect().bottom < 0;
+    const visibleFiles = reading ? findNativeFiles(document).filter(file => {
+      const rect = file.element.getBoundingClientRect();
+      return rect.bottom > 0 && rect.top < innerHeight;
+    }) : [];
+    const anchor = visibleFiles.find(file => file.element.contains(document.activeElement))?.element ?? visibleFiles[0]?.element;
+    const top = anchor?.getBoundingClientRect().top;
+    update();
+    if (anchor) window.scrollBy({ top: anchor.getBoundingClientRect().top - top, behavior: 'instant' });
+  }
+
+  function applyFileOrder(restore = false) {
+    if (!snapshot) return;
+    const paths = !restore && priorityOrderActive() && verifiedPage()
+      ? reviewGroups.flatMap(group => group.paths) : snapshot.files.map(file => file.path);
+    const ranks = new Map(paths.map((path, index) => [path, index]));
+    const files = findNativeFiles(document);
+    const lists = new Map();
+    for (const file of files) {
+      if (!ranks.has(file.path)) continue;
+      const list = file.element.closest('[data-testid="progressive-diffs-list"], .js-diff-progressive-container')
+        ?? (file.element.matches('.js-file') ? file.element.parentElement : null);
+      if (!list) continue;
+      let entry = file.element;
+      while (entry.parentElement !== list) entry = entry.parentElement;
+      const entries = lists.get(list) ?? new Map();
+      if (entries.has(entry)) entries.set(entry, null);
+      else entries.set(entry, file.path);
+      lists.set(list, entries);
+    }
+    const moves = [];
+    for (const [list, entries] of lists) {
+      const children = [...list.children];
+      const ordered = children.filter(child => entries.get(child)).sort((left, right) => ranks.get(entries.get(left)) - ranks.get(entries.get(right)));
+      let index = 0;
+      const desired = children.map(child => entries.get(child) ? ordered[index++] : child);
+      if (desired.some((child, index) => child !== children[index])) moves.push({ list, desired });
+    }
+    if (!moves.length) return;
+    keepReadingPosition(() => {
+      for (const { list, desired } of moves) {
+        for (const [index, child] of desired.entries()) {
+          if (list.children[index] !== child) list.moveBefore(child, list.children[index] ?? null);
+        }
+      }
+    });
   }
 
   function editLocations() {
@@ -998,6 +1100,7 @@ export function startReviewUI() {
         for (const [path, file] of fileStates) {
           if (!['skipped', 'excluded'].includes(file.state)) fileStates.set(path, { ...file, state: 'complete', message: '' });
         }
+        reviewGroups = buildReviewGroups();
         error = '';
         status = '';
         folding = createNativeFolding(document, reviewedSnapshot(), analysis, () => updateFoldingStatus(), revealed, reviewPreferences?.alwaysShow, reviewPreferences?.protectedPaths);
@@ -1080,6 +1183,7 @@ export function startReviewUI() {
   }
 
   function applyFolding() {
+    applyFileOrder();
     if (!folding) return;
     if (mode === 'focused' && finalResult && verifiedPage()) folding.apply();
     else folding.restore();
@@ -1088,10 +1192,12 @@ export function startReviewUI() {
 
   function setMode(next) {
     if (!isActive()) return;
-    mode = next;
-    applyFolding();
-    renderFilePanels();
-    renderControls();
+    keepReadingPosition(() => {
+      mode = next;
+      applyFolding();
+      renderFileProgress();
+      renderControls();
+    });
   }
 
   function jumpToSource(excerpt) {
@@ -1262,6 +1368,7 @@ export function startReviewUI() {
     identityKey = nextIdentity;
     pathKey = nextPath;
     if (!isDiffPage()) {
+      applyFileOrder(true);
       folding?.restore();
       removeFilePanels();
       host.remove();

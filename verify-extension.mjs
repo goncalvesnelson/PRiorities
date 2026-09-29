@@ -85,9 +85,22 @@ if (mode === 'generated-final-failed' && !schema.required.includes('edits')) pro
 const evidence = JSON.parse(input);
 let labels = ${JSON.stringify(classifications)};
 let review = ${JSON.stringify(assessment)};
-if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-final-failed' || mode === 'many-decisions') {
+if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-final-failed' || mode === 'many-decisions' || mode === 'priority-order') {
   labels = evidence.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => ({editId:item.id,kinds:['behavior'],reason:'Synthetic change.',uncertainty:''}))));
   review = { summary:'Synthetic parallel review.', topics:[{...review.topics[0],id:'parallel-change',priority:'supporting',title:'Synthetic supporting changes',editIds:labels.map(entry=>entry.editId),excerpts:[]}] };
+}
+if (mode === 'priority-order') {
+  const ids = index => evidence.files[index].hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => item.id));
+  const unknown = new Set(evidence.files.filter(file => file.path === 'tests/change-2.ts').flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => item.id))));
+  labels = labels.map(label => unknown.has(label.editId) ? {...label, kinds:['unknown'], uncertainty:'The external caller contract is unavailable.'} : label);
+  if (!schema.required.includes('edits')) {
+    const topic = (id, title, priority, indices) => ({...review.topics[0], id, title, priority,
+      editIds:indices.flatMap(ids), excerpts:priority === 'review' ? indices.map(index => ({path:evidence.files[index].path, side:'after', startLine:1, endLine:1})) : []});
+    review.topics = [topic('supporting', 'Supporting cleanup', 'supporting', [0,4]),
+      {...topic('contract', 'Check the contract and its implementation', 'review', [2,4]), editIds:ids(2)},
+      topic('validation', 'Check the separate validation path', 'review', [3]),
+      {...topic('unknown', 'External caller contract', 'supporting', [1]), uncertainty:'The external caller contract is unavailable.'}];
+  }
 }
 if (mode === 'many-decisions') {
   review = {
@@ -126,8 +139,15 @@ if (mode === 'unresolved') {
   review.topics[0].editIds = ['0-0-3'];
   review.topics.push({ ...review.topics[0], id: 'second-path', priority: 'supporting', title: 'The other rendering path', editIds: ['0-1-3'], excerpts: [], uncertainty: labels[1].uncertainty });
 }
+if (mode === 'reconciled') {
+  labels = labels.map(label => ({ ...label, kinds: ['behavior', 'unknown'], uncertainty: 'The rendering implementation and its caller contract are missing from this file pass.' }));
+  review.classifications = labels.map((label, index) => index === 0
+    ? { ...label, kinds: ['behavior'], reason: 'The supplied source establishes how the first rendering path applies the font setting.', uncertainty: '' }
+    : { ...label, uncertainty: 'Only the external caller contract remains unavailable.' });
+  review.topics = [{ ...review.topics[0], priority: 'supporting', excerpts: [], uncertainty: 'Only the external caller contract remains unavailable.' }];
+}
 await appendFile(${JSON.stringify(requestLog)}, JSON.stringify({ provider:isClaude?'claude':'codex', schema, evidence: JSON.parse(input), labels, args }) + '\\n');
-const result = schema.required.includes('edits') ? { edits: labels } : review;
+const result = schema.required.includes('edits') ? { edits: labels } : { ...review, classifications: review.classifications ?? labels };
 if (isClaude) process.stdout.write(JSON.stringify({type:'result',subtype:'success',is_error:false,structured_output:result}));
 else await writeFile(args[args.indexOf('--output-last-message') + 1], JSON.stringify(result));
 if (mode === 'parallel') await appendFile(${JSON.stringify(lifecycleLog)}, JSON.stringify({type:'finish',pid:process.pid})+'\\n');
@@ -264,6 +284,7 @@ async function handleEvent(message) {
         route.diffContents = route.diffContents.slice(0,3);
       }
       if (changesMode === 'many-decisions') route.diffSummaries = route.diffSummaries.slice(0,5);
+      if (changesMode === 'priority-order') route.diffSummaries = route.diffSummaries.slice(0,6);
       if (changesMode === 'all-generated') for (const entry of route.diffContents) entry.newTreeEntry = { isGenerated: true };
       if (changesMode === 'duplicate-summary') route.diffSummaries[4] = route.diffSummaries[0];
       if (changesMode === 'truncated-list') route.pageLimits.filesLimitExceeded = true;
@@ -276,7 +297,7 @@ async function handleEvent(message) {
         route.diffContents[0].newTreeEntry = { isGenerated: true };
         route.diffContents[0].diffLines = [];
       }
-      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range', 'collapsed-first'].includes(changesMode));
+      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range', 'collapsed-first', 'priority-order'].includes(changesMode));
       if (changesMode === 'collapsed-first') {
         let index = 0;
         body = body.replace(/<table\b[^>]*>.*?<\/table>/gs, table => index++ < 2 ? '' : table);
@@ -285,6 +306,7 @@ async function handleEvent(message) {
       const paths = url.searchParams.get('paths').split(',').map(decodeURIComponent);
       const isRange = url.searchParams.get('range') === selectedRange;
       const entries = structuredClone((isRange ? rangeEntries : changes.entries).filter(entry => paths.includes(entry.path)));
+      if (changesMode === 'priority-order') for (const entry of entries) if (entry.path === changes.paths[5]) entry.newTreeEntry = { isGenerated: true };
       if (isRange && paths.includes(changes.paths[0])) {
         entries[0].isTooBig = true;
         entries[0].diffLines = [];
@@ -451,12 +473,14 @@ try {
           const toggle = replacement.querySelector('.js-expand-all-difflines-button');
           toggle.setAttribute('aria-label', (expanded ? 'Collapse non-diff lines: ' : 'Expand all lines: ') + path);
           toggle.textContent = expanded ? 'Collapse non-diff lines' : 'Expand all';
-          toggle.addEventListener('click', () => renderExpandedFile(!expanded));
           window.fixtureInstallReviewControl(replacement, path, true);
           mounted.replaceWith(replacement);
           mounted = replacement;
         };
-        file.querySelector('.js-expand-all-difflines-button').addEventListener('click', () => renderExpandedFile(true));
+        document.addEventListener('click', event => {
+          const toggle = event.target.closest('.js-expand-all-difflines-button');
+          if (toggle && mounted.contains(toggle)) renderExpandedFile(toggle.textContent === 'Expand all');
+        });
         window.fixtureInstallReviewControl(file, path, true);
       }
     });
@@ -934,7 +958,7 @@ try {
   await writeFile(modeFile, 'unresolved');
   await click('Run fresh review');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-unresolved')?.textContent.includes('1 edit') && !${shadow}.querySelector('.rf-analyze').disabled`), 'unresolved classification visibility');
-  const afterUnresolved = (await modelRequests()).length;
+  let afterUnresolved = (await modelRequests()).length;
   assert.equal(afterUnresolved - beforeUnresolved, 2);
   assert.equal(await evaluate(`document.querySelector('[id$="R151"][data-line-number]').closest('tr').classList.contains('review-focus-native-hidden')`), false, 'An unresolved edit stays visible even when prioritization assigns it to supporting.');
   assert.ok(await evaluate(`${fileShadow}.querySelector('.rf-kept-visible').checkVisibility() && ${fileShadow}.querySelector('.rf-kept-visible').textContent.includes('cannot be established')`), 'Unresolved visible code must explain its missing evidence beside the file.');
@@ -942,6 +966,25 @@ try {
   await evaluate(`${shadow}.querySelector('.rf-review-index > summary').click(); ${shadow}.querySelector('.rf-supporting > summary').click(); ${shadow}.querySelector('.rf-supporting .rf-evidence > summary').click()`);
   await waitFor(() => evaluate(`${shadow}.querySelector('.rf-edit[data-edit-id="0-1-3"] .rf-change-kind')?.textContent === 'Change type: unknown'`), 'classification evidence disclosure');
   assert.ok(await evaluate(`${shadow}.querySelector('.rf-edit[data-edit-id="0-1-3"] .rf-uncertainty').textContent.includes('cannot be established')`));
+
+  await writeFile(modeFile, 'reconciled');
+  await click('Run fresh review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-unresolved')?.textContent.includes('1 edit') && !${shadow}.querySelector('.rf-analyze').disabled`), 'revised classification replaces both first-pass uncertainties');
+  assert.equal((await modelRequests()).length - afterUnresolved, 2, 'Reconciling classifications must not add a model call.');
+  afterUnresolved = (await modelRequests()).length;
+  for (const restored of [false, true]) {
+    if (restored) {
+      await page('Page.reload');
+      await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'revised classifications saved');
+      await click('Open saved review');
+      await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'revised classifications restored');
+      assert.equal((await modelRequests()).length, afterUnresolved, 'Restoring revised classifications must not invoke the model.');
+    }
+    assert.equal(await evaluate(`document.querySelector('[id$="R137"][data-line-number]').closest('tr').classList.contains('review-focus-native-hidden')`), true, 'Resolved supporting edits may fold using the final labels.');
+    assert.equal(await evaluate(`document.querySelector('[id$="R151"][data-line-number]').closest('tr').classList.contains('review-focus-native-hidden')`), false, 'Remaining unknown edits must stay visible.');
+    assert.deepEqual(await evaluate(`[...${fileShadow}.querySelectorAll('.rf-kept-visible')].map(node=>node.textContent)`), ['Kept visible because evidence is incomplete: Only the external caller contract remains unavailable.'], 'The file must display only the remaining gap after reconciliation.');
+    assert.equal(await evaluate(`${fileShadow}.textContent.includes('missing from this file pass')`), false, 'First-pass evidence gaps must not reappear in explanations.');
+  }
   await writeFile(modeFile, 'normal');
   checkEvidence(await modelRequests());
 
@@ -1211,7 +1254,7 @@ try {
   assert.equal(defaultRequests.at(-1).evidence.files.length, 2);
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-file-progress[data-state=excluded]").length'), 1);
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-file-progress[data-state=complete]").length'), 2);
-  assert.equal(await evaluate('document.querySelectorAll("section[role=region]")[0].querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'An excluded file must never be folded as if reviewed.');
+  assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[0].pathDigest}').querySelectorAll('.review-focus-native-hidden, .review-focus-native-fold').length`), 0, 'An excluded file must never be folded as if reviewed.');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'), 4);
   await page('Page.reload');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved review with an excluded generated file');
@@ -1468,6 +1511,11 @@ try {
     const settings = {provider:'claude',model:'fixture'};
     const input = {url:${JSON.stringify(prUrl)},baseSha:${JSON.stringify(baseSha)},headSha:${JSON.stringify(headSha)},description:'first',context:[]};
     const original = await cache.reviewCacheKey(input,settings);
+    const earlierLookup = JSON.parse(original.lookup);
+    earlierLookup[0] = 2;
+    await cache.saveReview({key:'unreconciled-review',lookup:JSON.stringify(earlierLookup)},{text:'Review with first-pass classifications'});
+    const earlierReview = {offered:(await cache.peekReview(original.lookup)).available,retained:Boolean(await cache.readReview('unreconciled-review'))};
+    await cache.clearCache();
     const variants = await Promise.all([
       cache.reviewCacheKey({...input,headSha:'c'.repeat(40)},settings),
       cache.reviewCacheKey({...input,baseSha:'d'.repeat(40)},settings),
@@ -1490,13 +1538,14 @@ try {
     const parallel = await cache.cacheInfo();
     const shrunk = await cache.setCacheLimit(1);
     await cache.clearCache();
-    return {cancellation,keys:new Set([original,...variants].map(entry=>entry.key)).size,lru,tooLarge,parallel,shrunk,cleared:await cache.cacheInfo()};
+    return {cancellation,earlierReview,keys:new Set([original,...variants].map(entry=>entry.key)).size,lru,tooLarge,parallel,shrunk,cleared:await cache.cacheInfo()};
   })()`);
   assert.equal(cacheChecks.cancellation.preAborted, true);
   assert.equal(cacheChecks.cancellation.abortedWrite, true, 'Cancelling an uncommitted IndexedDB write must abort the transaction.');
   assert.equal(cacheChecks.cancellation.previous.text, 'Paid review', 'Aborting a replacement must roll back deletion of the earlier review.');
   assert.equal(cacheChecks.cancellation.replacement, null);
   assert.equal(cacheChecks.cancellation.unstarted, null);
+  assert.deepEqual(cacheChecks.earlierReview, {offered:false,retained:true}, 'Reviews saved before reconciliation require fresh analysis without deleting their records.');
   assert.equal(cacheChecks.keys, 9, 'Commits, intent, source context, provider, model, effort and review preferences each change the cache key.');
   assert.deepEqual([cacheChecks.lru.a, cacheChecks.lru.b, cacheChecks.lru.c], [true, false, true], 'Reading A keeps it while the older B is evicted.');
   assert.equal(cacheChecks.lru.info.count, 2);
@@ -1952,6 +2001,134 @@ try {
   assert.equal((await modelRequests()).length, beforeRange + 6);
   await evaluate(`history.replaceState(null, '', '/changes/files/pull/200000/changes'); window.dispatchEvent(new PopStateEvent('popstate'));`);
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !${shadow}.querySelector('.rf-analyze').disabled && !${shadow}.querySelector('.rf-run-settings').textContent.includes('Range:')`), 'repository names must not be mistaken for a selected range');
+  changesMode = 'priority-order';
+  await writeFile(modeFile, 'priority-order');
+  await evaluateExtension('chrome.runtime.sendMessage({type:"clear-cache"})');
+  await evaluate('localStorage.removeItem("fixture-viewed-files")');
+  await page('Page.navigate', { url: prUrl + '/changes' });
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !${shadow}.querySelector('.rf-analyze').disabled`), 'priority order fixture ready');
+  const nativePaths = `Array.from(document.querySelectorAll('[data-testid="progressive-diffs-list"] > .fixture-diff-entry'), entry => entry.querySelector('.diff-file-header code')?.textContent).filter(Boolean)`;
+  const priorityPaths = [2, 4, 3, 1, 0, 5].map(index => changes.paths[index]);
+  const chooseOrder = value => evaluate(`(() => {
+    const control = ${shadow}.querySelector('.rf-file-order');
+    control.value = ${JSON.stringify(value)};
+    control.dispatchEvent(new Event('change'));
+  })()`);
+  await evaluate(`(() => {
+    window.priorityFileTemplate = document.querySelector('.fixture-diff-entry').outerHTML;
+    window.originalPriorityFiles = [...document.querySelectorAll('.fixture-diff-entry')];
+    const loader = document.createElement('p');
+    loader.id = 'fixture-list-control';
+    loader.textContent = 'GitHub list control';
+    window.originalPriorityFiles[0].after(loader);
+  })()`);
+  const beforePriority = (await modelRequests()).length;
+  await click('Analyze PR');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'decisions ranked across files');
+  await openFiles();
+  assert.deepEqual(await evaluate(nativePaths), [2, 1, 0].map(index => changes.paths[index]));
+  assert.deepEqual(await evaluate(`Array.from(${shadow}.querySelectorAll('.rf-file-progress-row'), row => row.dataset.path)`), priorityPaths, 'Important related files precede unresolved evidence, supporting code, and excluded generated files.');
+  assert.deepEqual(await evaluate(`Array.from(${shadow}.querySelectorAll('.rf-file-group'), group => group.textContent)`), ['Check the contract and its implementation', 'Check the separate validation path', 'Unresolved evidence', 'Supporting cleanup', 'Not analyzed']);
+  assert.equal(await evaluate('document.querySelector("[data-testid=progressive-diffs-list]").children[1].id'), 'fixture-list-control', 'Non-file controls retain their slots.');
+  assert.ok(await evaluate('window.originalPriorityFiles.every(file => file.isConnected)'), 'Priority order moves the native nodes without cloning them.');
+  assert.equal((await modelRequests()).length - beforePriority, 6, 'Ranking adds no model call beyond five classifications and one PR review.');
+  await click('Full diff');
+  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0, 3));
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-order').hidden`), true);
+  await click('Explained');
+  assert.deepEqual(await evaluate(nativePaths), [2, 1, 0].map(index => changes.paths[index]));
+  await chooseOrder('github');
+  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0, 3));
+  await click('Folded');
+  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0, 3), 'Switching explained/folded respects the user’s ordering choice.');
+  await chooseOrder('priority');
+  await click('Explained');
+  await evaluate(`(() => {
+    const list = document.querySelector('[data-testid=progressive-diffs-list]');
+    for (const entry of ${JSON.stringify(changes.entries.slice(3, 6).map(({path, pathDigest}) => ({path, pathDigest})))}) {
+      const html = window.priorityFileTemplate.replaceAll(${JSON.stringify(changes.paths[0])}, entry.path).replaceAll(${JSON.stringify(changes.entries[0].pathDigest)}, entry.pathDigest);
+      list.insertAdjacentHTML('beforeend', html);
+      window.fixtureInstallReviewControl(list.lastElementChild, entry.path, true);
+    }
+    for (const file of list.querySelectorAll('.fixture-diff-entry')) file.style.minHeight = '420px';
+    document.head.insertAdjacentHTML('beforeend', ${JSON.stringify(fixtureStyle)});
+  })()`);
+  await waitFor(() => evaluate(`JSON.stringify(${nativePaths}) === ${JSON.stringify(JSON.stringify(priorityPaths))}`), 'lazy-loaded files join their decision groups');
+  await evaluate(`(() => {
+    const file = document.getElementById('diff-${changes.entries[2].pathDigest}');
+    const form = document.createElement('form');
+    const comment = document.createElement('textarea');
+    comment.value = 'Unsubmitted review comment';
+    form.append(comment);
+    file.append(form);
+    window.priorityComment = comment;
+    comment.focus({preventScroll:true});
+    file.scrollIntoView({block:'start',behavior:'instant'});
+    window.scrollBy({top:120,behavior:'instant'});
+    window.priorityReadingTop = file.getBoundingClientRect().top;
+  })()`);
+  await chooseOrder('github');
+  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,6));
+  assert.ok(await evaluate('document.activeElement === window.priorityComment && window.priorityComment.value === "Unsubmitted review comment"'), 'Reordering preserves focus and the pending comment.');
+  assert.ok(await evaluate(`Math.abs(document.getElementById('diff-${changes.entries[2].pathDigest}').getBoundingClientRect().top - window.priorityReadingTop) < 2`), 'Changing order keeps the current file at its reading position.');
+  await chooseOrder('priority');
+  assert.ok(await evaluate('document.activeElement === window.priorityComment'));
+  await evaluate(`(() => {
+    const file = document.getElementById('diff-${changes.entries[0].pathDigest}');
+    file.scrollIntoView({block:'start',behavior:'instant'});
+    window.scrollBy({top:40,behavior:'instant'});
+    window.priorityReadingTop = file.getBoundingClientRect().top;
+  })()`);
+  await chooseOrder('github');
+  assert.ok(await evaluate(`Math.abs(document.getElementById('diff-${changes.entries[0].pathDigest}').getBoundingClientRect().top - window.priorityReadingTop) < 2`), 'An offscreen focused comment must not override the file currently being read.');
+  await chooseOrder('priority');
+  await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').click()`);
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-file-progress-row[data-path="${changes.paths[2]}"] input').checked`), 'Viewed reflected in priority order');
+  assert.deepEqual(await evaluate(nativePaths), priorityPaths, 'Marking Viewed never shuffles files.');
+  await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('.js-expand-all-difflines-button').click()`);
+  await waitFor(() => evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelectorAll('[data-fixture-context]').length === 201`), 'native expansion after reordering');
+  assert.deepEqual(await evaluate(nativePaths), priorityPaths);
+  await evaluate(`(() => {
+    const list = document.querySelector('[data-testid=progressive-diffs-list]');
+    const replacement = list.cloneNode(true);
+    list.replaceWith(replacement);
+    const entries = [...replacement.querySelectorAll('.fixture-diff-entry')];
+    entries.sort((left,right) => ${JSON.stringify(changes.paths)}.indexOf(left.querySelector('.diff-file-header code').textContent) - ${JSON.stringify(changes.paths)}.indexOf(right.querySelector('.diff-file-header code').textContent));
+    for (const entry of entries) replacement.append(entry);
+  })()`);
+  await waitFor(() => evaluate(`JSON.stringify(${nativePaths}) === ${JSON.stringify(JSON.stringify(priorityPaths))}`), 'GitHub list replacement reapplies the same ranking');
+  await evaluate(`(() => {
+    const list = document.querySelector('[data-testid=progressive-diffs-list]');
+    list.removeAttribute('data-testid');
+    list.classList.add('js-diff-progressive-container');
+    for (const entry of [...list.children].filter(entry => entry.matches('.fixture-diff-entry'))) {
+      const file = entry.querySelector('section');
+      file.classList.add('js-file');
+      file.dataset.tagsearchPath = file.querySelector('.diff-file-header code').textContent;
+      entry.replaceWith(file);
+    }
+  })()`);
+  const classicPaths = `Array.from(document.querySelectorAll('.js-diff-progressive-container > .js-file'), file => file.dataset.tagsearchPath)`;
+  await chooseOrder('github');
+  assert.deepEqual(await evaluate(classicPaths), changes.paths.slice(0,6), 'Classic file containers restore their original order.');
+  await chooseOrder('priority');
+  assert.deepEqual(await evaluate(classicPaths), priorityPaths, 'Classic file containers follow the same decision ordering.');
+  await evaluate('history.replaceState(null,"",location.pathname.replace(/changes$/,"checks")); window.dispatchEvent(new PopStateEvent("popstate"))');
+  await waitFor(() => evaluate('!document.querySelector("#review-focus-extension")'), 'priority UI removed on Checks');
+  assert.deepEqual(await evaluate(classicPaths), changes.paths.slice(0,6), 'Leaving the diff restores GitHub order.');
+  await page('Page.navigate', {url:prUrl + '/changes'});
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' || ${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'review available after navigation');
+  if (await evaluate(`!${shadow}.querySelector('.rf-overview-title')`)) await click('Open saved review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions'`), 'saved decisions restore priority order');
+  assert.deepEqual(await evaluate(nativePaths), [2,1,0].map(index => changes.paths[index]));
+  assert.equal((await modelRequests()).length - beforePriority, 6, 'View switches, remounts, and restoring a review reuse the assessment.');
+  await openFiles();
+  await evaluate('document.querySelector("#review-focus-extension").scrollIntoView({block:"start"})');
+  await writeFile('/tmp/priorities-priority-order.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
+  await page('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:false});
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-panel').scrollWidth > ${shadow}.querySelector('.rf-panel').clientWidth`), false, 'Order controls and grouped file names fit a narrow viewport.');
+  await writeFile('/tmp/priorities-priority-order-mobile.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
+  await page('Emulation.setDeviceMetricsOverride', {width:1512,height:1080,deviceScaleFactor:1,mobile:false});
   assert.ok(workers.length > 0);
   assert.deepEqual(eventErrors, []);
   assert.deepEqual(exceptions, []);
