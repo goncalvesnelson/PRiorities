@@ -129,7 +129,7 @@ The earlier standalone prototype and its private PR fixture are not included in 
 
 Retryable sessions remain available while their browser tab is open, including while you visit another GitHub subtab. Completed sessions with excluded files also remain available for **Review anyway**. Closing the tab releases the session. Completed cached reviews can be reopened in a later visit.
 
-The [literature notes](review-literature-research.md) record the research behind the review flow and the evaluation still needed. The [Laya assessment](laya-fit-research.md) explains why it has not replaced semantic classification. Their dated implementation sections describe earlier prototype versions.
+The [literature notes](review-literature-research.md) record the research behind the review flow, the changes it motivated, and the evaluation still needed. The [Laya assessment](laya-fit-research.md) explains why it has not replaced semantic classification; its dated implementation details describe an earlier prototype version.
 
 ## Helper installation and removal
 

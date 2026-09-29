@@ -54,4 +54,4 @@ After pulling changes, run `npm ci`, `npm run build:extension`, and `npm run ins
 
 The earlier standalone prototype and its captured private PR data remain outside this repository. Tests here don't require another repository checkout.
 
-Research notes: [review literature](review-literature-research.md), [approach assessment and evaluation plan](review-literature-followup.md), [Laya assessment](laya-fit-research.md), and [GitHub integration options](pr-lens-research.md).
+Research notes: [review literature, approach assessment and evaluation plan](review-literature-research.md), [Laya assessment](laya-fit-research.md), and [GitHub integration options](pr-lens-research.md).
