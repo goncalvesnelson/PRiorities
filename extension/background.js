@@ -254,7 +254,7 @@ function createSession(tabId, url, port) {
     try {
       setFileState(entry, 'classifying', 'Classifying edits…');
       const changedPaths = [...session.files.values()].filter(file => file.included).map(file => file.snapshot.files[0].path);
-      const raw = await analyzeWithCLI({ ...session.settings, signal: controller.signal, prompt: makeClassificationPrompt(entry.snapshot, changedPaths, session.settings.review), schema: classificationSchema });
+      const raw = await analyzeWithCLI({ ...session.settings, signal: controller.signal, prompt: makeClassificationPrompt(entry.snapshot, changedPaths, session.settings.review, session.snapshot), schema: classificationSchema });
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       entry.classifications = validateClassifications(raw, entry.snapshot);
       setFileState(entry, 'classified', 'Classified. Review decisions follow once every file is classified.');
@@ -294,16 +294,16 @@ function createSession(tabId, url, port) {
         ...session.snapshot,
         files: session.snapshot.files.filter(file => includedPaths.has(file.path)),
         context: session.snapshot.context.filter(source => includedPaths.has(source.path)),
-        warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated files excluded from this review: ${excludedPaths.join(', ')}. Their source was not inspected.`] : [])]
+        warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated files excluded from standalone analysis: ${excludedPaths.join(', ')}. Related Go checksum diffs may be supplied in dependencyDiffs as supporting evidence.`] : [])]
       };
       const classifications = validateClassifications({ edits: classified.flatMap(entry => entry.classifications) }, snapshot);
       const raw = await analyzeWithCLI({
         ...session.settings, signal: controller.signal,
-        prompt: makePrompt(snapshot, classifications, session.settings.review), schema: analysisSchema
+        prompt: makePrompt(snapshot, classifications, session.settings.review, session.snapshot), schema: analysisSchema
       });
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       if (session.checkVersion !== version) return;
-      const analysis = { ...validateAnalysis(raw, snapshot), classifications };
+      const analysis = validateAnalysis(raw, snapshot);
       let cache = { saved: false, message: 'This review could not be saved locally. It remains available in this tab.' };
       try {
         if (session.cacheIdentity) cache = await saveReview(session.cacheIdentity, {
@@ -338,15 +338,14 @@ function createSession(tabId, url, port) {
     if ([...session.files].some(([path, entry]) => entry.included && entry.state !== 'skipped' && !restored.has(path))) return false;
     const included = session.snapshot.files.filter(file => restored.has(file.path) || session.files.get(file.path).included && session.files.get(file.path).state === 'skipped');
     const snapshot = { ...session.snapshot, files: included, context: session.snapshot.context.filter(source => included.some(file => file.path === source.path)) };
-    const classifications = validateClassifications({ edits: cached.analysis.classifications }, snapshot);
-    const analysis = { ...validateAnalysis(cached.analysis, snapshot), classifications };
+    const analysis = validateAnalysis(cached.analysis, snapshot);
     session.initialized = true;
     session.restoring = false;
     for (const path of restored) {
       const entry = session.files.get(path);
       const editIds = new Set(allEdits(entry.snapshot).map(edit => edit.id));
       entry.included = true;
-      entry.classifications = classifications.filter(classification => editIds.has(classification.editId));
+      entry.classifications = analysis.classifications.filter(classification => editIds.has(classification.editId));
       setFileState(entry, 'classified', 'Saved review restored.');
     }
     finish(session, { type: 'result', analysis, provider: session.settings.provider, model: session.settings.model, cache: { saved: true, restored: true, savedAt: cached.savedAt } });

@@ -5,6 +5,7 @@ Focus GitHub code reviews on the changes that need your judgment.
 PRiorities is a Chrome extension that uses your local Codex or Claude Code login to explain important changes and collapse supporting code inside GitHub's diff. Each file is classified separately, with up to three files in parallel, then a single review of the whole PR chooses what to show.
 
 - Get explanations, before/after behavior, and source excerpts beside each file.
+- Read important decisions first, with related files together; switch back to GitHub order anytime.
 - Compare Full diff, Explained (all code with explanations), and Folded (explanations with supporting code collapsed) without another model call.
 - Choose review focus, always-visible change types and file paths, and custom analysis prompts in Settings.
 - Pick your CLI model and reasoning effort, and see them beside the review.
@@ -17,7 +18,7 @@ PRiorities is a Chrome extension that uses your local Codex or Claude Code login
 
 ## Install
 
-Requires Google Chrome on macOS, Node.js 24, and a signed-in Codex or Claude Code CLI.
+Requires Google Chrome 133 or later on macOS, Node.js 24, and a signed-in Codex or Claude Code CLI.
 
 ```sh
 git clone https://github.com/goncalvesnelson/PRiorities.git
