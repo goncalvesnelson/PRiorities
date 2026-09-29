@@ -16,7 +16,7 @@ npm run install:cli-host
 
 The installer registers every supported CLI it finds on PATH. To use Codex, check `codex login status` and sign in with `codex login`. To use Claude Code, check `claude auth status` and sign in with `claude auth login`. The helpers use those logins without reading or copying credentials. After installing, Chrome launches the selected helper automatically; no terminal process needs to stay open. Re-run the installer when adding a CLI to an existing installation.
 
-After pulling changes, run `npm ci`, `npm run build:extension`, and `npm run install:cli-host`, then choose **Reload** in `chrome://extensions` and refresh the PR page. The installer copies the native helper; reloading Chrome alone does not update that copy. If you use `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, set the same directory when rerunning the installer. For a fresh installation:
+After pulling changes, run `npm ci`, `npm run build:extension`, and `npm run install:cli-host`, then choose **Reload** in `chrome://extensions` and refresh the PR page. Reloading or disabling the extension stops its UI in already-open pages and restores folded code; refresh the page after enabling or reloading it to reconnect. Completed saved reviews remain available, but unfinished analyses do not survive an extension reload. The installer copies the native helper; reloading Chrome alone does not update that copy. If you use `CODEX_HOME` or `CLAUDE_CONFIG_DIR`, set the same directory when rerunning the installer. For a fresh installation:
 
 1. Open `chrome://extensions` in Chrome.
 2. Turn on **Developer mode**, choose **Load unpacked**, and select this folder:

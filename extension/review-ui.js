@@ -200,7 +200,9 @@ function renderRows(rows) {
 }
 
 export function startReviewUI() {
-  if (document.querySelector('#review-focus-extension')) return;
+  if (!chrome.runtime?.id || document.querySelector('#review-focus-extension')) return;
+  const listeners = new AbortController();
+  const eventOptions = { signal: listeners.signal };
   const host = element('section');
   host.id = 'review-focus-extension';
   host.setAttribute(ownedAttribute, '');
@@ -292,7 +294,7 @@ export function startReviewUI() {
   });
   document.addEventListener('pointerdown', event => {
     if (menu.open && !event.composedPath().includes(menu)) menu.open = false;
-  });
+  }, eventOptions);
   shadow.addEventListener('focusin', event => {
     if (menu.open && !menu.contains(event.target)) menu.open = false;
   });
@@ -327,6 +329,7 @@ export function startReviewUI() {
   }
 
   function renderControls() {
+    if (destroyed) return;
     const activeModel = reviewProviderName ? reviewModel : model;
     const activeEffort = reviewProviderName ? reviewEffort : effort;
     const settingsChanged = Boolean(reviewProviderName && model &&
@@ -381,10 +384,11 @@ export function startReviewUI() {
   }
 
   async function loadSettings(refreshConnection = false) {
+    if (!isActive()) return;
     const request = ++settingsRequest;
     try {
       const settings = await chrome.runtime.sendMessage({ type: 'get-settings', refreshConnection });
-      if (request !== settingsRequest || destroyed) return;
+      if (request !== settingsRequest || !isActive()) return;
       if (settings?.error) throw new Error(settings.error);
       if (!['codex', 'claude'].includes(settings?.provider)) throw new Error('The extension returned invalid provider settings.');
       providerName = settings.provider === 'claude' ? 'Claude Code' : 'Codex';
@@ -394,7 +398,7 @@ export function startReviewUI() {
       void refreshSavedReview(true);
       renderControls();
     } catch (failure) {
-      if (request !== settingsRequest || destroyed) return;
+      if (request !== settingsRequest || !isActive()) return;
       configured = false;
       model = '';
       error = `The extension could not read its settings. Reload this page after reloading the extension. ${failure.message}`;
@@ -408,7 +412,7 @@ export function startReviewUI() {
   }
 
   async function refreshSavedReview(force = false) {
-    if (busy || analysis || !isDiffPage()) return;
+    if (!isActive() || busy || analysis || !isDiffPage()) return;
     const identity = readPageIdentity(document, location.href);
     if (!identity?.headSha || !identity.baseSha) return;
     const key = JSON.stringify([identity.owner, identity.repo, identity.number, identity.baseSha, identity.headSha, providerName, model, effort]);
@@ -417,14 +421,14 @@ export function startReviewUI() {
     const version = ++cacheProbeVersion;
     try {
       const cached = await chrome.runtime.sendMessage({ type: 'peek-review', baseSha: identity.baseSha, headSha: identity.headSha });
-      if (version !== cacheProbeVersion || busy || analysis) return;
+      if (version !== cacheProbeVersion || !isActive() || busy || analysis) return;
       if (cached?.error) throw new Error(cached.error);
       if (cacheLookupFailed) { cacheMessage = ''; cacheWarning = false; }
       cacheLookupFailed = false;
       savedReview = cached?.available ? { ...cached, candidate: JSON.stringify([key, cached.key, cached.savedAt]) } : undefined;
       renderControls();
     } catch (failure) {
-      if (version !== cacheProbeVersion || busy || analysis) return;
+      if (version !== cacheProbeVersion || !isActive() || busy || analysis) return;
       cacheLookupFailed = true;
       cacheWarning = true;
       cacheMessage = failure.message;
@@ -433,16 +437,19 @@ export function startReviewUI() {
   }
 
   async function openSettings() {
+    if (!isActive()) return;
     try {
       const settings = await chrome.runtime.sendMessage({ type: 'open-settings' });
       if (settings?.error) throw new Error(settings.error);
     } catch (failure) {
+      if (!isActive()) return;
       error = `Settings could not open. Open PRiorities from Chrome’s extensions menu. ${failure.message}`;
       renderControls();
     }
   }
 
   function cancelAnalysis(message = 'Analysis cancelled. Completed file classifications are kept.', close = false) {
+    if (!isActive()) return;
     if (port && !close) {
       pendingAction = { type: 'cancel', message: 'Stopping active analyses…' };
       renderControls();
@@ -493,7 +500,7 @@ export function startReviewUI() {
   }
 
   function retryReview(path) {
-    if (!port || openingSavedReview || !verifiedPage()) return;
+    if (!isActive() || !port || openingSavedReview || !verifiedPage()) return;
     busy = true;
     error = '';
     reviewStage = path ? 'files' : 'checking';
@@ -503,7 +510,7 @@ export function startReviewUI() {
   }
 
   function reviewGeneratedFile(path) {
-    if (!port || openingSavedReview || !verifiedPage() || fileStates.get(path)?.state !== 'excluded') return;
+    if (!isActive() || !port || openingSavedReview || !verifiedPage() || fileStates.get(path)?.state !== 'excluded') return;
     fileStates.set(path, { state: 'queued', message: 'Queued by your request.' });
     cacheMessage = '';
     fileFilter = 'all';
@@ -602,7 +609,7 @@ export function startReviewUI() {
     input.type = 'checkbox';
     input.setAttribute('aria-label', `Reviewed by you: ${path}`);
     input.addEventListener('click', event => {
-      if (!verifiedPage()) {
+      if (!isActive() || !verifiedPage()) {
         event.preventDefault();
         checkPage();
         return;
@@ -612,7 +619,7 @@ export function startReviewUI() {
       if (!control || control.disabled || control.getAttribute('aria-disabled') === 'true') event.preventDefault();
     });
     input.addEventListener('change', () => {
-      if (!verifiedPage()) {
+      if (!isActive() || !verifiedPage()) {
         checkPage();
         return;
       }
@@ -692,7 +699,7 @@ export function startReviewUI() {
   }
 
   function renderFilePanels() {
-    if (!isDiffPage()) return;
+    if (!isActive() || !isDiffPage()) return;
     let locations;
     for (const [container, record] of filePanels) {
       if (container.isConnected) continue;
@@ -798,7 +805,7 @@ export function startReviewUI() {
   }
 
   function finishFailure(message, request) {
-    if (operation !== request) return;
+    if (operation !== request || !isActive()) return;
     busy = false;
     pendingAction = undefined;
     error = message;
@@ -813,7 +820,7 @@ export function startReviewUI() {
   }
 
   async function analyzePullRequest({ force = false, cacheOnly = false } = {}) {
-    if (busy) return;
+    if (!isActive() || busy) return;
     const restoringReview = cacheOnly ? savedReview : undefined;
     cancelAnalysis('', true);
     clearReview();
@@ -847,7 +854,7 @@ export function startReviewUI() {
         status = message;
         renderControls();
       } });
-      if (request !== operation) return;
+      if (request !== operation || !isActive()) return;
       snapshot = captured;
       mode = 'focused';
       reviewStage = 'files';
@@ -869,7 +876,7 @@ export function startReviewUI() {
     port = connection;
     renderFileProgress();
     connection.onMessage.addListener(message => {
-      if (request !== operation) return;
+      if (request !== operation || !isActive()) return;
       if (message.type === 'heartbeat') return;
       if (message.type === 'no-session') {
         port = undefined;
@@ -976,7 +983,7 @@ export function startReviewUI() {
       }
     });
     connection.onDisconnect.addListener(() => {
-      if (request !== operation || port !== connection) return;
+      if (request !== operation || !isActive() || port !== connection) return;
       port = undefined;
       if (busy) {
         finishFailure('The analysis connection closed. Reload this page to reconnect; completed classifications are kept.', request);
@@ -1011,7 +1018,7 @@ export function startReviewUI() {
     if (port) {
       const connection = port;
       port = undefined;
-      connection.disconnect();
+      if (chrome.runtime?.id) connection.disconnect();
     }
     busy = false;
     status = '';
@@ -1053,6 +1060,7 @@ export function startReviewUI() {
   }
 
   function setMode(next) {
+    if (!isActive()) return;
     mode = next;
     applyFolding();
     renderFilePanels();
@@ -1060,6 +1068,7 @@ export function startReviewUI() {
   }
 
   function jumpToSource(excerpt) {
+    if (!isActive()) return;
     const file = findNativeFiles(document).find(entry => entry.path === excerpt.path);
     const row = file?.rows.find(entry => {
       const line = excerpt.side === 'before' ? entry.oldLine : entry.newLine;
@@ -1183,7 +1192,7 @@ export function startReviewUI() {
   }
 
   function checkPage() {
-    if (destroyed) return;
+    if (!isActive()) return;
     const identity = readPageIdentity(document, location.href);
     if (!identity) {
       detachAnalysis();
@@ -1235,8 +1244,27 @@ export function startReviewUI() {
   }
 
   function scheduleCheck() {
+    if (!isActive()) return;
     clearTimeout(timer);
     timer = setTimeout(checkPage, 180);
+  }
+
+  function isActive() {
+    if (destroyed) return false;
+    if (chrome.runtime?.id) return true;
+    stop();
+    return false;
+  }
+
+  function stop() {
+    destroyed = true;
+    settingsRequest++;
+    listeners.abort();
+    observer.disconnect();
+    clearInterval(interval);
+    clearTimeout(timer);
+    detachAnalysis();
+    host.remove();
   }
 
   const observer = new MutationObserver(records => {
@@ -1250,27 +1278,23 @@ export function startReviewUI() {
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-pressed', 'aria-label', 'aria-disabled', 'checked', 'disabled'] });
   document.addEventListener('change', event => {
     if (event.target.matches('input.js-reviewed-checkbox')) scheduleCheck();
-  });
-  document.addEventListener('turbo:load', scheduleCheck);
-  document.addEventListener('pjax:end', scheduleCheck);
-  window.addEventListener('popstate', scheduleCheck);
-  window.addEventListener('focus', refreshConnection);
-  document.addEventListener('visibilitychange', refreshConnection);
+  }, eventOptions);
+  document.addEventListener('turbo:load', scheduleCheck, eventOptions);
+  document.addEventListener('pjax:end', scheduleCheck, eventOptions);
+  window.addEventListener('popstate', scheduleCheck, eventOptions);
+  window.addEventListener('focus', refreshConnection, eventOptions);
+  document.addEventListener('visibilitychange', refreshConnection, eventOptions);
   const interval = setInterval(() => {
+    if (!isActive()) return;
     const identity = readPageIdentity(document, location.href);
     if (location.pathname + location.search !== pathKey || identity?.headSha !== currentIdentity?.headSha || identity?.baseSha !== currentIdentity?.baseSha || isDiffPage() && !host.isConnected) scheduleCheck();
   }, 1500);
   window.addEventListener('pagehide', event => {
-    detachAnalysis();
-    if (event.persisted) return;
-    destroyed = true;
-    observer.disconnect();
-    window.removeEventListener('focus', refreshConnection);
-    document.removeEventListener('visibilitychange', refreshConnection);
-    clearInterval(interval);
-    clearTimeout(timer);
-  });
-  window.addEventListener('pageshow', scheduleCheck);
+    if (!isActive()) return;
+    if (event.persisted) detachAnalysis();
+    else stop();
+  }, eventOptions);
+  window.addEventListener('pageshow', scheduleCheck, eventOptions);
   loadSettings();
   checkPage();
 }
