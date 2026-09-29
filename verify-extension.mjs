@@ -428,6 +428,9 @@ try {
   await page('Page.enable');
   await page('Runtime.enable');
   await page('Emulation.setDeviceMetricsOverride', { width: 1512, height: 1080, deviceScaleFactor: 1, mobile: false });
+  await page('Page.navigate', { url: 'chrome://extensions/' });
+  await waitFor(() => evaluate('Boolean(chrome.developerPrivate?.updateProfileConfiguration)'), 'extension developer controls');
+  await evaluate('new Promise(resolve => chrome.developerPrivate.updateProfileConfiguration({inDeveloperMode:true}, resolve))');
   const invalidSettings = await page('Page.addScriptToEvaluateOnNewDocument', { source: `chrome.runtime.sendMessage = async () => ({ configured: true, provider: 'invalid-provider', model: 'invalid-model' });` });
   await page('Page.navigate', { url: `chrome-extension://${extensionId}/options.html` });
   await waitFor(() => evaluate('document.querySelector("#connection-status")?.textContent !== "Checking the local helper…" && Boolean(document.querySelector("#connection-status"))'), 'invalid settings rejected');
@@ -697,6 +700,47 @@ try {
   await evaluate(`${shadow}.querySelector('.rf-reviewed-toggle input').click()`);
   await waitFor(() => evaluate(`${humanReviewInputs}.every(input => input.checked && input.getAttribute('aria-disabled') === 'false')`), 'review mark saved by the native fixture before reload');
   assert.equal((await modelRequests()).length, initialRequestCount, 'Human review actions must not invoke model analysis.');
+
+  const staleContext = [...executionContexts.values()].find(context => context.sessionId === sessionId && context.origin === `chrome-extension://${extensionId}`);
+  assert.ok(staleContext, 'The reload regression must run against an installed content script.');
+  await evaluateExtension(`
+    const sendBeforeReload = chrome.runtime.sendMessage;
+    chrome.runtime.sendMessage = function(message, ...args) {
+      if (message.type === 'get-settings') return new Promise((resolve, reject) => { globalThis.rejectPendingSettings = reject; });
+      return sendBeforeReload.call(this, message, ...args);
+    };
+    window.dispatchEvent(new Event('focus'));
+  `);
+  assert.equal(await evaluateExtension('typeof rejectPendingSettings'), 'function', 'A settings request must be pending when the extension reloads.');
+  await send('Runtime.evaluate', { expression: 'setTimeout(() => chrome.runtime.reload(), 0)' }, workers.at(-1));
+  await waitFor(async () => {
+    const result = await page('Runtime.evaluate', { expression: 'chrome.runtime.id === undefined', contextId: staleContext.id, returnByValue: true });
+    return result.result?.value;
+  }, 'extension reload invalidates the old content script');
+  await evaluate(`(() => {
+    const file = document.querySelector('.file');
+    const replacement = file.cloneNode(true);
+    replacement.querySelectorAll('[data-review-focus-owned]').forEach(node => node.remove());
+    replacement.querySelectorAll('.review-focus-native-hidden').forEach(row => row.classList.remove('review-focus-native-hidden'));
+    window.fileBeforeExtensionReload = file;
+    file.replaceWith(replacement);
+    document.dispatchEvent(new Event('pjax:end'));
+  })()`);
+  await waitFor(() => evaluate('!document.querySelector("#review-focus-extension")'), 'invalidated UI removed after a diff replacement');
+  assert.equal(await evaluate('document.querySelectorAll("[data-review-focus-owned], .review-focus-native-hidden").length'), 0, 'No stale panels or folded code may remain after extension invalidation.');
+  assert.equal(await evaluate('window.fileBeforeExtensionReload.querySelectorAll("[data-review-focus-owned], .review-focus-native-hidden").length'), 0, 'Cleanup also restores rows retained from the previous file rendering.');
+  await evaluate(`(() => {
+    window.dispatchEvent(new Event('focus'));
+    window.dispatchEvent(new Event('popstate'));
+    window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted:true}));
+    document.dispatchEvent(new Event('turbo:load'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    document.querySelector('main').append(document.createElement('p'));
+  })()`);
+  const lateSettings = await page('Runtime.evaluate', { expression: 'Promise.resolve().then(() => rejectPendingSettings(new Error("Extension context invalidated.")))', contextId: staleContext.id, awaitPromise: true });
+  assert.equal(lateSettings.exceptionDetails, undefined, 'A pending settings failure must be handled after shutdown.');
+  assert.equal(await evaluate('document.querySelector("#review-focus-extension")'), null, 'Navigation and focus events must not restart an invalidated UI.');
+  assert.deepEqual(exceptions, [], 'Reloading the extension and replacing a GitHub file must not throw from the old page script.');
 
   await page('Page.reload');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved review offered after reload');
