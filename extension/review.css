@@ -147,15 +147,11 @@
 .rf-guide-file { border: 1px solid var(--rf-border); border-radius: 6px; margin-bottom: 20px; min-width: 0; overflow: hidden; scroll-margin-top: 24px; }
 .rf-guide-file-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 12px; background: var(--rf-muted-background); }
 .rf-guide-file-heading > strong { flex-basis: 100%; font: 600 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
-.rf-block-progress { font-size: 12px; color: var(--rf-muted); }
-.rf-block-progress[data-complete="true"] { color: var(--fgColor-success, #1a7f37); }
 .rf-file-links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 12px; font-size: 12px; border-bottom: 1px solid var(--rf-border); }
 .rf-file-links > a { overflow-wrap: anywhere; }
 .rf-file-sections { display: flex; flex-wrap: wrap; flex-basis: 100%; gap: 4px 8px; }
 .rf-file-sections .rf-link-button { white-space: normal; text-align: left; overflow-wrap: anywhere; }
-.rf-block-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 12px; border-block: 1px solid var(--rf-border); font-size: 12px; color: var(--rf-muted); }
-.rf-block-review { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--rf-text); }
-.rf-block-review input, .rf-fold-other input { margin: 0; accent-color: var(--rf-accent); }
+.rf-fold-other input { margin: 0; accent-color: var(--rf-accent); }
 .rf-code-run > .rf-uncertainty { padding: 0 12px; font-size: 12px; }
 .rf-foreign-edit { padding: 7px 10px; font-size: 12px; background: var(--rf-muted-background); overflow-wrap: anywhere; }
 .rf-foreign-edit .rf-link-button { white-space: normal; text-align: left; font-weight: 500; }
@@ -169,8 +165,6 @@
 .rf-section-sequence { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 24px 0; border-top: 1px solid var(--rf-border); padding-top: 16px; }
 .rf-review-details { border-top: 1px solid var(--rf-border); padding-top: 12px; font-size: 12px; }
 .rf-review-details p { color: var(--rf-muted); overflow-wrap: anywhere; }
-.rf-block-error { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--fgColor-danger, #b42318); overflow-wrap: anywhere; }
-.rf-block-error .rf-button { margin: 8px 0 0 8px; white-space: normal; }
 .rf-navigation-notice { padding: 8px 12px; margin: 0; color: var(--rf-muted); font-size: 12px; overflow-wrap: anywhere; }
 @media (prefers-color-scheme: dark) {
   .rf-hunk-header { background: var(--bgColor-accent-muted, #162536); }
@@ -185,6 +179,5 @@
   .rf-section-overview { flex-direction: column; }
   .rf-button.rf-section-link { flex-basis: auto; width: 100%; }
   .rf-guide-file-heading { padding-inline: 8px; }
-  .rf-guide-file-heading .rf-link-button { white-space: normal; text-align: left; }
   .rf-section-sequence { justify-content: flex-start; }
 }
