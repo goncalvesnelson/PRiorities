@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 const root = '/microsoft/vscode/pull/200000';
 const baseSha = '998fb692680cc20d70a805df8fa59cb1443bc897';
 const headSha = '9ed10330f92962e92c6b121fd0cf6588268e89a8';
+const targetBaseSha = 'd'.repeat(40);
 const fetchNonce = 'synthetic-fetch-nonce';
 const release = 'synthetic-release';
 const paths = Array.from({ length: 53 }, (_, index) => `tests/change-${index + 1}.ts`);
@@ -28,12 +29,12 @@ const entries = paths.map(path => ({
 }));
 const route = {
   isSingleFileMode: false,
-  comparison: { fullDiff: { baseOid: baseSha, headOid: headSha }, selectedRange: null, viewing: 'FULL' },
+  comparison: { fullDiff: { baseOid: targetBaseSha, headOid: headSha }, selectedRange: null, viewing: 'FULL' },
   diffSummaries: entries.map(({ path, pathDigest, linesAdded, linesDeleted, linesChanged }) => ({ path, pathDigest, linesAdded, linesDeleted, linesChanged, changeType: 'MODIFIED' })),
   diffContents: entries.slice(0, 4),
   fileFilter: { initialState: { filterText: '', showDeletedFiles: true, showOnlyManifestFiles: false, showOnlyOwnedFiles: false, showVendoredFiles: true, showViewedFiles: true, unselectedFileExtensions: [] } },
   pageLimits: { filesLimit: 3000, filesLimitExceeded: false, linesChangedLimit: 10000, linesChangedLimitExceeded: false },
-  pullRequest: { title: 'Synthetic Changes route fixture', number: 200000, pathName: root, comparison: { baseOid: baseSha, headOid: headSha } },
+  pullRequest: { title: 'Synthetic Changes route fixture', number: 200000, pathName: root, comparison: { baseOid: targetBaseSha, headOid: headSha } },
   urls: { changes: `${root}/changes`, files: `${root}/files`, conversation: root },
   virtualizeDiffEntries: true
 };

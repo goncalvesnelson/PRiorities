@@ -50,10 +50,13 @@ function changesRoute(doc) {
 export function readPageIdentity(doc = document, href = location.href) {
   const identity = pullRequestLocation(href);
   if (!identity) return null;
-  const comparison = changesRoute(doc)?.comparison;
+  const route = changesRoute(doc);
+  const comparison = route?.comparison;
   if (comparison) {
     const selected = comparison.selectedRange ?? (comparison.viewing === 'FULL' ? comparison.fullDiff : null);
-    return { ...identity, baseSha: shaPattern.test(selected?.baseOid) ? selected.baseOid : null, headSha: shaPattern.test(selected?.headOid) ? selected.headOid : null };
+    // Full-PR file diffs use the merge base; fullDiff.baseOid names the target branch commit.
+    const baseOid = comparison.selectedRange ? selected.baseOid : selected && route.diffContents?.[0]?.oldCommitOid;
+    return { ...identity, baseSha: shaPattern.test(baseOid) ? baseOid : null, headSha: shaPattern.test(selected?.headOid) ? selected.headOid : null };
   }
   for (const element of doc.querySelectorAll('[data-url]')) {
     const url = new URL(element.getAttribute('data-url'), identity.url);
@@ -259,8 +262,8 @@ async function loadChanges(doc, route, identity, signal, onProgress) {
   const { diffSummaries, diffContents, comparison, pageLimits } = route;
   if (!Array.isArray(diffSummaries) || !diffSummaries.length || diffSummaries.length > 100 || !Array.isArray(diffContents)) throw new Error('Expected a complete inventory of 1–100 changed files. No analysis was sent.');
   const selected = comparison?.selectedRange ?? (comparison?.viewing === 'FULL' ? comparison.fullDiff : null);
-  if (selected?.baseOid !== identity.baseSha || selected?.headOid !== identity.headSha || pageLimits?.filesLimitExceeded || pageLimits?.linesChangedLimitExceeded) throw new Error('GitHub supplied an incomplete comparison. Load the selected diff with whitespace changes shown and retry.');
-  const range = identity.baseSha === comparison.fullDiff?.baseOid ? identity.headSha : `${identity.baseSha}..${identity.headSha}`;
+  if (comparison?.selectedRange && selected.baseOid !== identity.baseSha || selected?.headOid !== identity.headSha || pageLimits?.filesLimitExceeded || pageLimits?.linesChangedLimitExceeded) throw new Error('GitHub supplied an incomplete comparison. Load the selected diff with whitespace changes shown and retry.');
+  const range = comparison.selectedRange ? `${identity.baseSha}..${identity.headSha}` : identity.headSha;
   const summaries = new Map();
   for (const summary of diffSummaries) {
     if (!summary || typeof summary.path !== 'string' || summaries.has(summary.path) || ![summary.linesAdded, summary.linesDeleted, summary.linesChanged].every(count => Number.isSafeInteger(count) && count >= 0) || summary.linesChanged !== summary.linesAdded + summary.linesDeleted) throw new Error('GitHub returned an invalid or duplicate file inventory. No analysis was sent.');
