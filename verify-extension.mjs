@@ -639,6 +639,30 @@ try {
   const openFiles = () => evaluate(`(() => {
     if (${shadow}.querySelector('.rf-file-progress').hidden) ${shadow}.querySelector('.rf-progress-toggle').click();
   })()`);
+  await evaluateExtension(`
+    globalThis.failSettingsRead = true;
+    globalThis.settingsRecoverySend = chrome.runtime.sendMessage;
+    chrome.runtime.sendMessage = function(message, ...args) {
+      if (message.type === 'get-settings' && failSettingsRead) return Promise.reject(new Error('Temporary settings failure.'));
+      if (message.type === 'open-settings') return Promise.resolve({error:'Temporary options failure.'});
+      return settingsRecoverySend.call(this, message, ...args);
+    };
+  `);
+  await evaluate("window.dispatchEvent(new Event('focus'))");
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').textContent.includes('Temporary settings failure.') && !${shadow}.querySelector('.rf-error').hidden`), 'settings read failure shown');
+  await evaluateExtension('failSettingsRead = false');
+  await evaluate("window.dispatchEvent(new Event('focus'))");
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').hidden && ${shadow}.querySelector('.rf-error').textContent === ''`), 'successful settings refresh clears its earlier error');
+  await click('Settings');
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').textContent.includes('Settings could not open.')`), 'unrelated options error shown');
+  const optionsError = await evaluate(`${shadow}.querySelector('.rf-error').textContent`);
+  await evaluateExtension('failSettingsRead = true');
+  await evaluate("window.dispatchEvent(new Event('focus'))");
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').textContent.includes('Temporary settings failure.') && ${shadow}.querySelector('.rf-error').textContent.includes('Settings could not open.')`), 'settings and options errors remain visible together');
+  await evaluateExtension('failSettingsRead = false');
+  await evaluate("window.dispatchEvent(new Event('focus'))");
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').textContent === ${JSON.stringify(optionsError)} && !${shadow}.querySelector('.rf-error').hidden`), 'settings recovery preserves the unrelated options error');
+  await evaluateExtension('chrome.runtime.sendMessage = settingsRecoverySend');
   await evaluate(`(() => {
     window.readingFocus = document.createElement('button');
     window.readingFocus.textContent = 'Continue reading GitHub';
@@ -992,6 +1016,22 @@ try {
   await click('Run fresh review');
   await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').textContent.includes('1 of 2 files')`), 'incomplete capture rejection');
   assert.equal((await modelRequests()).length, afterUnresolved, 'An incomplete diff must not be sent for analysis.');
+  const captureError = await evaluate(`${shadow}.querySelector('.rf-error').textContent`);
+  await evaluateExtension(`
+    globalThis.captureErrorSettingsRefresh = null;
+    const originalSend = chrome.runtime.sendMessage;
+    chrome.runtime.sendMessage = function(message, ...args) {
+      const response = originalSend.call(this, message, ...args);
+      if (message.type === 'get-settings') {
+        captureErrorSettingsRefresh = response;
+        chrome.runtime.sendMessage = originalSend;
+      }
+      return response;
+    };
+  `);
+  await evaluate("window.dispatchEvent(new Event('focus'))");
+  assert.equal((await evaluateExtension('captureErrorSettingsRefresh')).provider, 'codex', 'The settings refresh must finish successfully before checking the analysis error.');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-error').textContent`), captureError, 'Successful settings refresh must preserve an analysis error.');
   incomplete = false;
   modernMode = true;
   const moduleUrl = `chrome-extension://${extensionId}/github.js`;
@@ -1040,7 +1080,12 @@ try {
     const protectedFolded=protectedFolding.apply();
     const workflowHidden=files[0].rows.some(row=>row.element.classList.contains('review-focus-native-hidden'));
     protectedFolding.restore();
-    return {files:files.map(file=>({path:file.path,rows:file.rows.map(({oldLine,newLine,type,text})=>({oldLine,newLine,type,text}))})), snapshot, folded, repaired, reviewFolded, reviewLabels, protectedFolded, workflowHidden, restored:doc.querySelectorAll('.review-focus-native-hidden, .review-focus-native-fold').length};
+    const changeKinds=[['behavior'],['formatting'],['formatting','behavior']];
+    const alwaysShowFolding=createNativeFolding(doc,snapshot,{topics:[{priority:'supporting',title:'Fixture changes',editIds,excerpts:[]}],classifications:editIds.map((editId,index)=>({...classifications[index],kinds:changeKinds[index]}))},()=>{},new Set(),['behavior']);
+    const alwaysShowFolded=alwaysShowFolding.apply();
+    const alwaysShowHidden=files.map(file=>file.rows.filter(row=>row.type!=='context').map(row=>row.element.classList.contains('review-focus-native-hidden')));
+    alwaysShowFolding.restore();
+    return {files:files.map(file=>({path:file.path,rows:file.rows.map(({oldLine,newLine,type,text})=>({oldLine,newLine,type,text}))})), snapshot, folded, repaired, reviewFolded, reviewLabels, protectedFolded, workflowHidden, alwaysShowFolded, alwaysShowHidden, restored:doc.querySelectorAll('.review-focus-native-hidden, .review-focus-native-fold').length};
   })()`);
   assert.deepEqual(modern.files.map(file => file.path), ['.github/workflows/wait-for-checks.yml', '5854', 'play with this file, not readme']);
   assert.deepEqual(modern.files.map(file => file.rows.length), [5, 2, 2]);
@@ -1057,6 +1102,8 @@ try {
   assert.ok(modern.reviewLabels.every(label => /^\d+ context lines$/.test(label)), 'Only unchanged context may fold around a review decision.');
   assert.equal(modern.workflowHidden, false, 'A protected path must never fold.');
   assert.deepEqual([modern.protectedFolded.hidden, modern.protectedFolded.groups], [4, 2], 'Unprotected files still fold.');
+  assert.deepEqual(modern.alwaysShowHidden, [[false], [true, true], [false]], 'Always-visible kinds preserve matching and mixed-kind edits while other supporting edits fold.');
+  assert.equal(modern.alwaysShowFolded.hiddenChanges, 2);
   assert.equal(modern.restored, 0);
   assert.equal((await modelRequests()).length, afterUnresolved, 'Collecting issue context must not trigger additional model requests.');
   modernMode = false;
@@ -1073,7 +1120,7 @@ try {
   })()`);
   const lifecycleRoute = structuredClone(changes.route);
   lifecycleRoute.diffContents = [
-    { path: 'added.js', linesAdded: 1, linesDeleted: 0, diffLines: [{ type: 'HUNK', text: '@@ -0,0 +1 @@' }, { type: 'ADDITION', text: '+export const added = true;' }] },
+    { path: 'added.js', linesAdded: 2, linesDeleted: 0, diffLines: [{ type: 'HUNK', text: '@@ -0,0 +1,2 @@' }, { type: 'ADDITION', text: '+++ b/content' }, { type: 'ADDITION', text: '+export const added = true;' }] },
     { path: 'deleted.js', linesAdded: 0, linesDeleted: 1, diffLines: [{ type: 'HUNK', text: '@@ -1 +0,0 @@' }, { type: 'DELETION', text: '-export const deleted = true;' }] },
     { path: 'modified.js', linesAdded: 1, linesDeleted: 1, diffLines: [{ type: 'HUNK', text: '@@ -1 +1 @@' }, { type: 'DELETION', text: '-export const value = false;' }, { type: 'ADDITION', text: '+export const value = true;' }] }
   ].map(entry => ({ ...entry, linesChanged: entry.linesAdded + entry.linesDeleted, oldCommitOid: baseSha, newCommitOid: headSha }));
@@ -1094,6 +1141,8 @@ try {
     try { return {snapshot:await capturePullRequest(),requests}; }
     finally { window.fetch = originalFetch; }
   })()`);
+  assert.deepEqual(lifecycleCapture.snapshot.files.map(file => [file.path, file.additions, file.deletions]), [['added.js', 2, 0], ['deleted.js', 0, 1], ['modified.js', 1, 1]], 'Added content resembling a file header must preserve complete hunks and subsequent file headers.');
+  assert.deepEqual(lifecycleCapture.snapshot.files[0].hunks[0].items[0].rows.map(row => row.text), ['++ b/content', 'export const added = true;']);
   assert.ok(!lifecycleCapture.requests.some(url => url.includes('/' + baseSha + '/added.js') || url.includes('/' + headSha + '/deleted.js')), 'Nonexistent sides of added/deleted files must not be fetched.');
   assert.deepEqual(lifecycleCapture.snapshot.context.filter(source => source.text === ''), [{path:'added.js',side:'before',text:''},{path:'deleted.js',side:'after',text:''}]);
   assert.deepEqual(lifecycleCapture.snapshot.warnings, ['Could not read after context for modified.js; only its diff was analyzed.'], 'Actual source fetch failures still report missing evidence.');
@@ -1512,9 +1561,9 @@ try {
     const input = {url:${JSON.stringify(prUrl)},baseSha:${JSON.stringify(baseSha)},headSha:${JSON.stringify(headSha)},description:'first',context:[]};
     const original = await cache.reviewCacheKey(input,settings);
     const earlierLookup = JSON.parse(original.lookup);
-    earlierLookup[0] = 2;
-    await cache.saveReview({key:'unreconciled-review',lookup:JSON.stringify(earlierLookup)},{text:'Review with first-pass classifications'});
-    const earlierReview = {offered:(await cache.peekReview(original.lookup)).available,retained:Boolean(await cache.readReview('unreconciled-review'))};
+    earlierLookup[0] = 3;
+    await cache.saveReview({key:'unprotected-review',lookup:JSON.stringify(earlierLookup)},{text:'Review without preserved always-visible classifications'});
+    const earlierReview = {offered:(await cache.peekReview(original.lookup)).available,retained:Boolean(await cache.readReview('unprotected-review'))};
     await cache.clearCache();
     const variants = await Promise.all([
       cache.reviewCacheKey({...input,headSha:'c'.repeat(40)},settings),
@@ -1545,7 +1594,7 @@ try {
   assert.equal(cacheChecks.cancellation.previous.text, 'Paid review', 'Aborting a replacement must roll back deletion of the earlier review.');
   assert.equal(cacheChecks.cancellation.replacement, null);
   assert.equal(cacheChecks.cancellation.unstarted, null);
-  assert.deepEqual(cacheChecks.earlierReview, {offered:false,retained:true}, 'Reviews saved before reconciliation require fresh analysis without deleting their records.');
+  assert.deepEqual(cacheChecks.earlierReview, {offered:false,retained:true}, 'Reviews saved before always-visible classification preservation require fresh analysis without deleting their records.');
   assert.equal(cacheChecks.keys, 9, 'Commits, intent, source context, provider, model, effort and review preferences each change the cache key.');
   assert.deepEqual([cacheChecks.lru.a, cacheChecks.lru.b, cacheChecks.lru.c], [true, false, true], 'Reading A keeps it while the older B is evicted.');
   assert.equal(cacheChecks.lru.info.count, 2);

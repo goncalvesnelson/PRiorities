@@ -294,7 +294,7 @@ function createSession(tabId, url, port) {
         ...session.snapshot,
         files: session.snapshot.files.filter(file => includedPaths.has(file.path)),
         context: session.snapshot.context.filter(source => includedPaths.has(source.path)),
-        warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated files excluded from standalone analysis: ${excludedPaths.join(', ')}. Related Go checksum diffs may be supplied in dependencyDiffs as supporting evidence.`] : [])]
+        warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated files excluded from standalone analysis: ${excludedPaths.join(', ')}.`] : [])]
       };
       const classifications = validateClassifications({ edits: classified.flatMap(entry => entry.classifications) }, snapshot);
       const raw = await analyzeWithCLI({
@@ -303,7 +303,7 @@ function createSession(tabId, url, port) {
       });
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       if (session.checkVersion !== version) return;
-      const analysis = validateAnalysis(raw, snapshot);
+      const analysis = validateAnalysis(raw, snapshot, classifications, session.settings.review.alwaysShow);
       let cache = { saved: false, message: 'This review could not be saved locally. It remains available in this tab.' };
       try {
         if (session.cacheIdentity) cache = await saveReview(session.cacheIdentity, {

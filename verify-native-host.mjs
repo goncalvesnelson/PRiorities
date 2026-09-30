@@ -103,7 +103,7 @@ function processRunning(pid) {
 
 try {
   await writeFile(fakeCliPath, `#!${process.execPath}
-import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 const control = JSON.parse(readFileSync(${JSON.stringify(controlPath)}, 'utf8'));
 const args = process.argv.slice(2);
@@ -140,6 +140,10 @@ if (args.includes('app-server') || args.includes('--input-format')) {
     }
   });
 } else {
+if (control.mode === 'startup-option') {
+  console.error(control.diagnostic + '\\nPRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path');
+  process.exit(2);
+}
 const value = flag => args[args.indexOf(flag) + 1];
 const config = Object.fromEntries(args.flatMap((arg, index) => arg === '-c' ? [args[index + 1].split(/=(.*)/s).slice(0, 2)] : []));
 const instructionsPath = claude ? value('--system-prompt-file') : JSON.parse(config.model_instructions_file);
@@ -170,6 +174,9 @@ if (control.mode === 'events') {
   if (claude) console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,errors:[control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path']}));
   else console.log(JSON.stringify({type:'turn.failed',error:{message:control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path'}}));
   process.exit(control.mode === 'diagnostic-envelope' ? 0 : 1);
+} else if (control.mode === 'removed-output' || control.mode === 'unreadable-output') {
+  rmSync(value('--output-last-message'));
+  if (control.mode === 'unreadable-output') mkdirSync(value('--output-last-message'));
 } else if (control.mode === 'invalid') output('not json');
 else if (control.mode === 'huge') output(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: { content: 'x'.repeat(1024 * 1024) } }));
 else if (control.mode === 'overflow') output('x'.repeat(5 * 1024 * 1024));
@@ -345,6 +352,7 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
       assert.equal(response.type, 'error');
       assert.ok(!JSON.stringify(response).includes('test-secret-key'));
       assert.ok(!JSON.stringify(response).includes('PRIVATE REPOSITORY'));
+      if (mode === 'invalid') assert.match(response.message, /did not return valid JSON/);
       assert.equal(existsSync((await calls()).at(-1).cwd), false);
     }
     for (const [diagnostic, expected] of [
@@ -368,7 +376,30 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
     }
 
     if (provider === 'codex') {
-      const keywords = 'unauthorized quota TLS certificate rate limit';
+      const startupWarning = 'WARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)\n';
+      for (const [diagnostic, expected] of [
+        ["error: unexpected argument '--strict-config' found", /does not support a required CLI option.*Update Codex/],
+        ["error: unexpected argument '--ignore-rules' found", /does not support a required CLI option.*Update Codex/],
+        [startupWarning + "error: unexpected argument '--strict-config' found", /does not support a required CLI option.*Update Codex/],
+        ["error: unexpected argument '--unrelated-option' found", /stopped before completing/],
+        ["Prompt mentions error: unexpected argument '--strict-config' found", /stopped before completing/],
+        ["PRIVATE PROMPT\nerror: unexpected argument '--strict-config' found", /stopped before completing/]
+      ]) {
+        await control('startup-option', true, {}, { diagnostic });
+        const response = await exchange(installed.launcherPath, request);
+        assert.equal(response.type, 'error');
+        assert.match(response.message, expected);
+        assert.doesNotMatch(response.message, /test-secret-key|PRIVATE REPOSITORY|\/private\/sensitive/);
+      }
+      for (const mode of ['removed-output', 'unreadable-output']) {
+        await control(mode);
+        const response = await exchange(installed.launcherPath, request);
+        assert.equal(response.type, 'error');
+        assert.match(response.message, /could not read the Codex analysis file.*temporary-folder permissions/);
+        assert.doesNotMatch(response.message, /valid JSON|test-secret-key|PRIVATE REPOSITORY|\/private\/sensitive/);
+        assert.equal(existsSync((await calls()).at(-1).cwd), false);
+      }
+      const keywords = startupWarning + "error: unexpected argument '--strict-config' found\nunauthorized quota TLS certificate rate limit";
       const agentMessage = { type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ type: 'error', message: keywords }) } };
       for (const padding of ['', 'x'.repeat(20_000)]) {
         const echoedRequest = { ...request, prompt: { ...request.prompt, user: `${keywords} ${padding}` } };
@@ -398,6 +429,8 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
       }
       await control('events', true, {}, { events: [{ type: 'error', message: 'Connection failed.' }, agentMessage, { type: 'turn.completed', usage: {} }], code: 0 });
       assert.equal((await exchange(installed.launcherPath, request)).type, 'result', 'A successful turn must not inherit an earlier recovered error or agent message.');
+      await control('events', true, {}, { events: [], code: 0 });
+      assert.equal((await exchange(installed.launcherPath, { ...request, prompt: { ...request.prompt, user: keywords } })).type, 'result', 'Successful analysis must not interpret echoed stderr as a startup error.');
     }
 
     for (const cancellation of ['disconnect', 'signal', 'second-request']) {

@@ -48,7 +48,7 @@ function renderProvider() {
   const company = selectedProvider === 'claude' ? 'Anthropic' : 'OpenAI';
   document.querySelector('#connection-title').textContent = `Local ${label} connection`;
   document.querySelector('#login-command').textContent = selectedProvider === 'claude' ? 'claude auth login' : 'codex login';
-  document.querySelector('#provider-privacy').textContent = `The PR description, included diffs and captured source context go to ${company} through ${label}, using your account allowance. Opening a PR sends no code.`;
+  document.querySelector('#provider-privacy').textContent = `The PR title, description, linked issue text, included diffs and captured source context go to ${company} through ${label}, using your account allowance. Changed Go checksum diffs from the same directory as reviewed Go files are also sent, even when excluded from standalone review. Opening a PR sends no code.`;
 }
 
 function renderEffort(preferred = '') {

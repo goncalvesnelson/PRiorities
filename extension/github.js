@@ -331,7 +331,6 @@ async function loadFiles(doc, identity, signal, onProgress) {
   const files = parseDiff(native.map(fileDiff).join('\n'));
   assertCompleteHunks(files);
   const warnings = files.filter(file => !file.hunks.length).map(file => `No text diff was available for ${file.path}; inspect it in GitHub. It will not be folded.`);
-  if (files.length > 100) throw new Error('This prototype supports up to 100 changed files per PR.');
   return { files, warnings };
 }
 
