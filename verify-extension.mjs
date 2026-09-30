@@ -702,6 +702,9 @@ try {
   assert.equal((await readFile(statusLog, 'utf8')).split('\n').length, statusAfterIdle.split('\n').length + 4, 'Analyze PR must refresh the cached login before the two analysis passes, each of which also verifies authentication.');
   assert.equal(await evaluate('document.activeElement === window.readingFocus'), true, 'New AI badges must not steal focus from GitHub while analysis finishes.');
   await evaluate('window.readingFocus.remove()');
+  const openedView = () => evaluate(`({view:${shadow}.querySelector('.rf-view-toggle [aria-pressed=true]').textContent, guide:${shadow}.querySelector('.rf-result').checkVisibility(), hidden:document.querySelectorAll('.review-focus-native-surface-hidden').length})`);
+  assert.deepEqual(await openedView(), {view:'Full diff', guide:false, hidden:0}, 'A new result opens GitHub’s Full diff without PRiorities folds.');
+  await click('Guide');
   const initialRequestCount = (await modelRequests()).length;
   assert.equal(initialRequestCount, 2);
   checkEvidence(await modelRequests());
@@ -724,8 +727,7 @@ try {
       question: overview.querySelector('.rf-question').textContent,
       visibleActions: [...overview.querySelectorAll('button')].filter(node => node.checkVisibility()).map(node => node.textContent),
       nativeExplanation: ${fileShadow}.querySelector('.rf-change-explanation'),
-      visibleCode: [...overview.querySelectorAll('.rf-code')].filter(node => node.checkVisibility()).length,
-      blocks: overview.querySelectorAll('.rf-block-review input').length
+      visibleCode: [...overview.querySelectorAll('.rf-code')].filter(node => node.checkVisibility()).length
     };
   })()`);
   assert.equal(initialLayout.filesOpen, false);
@@ -737,7 +739,6 @@ try {
   assert.equal(initialLayout.question, assessment.topics[0].question);
   assert.equal(initialLayout.nativeExplanation, null, 'Native files retain status only; explanations belong to Guide.');
   assert.ok(initialLayout.visibleCode > 0, 'The Guide keeps evidence beside its explanation.');
-  assert.equal(initialLayout.blocks, 2, 'Separate continuous edit blocks have separate checkboxes.');
   const sourceOnlyRows = await evaluate(`[...${shadow}.querySelectorAll('tr[data-outside-diff]')].map(row=>({oldLine:row.dataset.oldLine,newLine:Number(row.dataset.newLine),text:row.querySelector('.rf-code-text').textContent}))`);
   assert.ok(sourceOnlyRows.length > 0, 'Captured full-file context remains reachable beyond the patch.');
   for (const row of sourceOnlyRows) {
@@ -823,9 +824,9 @@ try {
   await evaluate('window.classicThread.remove()');
   await click('Guide');
 
-  const humanReviewInputs = `[...${shadow}.querySelectorAll('.rf-file-list .rf-reviewed-toggle input')]`;
+  const humanReviewInputs = `[...${shadow}.querySelectorAll('.rf-reviewed-toggle input')]`;
   assert.equal(await evaluate(`${fileShadow}.querySelector('input[type=checkbox]')`), null, 'The diff panel must not duplicate GitHub’s Viewed checkbox.');
-  assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => [input.checked, input.indeterminate])`), [[false, false]], 'AI completion must not mark a file reviewed by the user.');
+  assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => [input.checked, input.indeterminate])`), [[false, false], [false, false]], 'AI completion must not mark a file reviewed by the user in the file list or Guide header.');
   assert.equal(await evaluate('window.fixtureViewedClicks'), 0);
   await evaluate(`(() => {
     const root = ${shadow};
@@ -836,7 +837,7 @@ try {
     input.focus();
     input.click();
   })()`);
-  await waitFor(() => evaluate(`${humanReviewInputs}.every(input => input.checked && input.getAttribute('aria-disabled') === 'false')`), 'file-list checkmark forwarded to GitHub');
+  await waitFor(() => evaluate(`${humanReviewInputs}.every(input => input.checked && input.getAttribute('aria-disabled') === 'false')`), 'file-list checkmark forwarded to GitHub and mirrored in the Guide header');
   assert.equal(await evaluate('document.querySelector(".js-reviewed-checkbox").checked'), true);
   assert.equal(await evaluate('document.querySelectorAll(".file-header .review-focus-file-status").length'), 1, 'Replacing GitHub’s header must not duplicate the AI badge.');
   assert.ok(await evaluate(`${fileBadge}.querySelector('.rf-file-state').isConnected`), 'The live badge survives a native header replacement.');
@@ -907,12 +908,13 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'exact-input cached review restored');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-progress').hidden`), true, 'Restoring a completed review keeps file progress collapsed.');
   assert.equal((await modelRequests()).length, initialRequestCount, 'Opening the saved review must not invoke either CLI for analysis.');
-  assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => input.checked)`), [true], 'Reload and cached AI restoration must read the native saved Viewed state.');
+  assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => input.checked)`), [true, true], 'Reload and cached AI restoration must read the native saved Viewed state.');
   await openFiles();
   await evaluate(`${shadow}.querySelector('.rf-reviewed-toggle input').click()`);
   await waitFor(() => evaluate(`${humanReviewInputs}.every(input => !input.checked && input.getAttribute('aria-disabled') === 'false')`), 'saved Viewed state can be undone after reload');
 
-  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length > 0'));
+  assert.deepEqual(await openedView(), {view:'Full diff', guide:false, hidden:0}, 'A restored review also opens in Full diff.');
+  await click('Guide');
 
   await evaluate(`(() => {
     window.originalViewedControl = document.querySelector('.js-reviewed-checkbox');
@@ -928,7 +930,6 @@ try {
     })()`);
     await waitFor(() => evaluate(`${humanReviewInputs}.every(input => input.checked === ${checked})`), 'native checked-property change synchronized without an attribute mutation');
     assert.equal(await evaluate('window.propertyViewedControl.hasAttribute("checked")'), false, 'The native checkbox fixture must change only its checked property.');
-    await waitFor(() => evaluate(`[...${shadow}.querySelectorAll('.rf-block-review input')].every(input=>input.checked === ${checked})`), 'manual native Viewed updates every block');
   }
   await evaluate('window.propertyViewedControl.replaceWith(window.originalViewedControl)');
 
@@ -994,7 +995,8 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-unresolved')?.textContent.includes('1 edit') && !${shadow}.querySelector('.rf-analyze').disabled`), 'unresolved classification visibility');
   let afterUnresolved = (await modelRequests()).length;
   assert.equal(afterUnresolved - beforeUnresolved, 2);
-  assert.ok(await evaluate(`${shadow}.querySelector('.rf-block-review input[data-edit-id="0-1-3"]').checkVisibility()`), 'An unresolved edit stays open even in another section.');
+  await click('Guide');
+  assert.ok(await evaluate(`${shadow}.querySelector('tr[data-edit-id="0-1-3"]').checkVisibility()`), 'An unresolved edit stays open even in another section.');
   assert.ok(await evaluate(`${shadow}.querySelector('.rf-foreign-edit').textContent.includes('The other rendering path') && ${shadow}.querySelector('.rf-foreign-edit').textContent.includes('unresolved evidence')`), 'Foreign visible code identifies its owning section and reason.');
   await evaluate(`${shadow}.querySelector('.rf-section-link[data-topic-id="second-path"]').click(); ${shadow}.querySelector('.rf-evidence > summary').click()`);
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-edit[data-edit-id="0-1-3"] .rf-change-kind').textContent`), 'Change type: unknown');
@@ -1013,7 +1015,8 @@ try {
       await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'revised classifications restored');
       assert.equal((await modelRequests()).length, afterUnresolved, 'Restoring revised classifications must not invoke the model.');
     }
-    assert.ok(await evaluate(`[...${shadow}.querySelectorAll('.rf-block-review input')].every(input=>input.checkVisibility())`), 'An all-supporting section still shows all of its assigned changes.');
+    await click('Guide');
+    assert.ok(await evaluate(`[...${shadow}.querySelectorAll('tr[data-edit-id]')].every(row=>row.checkVisibility())`), 'An all-supporting section still shows all of its assigned changes.');
     assert.ok(await evaluate(`${shadow}.querySelector('.rf-unresolved').textContent.includes('1 edit')`));
     assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').textContent.includes('missing from this file pass')`), false, 'First-pass evidence gaps must not reappear after reconciliation.');
     assert.ok(await evaluate(`${shadow}.querySelector('.rf-guide-section').textContent.includes('Only the external caller contract remains unavailable.')`));
@@ -1357,9 +1360,7 @@ try {
   assert.ok(claudeRequests.every(request => request.provider === 'claude' && request.args[request.args.indexOf('--model')+1] === 'claude-fixture-model' && request.args[request.args.indexOf('--effort')+1] === 'medium'));
   assert.equal(claudeRequests[0].evidence.classifications, undefined);
   assert.deepEqual(claudeRequests[1].evidence.classifications, classifications);
-  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length') > 0);
-  await click('Full diff');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0);
+  assert.deepEqual(await openedView(), {view:'Full diff', guide:false, hidden:0}, 'A Claude result also opens in Full diff.');
   await page('Page.reload');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'Claude review saved for the same input');
   await click('Open saved review');
@@ -1739,7 +1740,7 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '5 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'all five final decisions restored on return');
   assert.equal((await modelRequests()).length - beforeMany, 6);
   assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-section-link').length`), 5, 'The overview includes all sections, including unloaded native files.');
-  await click('Full diff');
+  assert.deepEqual(await openedView(), {view:'Full diff', guide:false, hidden:0}, 'A result finished in the background opens in Full diff on reconnection.');
   const beforeExpansion = (await modelRequests()).length;
   for (const expanded of [true, false, true, false]) {
     await evaluate(`(() => {
@@ -1912,7 +1913,8 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title') && !${shadow}.querySelector('.rf-analyze').disabled`), 'analysis with custom visibility preferences');
   assert.equal((await modelRequests()).length, beforeCustomReview + 2);
   assert.ok(await evaluate(`${shadow}.querySelector('.rf-run-settings').textContent.includes('Effort: medium · Focus: thorough')`));
-  assert.ok(await evaluate(`[...${shadow}.querySelectorAll('.rf-block-review input')].every(input=>input.checkVisibility())`));
+  await click('Guide');
+  assert.ok(await evaluate(`[...${shadow}.querySelectorAll('tr[data-edit-id]')].every(row=>row.checkVisibility())`));
   assert.equal(await evaluate(`import(${JSON.stringify(moduleUrl)}).then(module => module.findNativeFiles(document).flatMap(file=>file.rows).filter(row=>['add','delete'].includes(row.type)).every(row=>!row.element.classList.contains('review-focus-native-hidden')))`), true, 'Always-visible change types must remain expanded regardless of model excerpt selection.');
   await page('Page.reload');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'custom preferences have their own reusable cache identity');
@@ -2033,9 +2035,10 @@ try {
   const nativePaths = `Array.from(document.querySelectorAll('[data-testid="progressive-diffs-list"] > .fixture-diff-entry'), entry => entry.querySelector('.diff-file-header code')?.textContent).filter(Boolean)`;
   const sharedPath = changes.paths[2];
   const sharedCard = `${shadow}.querySelector('.rf-guide-file[data-path="${sharedPath}"]')`;
-  const sharedInputs = `${sharedCard}.querySelectorAll('.rf-block-review input')`;
+  const sharedBlocks = `[...new Map([...${sharedCard}.querySelectorAll('tr[data-edit-id]')].map(row=>[row.dataset.editId,row])).values()]`;
+  const sharedNative = `document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]')`;
+  const sharedReviewed = `${sharedCard}.querySelector('.rf-guide-file-heading .rf-reviewed-toggle input')`;
   const chooseSection = id => evaluate(`${shadow}.querySelector('.rf-section-link[data-topic-id="${id}"]').click()`);
-  const waitForBlocks = () => waitFor(() => evaluate(`[...${shadow}.querySelectorAll('.rf-block-review input')].length > 0 && [...${shadow}.querySelectorAll('.rf-block-review input')].every(input=>input.getAttribute('aria-disabled') === 'false')`), 'saved block progress ready');
   await evaluate(`(() => {
     window.guideFileTemplate = document.querySelector('.fixture-diff-entry').outerHTML;
     window.originalGuideFiles = [...document.querySelectorAll('.fixture-diff-entry')];
@@ -2047,7 +2050,8 @@ try {
   const beforeGuide = (await modelRequests()).length;
   await click('Analyze PR');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'comprehension-ordered Guide complete');
-  await waitForBlocks();
+  assert.deepEqual(await openedView(), {view:'Full diff', guide:false, hidden:0}, 'A multi-section review opens in Full diff.');
+  await click('Guide');
   await openFiles();
   assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,3), 'Guide never reorders native GitHub files.');
   assert.deepEqual(await evaluate(`Array.from(${shadow}.querySelectorAll('.rf-file-progress-row'), row => row.dataset.path)`), changes.paths.slice(0,6), 'The file list retains captured order.');
@@ -2058,90 +2062,45 @@ try {
   assert.equal(await evaluate('document.querySelector("[data-testid=progressive-diffs-list]").children[1].id'), 'fixture-list-control');
   assert.ok(await evaluate('window.originalGuideFiles.every(file=>file.isConnected)'));
   assert.equal((await modelRequests()).length - beforeGuide, 6, 'Guide adds no model call beyond the existing file classifications and single assessment.');
-  const blockIds = await evaluate(`[...${sharedInputs}].map(input=>input.dataset.editId)`);
+  const blockIds = await evaluate(`${sharedBlocks}.map(row=>row.dataset.editId)`);
   assert.equal(blockIds.length, 3);
-  assert.deepEqual(await evaluate(`[...${sharedInputs}].map(input=>input.checkVisibility())`), [true,false,true], 'The section’s block and unresolved foreign block remain open; the other review section’s block folds.');
+  assert.deepEqual(await evaluate(`${sharedBlocks}.map(row=>row.checkVisibility())`), [true,false,true], 'The section’s block and unresolved foreign block remain open; the other review section’s block folds.');
   assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-foreign-edit')].some(label=>label.checkVisibility() && label.textContent.includes('External caller contract') && label.textContent.includes('unresolved evidence'))`));
   assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-fold-sections button')].some(button=>button.textContent==='Check the contract and its implementation')`), 'Hidden foreign changes link to their section.');
   assert.deepEqual(await evaluate(`[...${shadow}.querySelector('.rf-file-progress-row[data-path="${sharedPath}"]').querySelectorAll('.rf-file-sections button')].map(button=>button.textContent)`), ['Supporting setup','Check the contract and its implementation','External caller contract']);
   for (const id of blockIds) {
-    assert.deepEqual(await evaluate(`[...${sharedCard}.querySelectorAll('tr[data-edit-id="${id}"]')].map(row=>row.className)`), ['rf-code-delete','rf-code-add'], 'Each checkbox owns both sides of one continuous edit.');
+    assert.deepEqual(await evaluate(`[...${sharedCard}.querySelectorAll('tr[data-edit-id="${id}"]')].map(row=>row.className)`), ['rf-code-delete','rf-code-add'], 'Each changed block shows its removals and additions together.');
   }
-  await evaluate(`window.focusedBlock = ${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]'); window.focusedBlock.focus(); window.focusedBlock.click()`);
-  assert.equal(await evaluate(`${shadow}.activeElement === window.focusedBlock`), true, 'Saving a block must not drop keyboard focus while its request is pending.');
-  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent.includes('1 of 3') && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'first block saved');
-  assert.equal(await evaluate(`${shadow}.activeElement === window.focusedBlock`), true, 'The block checkbox retains keyboard focus after progress is saved.');
-  assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed')`), 'false');
-  await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[2]}"]').click()`);
-  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent.includes('2 of 3') && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'both visible blocks saved');
-  assert.equal(await evaluate('window.fixtureViewedClicks'), 0, 'Finishing the visible blocks cannot complete a file whose other section has an unchecked block.');
+  assert.equal(await evaluate(`${sharedCard}.querySelectorAll('input[type=checkbox]').length`), 1, 'A Guide file’s only checkbox is its file-level Reviewed toggle.');
+  assert.deepEqual(await evaluate(`[${sharedReviewed}.checked, ${sharedReviewed}.indeterminate, ${sharedNative}.getAttribute('aria-pressed'), window.fixtureViewedClicks]`), [false,false,'false',0], 'The Guide file header mirrors GitHub Viewed; AI completion never sets it.');
+  await evaluate(`window.focusedReviewed = ${sharedReviewed}; window.focusedReviewed.focus(); window.focusedReviewed.click()`);
+  await waitFor(() => evaluate(`${sharedNative}.getAttribute('aria-pressed') === 'true' && !${sharedNative}.disabled && ${sharedReviewed}.checked && ${sharedReviewed}.getAttribute('aria-disabled') === 'false'`), 'Guide header Reviewed forwarded to GitHub Viewed');
+  assert.equal(await evaluate(`${shadow}.activeElement === window.focusedReviewed`), true, 'The Guide header checkbox keeps keyboard focus while GitHub saves Viewed.');
   await click('Next section');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'contract');
-  assert.equal(await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').checked`), true, 'A block shares its reviewed state across sections.');
+  assert.equal(await evaluate(`${sharedReviewed}.checked`), true, 'Every section’s header shows the same file-level Viewed state.');
   const evidenceCard = `${shadow}.querySelector('.rf-guide-file[data-path="${changes.paths[4]}"]')`;
   assert.deepEqual(await evaluate(`[...${evidenceCard}.querySelectorAll('tr[data-edit-id]')].map(row=>row.className)`), ['rf-code-delete','rf-code-add'], 'A before-only excerpt includes its entire removed-and-added block.');
   assert.ok(await evaluate(`${evidenceCard}.querySelector('.rf-foreign-edit').textContent.includes('selected evidence')`));
-  await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[1]}"]').click()`);
-  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '3 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true'`), 'all blocks apply GitHub Viewed');
-  await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[1]}"]').click()`);
-  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'false'`), 'unchecking a block makes the native file incomplete');
-  await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').click()`);
-  await waitFor(() => evaluate(`[...${sharedInputs}].every(input=>input.checked && input.getAttribute('aria-disabled') === 'false')`), 'manual Viewed checks every block');
-  await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').click()`);
-  await waitFor(() => evaluate(`[...${sharedInputs}].every(input=>!input.checked && input.getAttribute('aria-disabled') === 'false')`), 'manual uncheck clears every block');
-  await chooseSection('supporting');
-  await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`);
-  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '1 of 3 blocks inspected' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'partial progress saved before reload');
+  await evaluate(`${sharedNative}.click()`);
+  await waitFor(() => evaluate(`!${sharedReviewed}.checked && ${sharedReviewed}.getAttribute('aria-disabled') === 'false'`), 'native Viewed uncheck mirrored in the Guide header');
+  assert.equal(await evaluate('window.fixtureViewedClicks'), 2, 'Only the user’s two Viewed actions reached GitHub.');
+  await evaluate(`${sharedReviewed}.click()`);
+  await waitFor(() => evaluate(`${sharedNative}.getAttribute('aria-pressed') === 'true' && !${sharedNative}.disabled`), 'Viewed saved before reload');
   await page('Page.reload');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved Guide after reload');
   await click('Open saved review');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'Guide restored');
-  await waitForBlocks();
-  assert.deepEqual(await evaluate(`[...${sharedInputs}].map(input=>input.checked)`), [true,false,false], 'Partial block progress persists across reloads for the captured commits.');
-  const guideTab = await send('Target.createTarget', {url:'about:blank'});
-  const guideSession = (await send('Target.attachToTarget', {targetId:guideTab.targetId,flatten:true})).sessionId;
-  try {
-    await send('Runtime.enable', {}, guideSession);
-    await send('Page.enable', {}, guideSession);
-    await send('Page.addScriptToEvaluateOnNewDocument', {source:reviewFixtureSource}, guideSession);
-    await send('Fetch.enable', {patterns:[{urlPattern:'https://github.com/*'}]}, guideSession);
-    await send('Page.navigate', {url:prUrl+'/changes'}, guideSession);
-    await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`, guideSession), 'saved Guide in another tab');
-    await evaluate(`${shadow}.querySelector('.rf-analyze').click()`, guideSession);
-    await waitFor(() => evaluate(`${sharedCard}?.querySelector('.rf-block-progress').textContent === '1 of 3 blocks inspected' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`, guideSession), 'partial progress restored in the second tab');
-    await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[2]}"]').click()`, guideSession);
-    await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && ${sharedCard}.querySelector('input[data-edit-id="${blockIds[2]}"]').checked`), 'a block inspected in another tab updates this Guide');
-    await chooseSection('contract');
-    await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[1]}"]').click()`);
-    for (const tab of [sessionId, guideSession]) await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '3 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true' && !document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled`, tab), 'completed file synchronized in both tabs');
-    await chooseSection('supporting');
-    await evaluate('window.fixtureViewedDelay = 100', guideSession);
-    const simultaneous = await Promise.allSettled([sessionId, guideSession].map(tab => evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`, tab)));
-    for (const outcome of simultaneous) assert.equal(outcome.status, 'fulfilled');
-    for (const tab of [sessionId, guideSession]) {
-      await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && !document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled`, tab), 'simultaneous block uncheck settled');
-      assert.deepEqual(await evaluate(`[...${sharedInputs}].map(input=>input.checked)`, tab), [false,true,true], 'A programmatic Viewed confirmation in another tab must not clear the remaining checklist.');
-    }
-    await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`);
-    for (const tab of [sessionId, guideSession]) await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '3 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true' && !document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`, tab), 'file completed again before a delayed older Viewed echo');
-    await evaluate(`window.fixtureHoldViewedPath = ${JSON.stringify(sharedPath)}; ${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`);
-    await waitFor(() => evaluate(`typeof window.fixtureReleaseViewed === 'function' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled && ${sharedCard}.querySelector('.rf-reviewed-toggle input').getAttribute('aria-disabled') === 'true'`), 'first tab has observed its held programmatic native uncheck');
-    await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'false' && !document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`, guideSession), 'second tab confirms Viewed before the first tab receives its echo');
-    await evaluate(`${shadow}.querySelector('.rf-section-link[data-topic-id="contract"]').click(); ${sharedCard}.querySelector('input[data-edit-id="${blockIds[1]}"]').click()`, guideSession);
-    for (const tab of [sessionId, guideSession]) await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '1 of 3 blocks inspected' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`, tab), 'a newer block generation is saved before the old Viewed echo');
-    assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled`), true);
-    await evaluate('window.fixtureReleaseViewed()');
-    await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-reviewed-toggle input').getAttribute('aria-disabled') === 'false' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'older programmatic Viewed echo has been observed');
-    for (const tab of [sessionId, guideSession]) assert.deepEqual(await evaluate(`[...${sharedInputs}].map(input=>input.checked)`, tab), [false,false,true], 'A delayed Viewed echo from an older generation must preserve the remaining inspected block.');
-    await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`);
-    await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'partial checklist retained after cross-tab races');
-  } finally { await send('Target.closeTarget', {targetId:guideTab.targetId}); }
-  await page('Page.bringToFront');
+  assert.deepEqual(await openedView(), {view:'Full diff', guide:false, hidden:0}, 'A restored multi-section review opens in Full diff.');
+  await click('Guide');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting', 'One click opens the Guide on its first section.');
+  await waitFor(() => evaluate(`${sharedReviewed}.checked && ${sharedReviewed}.getAttribute('aria-disabled') === 'false'`), 'restored Guide header reads the saved native Viewed state');
+  assert.equal(await evaluate('window.fixtureViewedClicks'), 0, 'Restoring and opening the Guide never changes GitHub Viewed.');
   await chooseSection('contract');
   const missingPath = changes.paths[4];
   const missingCard = `${shadow}.querySelector('.rf-guide-file[data-path="${missingPath}"]')`;
-  await evaluate(`${missingCard}.querySelector('.rf-block-review input').click()`);
-  await waitFor(() => evaluate(`${missingCard}.querySelector('.rf-block-progress').textContent.includes('1 of 1 blocks inspected') && ${missingCard}.querySelector('.rf-block-progress').textContent.includes('Viewed check pending')`), 'completed unloaded file keeps its checklist and pending Viewed state');
+  const missingReviewed = `${missingCard}.querySelector('.rf-reviewed-toggle input')`;
+  assert.deepEqual(await evaluate(`[${missingReviewed}.indeterminate, ${missingReviewed}.disabled, ${missingCard}.querySelector('.rf-review-unavailable').textContent]`), [true, true, 'Status unavailable'], 'A file whose Viewed control GitHub has not mounted stays unknown in its Guide header.');
   await click('Full diff');
   await evaluate(`(() => {
     const list = document.querySelector('[data-testid=progressive-diffs-list]');
@@ -2155,7 +2114,9 @@ try {
     }
   })()`);
   assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[4].pathDigest}').querySelectorAll('button[aria-pressed]').length`), 1, 'The lazy fixture must install one live native Viewed control.');
-  await waitFor(() => evaluate(`document.getElementById('diff-${changes.entries[4].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true'`), 'pending Viewed applies when GitHub loads the control');
+  await waitFor(() => evaluate(`!${missingReviewed}.indeterminate && !${missingReviewed}.disabled && !${missingReviewed}.checked`), 'Guide header reads the newly mounted native Viewed control');
+  assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[4].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed')`), 'false');
+  assert.equal(await evaluate('window.fixtureViewedClicks'), 0, 'Mounting a native control never changes Viewed automatically.');
   assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,6));
   await evaluate(`(() => {
     const file = document.getElementById('diff-${changes.entries[2].pathDigest}');
@@ -2176,13 +2137,10 @@ try {
   assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,6));
   await click('Guide');
   await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
-  assert.ok(await evaluate(`[...${sharedInputs}].every(input=>input.checkVisibility())`), 'Turning off folding shows every captured block in the section’s files.');
+  assert.ok(await evaluate(`${sharedBlocks}.every(row=>row.checkVisibility())`), 'Turning off folding shows every captured block in the section’s files.');
   await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
   await click('Previous section');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting');
-  await evaluate(`${sharedCard}.querySelector('.rf-guide-file-heading .rf-link-button').click()`);
-  assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'contract', 'Find remaining blocks routes to the section owning the unchecked block.');
-  assert.equal(await evaluate(`${shadow}.activeElement.dataset.editId`), blockIds[1]);
   await openFiles();
   await evaluate(`${shadow}.querySelector('.rf-file-progress-row[data-path="${changes.paths[5]}"] .rf-file-path').click()`);
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), undefined);
@@ -2192,10 +2150,10 @@ try {
   await evaluate('document.querySelector("#review-focus-extension").scrollIntoView({block:"start"})');
   await writeFile('/tmp/priorities-guide-sections.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
   await page('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:false});
-  assert.equal(await evaluate(`${shadow}.querySelector('.rf-panel').scrollWidth > ${shadow}.querySelector('.rf-panel').clientWidth`), false, 'Sections, file names and block controls fit a narrow viewport.');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-panel').scrollWidth > ${shadow}.querySelector('.rf-panel').clientWidth`), false, 'Sections, file names and Viewed controls fit a narrow viewport.');
   await writeFile('/tmp/priorities-guide-sections-mobile.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
   await page('Emulation.setDeviceMetricsOverride', {width:1512,height:1080,deviceScaleFactor:1,mobile:false});
-  assert.equal((await modelRequests()).length - beforeGuide, 6, 'Section navigation, block checks, native controls, reload and another tab reuse the assessment.');
+  assert.equal((await modelRequests()).length - beforeGuide, 6, 'Section navigation, Viewed controls and reload reuse the assessment.');
   for (const override of ['always-visible', 'protected']) {
     await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});
     await waitFor(() => evaluate('!document.querySelector("#save-review-preferences").disabled'), 'visibility override preferences ready');
@@ -2209,8 +2167,8 @@ try {
     await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze') && !${shadow}.querySelector('.rf-analyze').disabled`), 'fresh Guide visibility override');
     await click('Analyze PR');
     await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'visibility override assessment completed');
-    await waitForBlocks();
-    assert.ok(await evaluate(`[...${sharedInputs}].every(input=>input.checkVisibility())`), 'User visibility rules keep foreign section changes open.');
+    await click('Guide');
+    assert.ok(await evaluate(`${sharedBlocks}.every(row=>row.checkVisibility())`), 'User visibility rules keep foreign section changes open.');
     const reason = override === 'protected' ? 'protected file' : 'your always-visible types: behavior';
     assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-foreign-edit')].some(label=>label.checkVisibility() && label.textContent.includes('Check the contract and its implementation') && label.textContent.includes(${JSON.stringify(reason)}))`), 'Foreign changes state their owner and the concrete visibility override.');
     assert.equal(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-code-context')].every(row=>row.checkVisibility())`), override === 'protected', 'Only protected paths keep uncited surrounding context open.');
@@ -2219,7 +2177,7 @@ try {
   assert.ok(workers.length > 0);
   assert.deepEqual(eventErrors, []);
   assert.deepEqual(exceptions, []);
-  console.log('Installed extension passed: Codex connection/model settings, complete GitHub capture, 53 deferred files and deferred total count, 53-file Changes route with four split-view entries and validated lazy loading, bounded linked issue intent and local failures, classic/React source fixtures, per-file Codex classification + PR review → paired Guide → native Full diff, section folding and unresolved labels, persisted block progress and GitHub Viewed synchronization, incomplete diff rejection. A fake Codex process supplied results through the real native host; no live model calls.');
+  console.log('Installed extension passed: Codex connection/model settings, complete GitHub capture, 53 deferred files and deferred total count, 53-file Changes route with four split-view entries and validated lazy loading, bounded linked issue intent and local failures, classic/React source fixtures, per-file Codex classification + PR review → paired Guide → native Full diff, Full diff by default with one-click Guide, section folding and unresolved labels, file-level Reviewed mirroring GitHub Viewed, incomplete diff rejection. A fake Codex process supplied results through the real native host; no live model calls.');
 } finally {
   for (const request of pending.values()) clearTimeout(request.timer);
   chrome.kill('SIGTERM');

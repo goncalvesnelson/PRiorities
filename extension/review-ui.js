@@ -140,7 +140,7 @@ export function startReviewUI() {
   let operation = 0;
   let settingsRequest = 0;
   let busy = false;
-  let mode = 'guide';
+  let mode = 'full';
   let identityKey = '';
   let pathKey = '';
   let resumeProbe = '';
@@ -159,18 +159,9 @@ export function startReviewUI() {
   let reviewControls = new Map();
   const expanded = new Set();
   const hiddenSurfaces = new Set();
-  const syncingViewed = new Map();
-  const nativeObservations = new Map();
-  const manualViewed = new Set();
   let selectedTopicId;
   let selectedFile;
   let foldOtherCode = true;
-  let blockProgress;
-  let blockRequest = 0;
-  let blockLoading = false;
-  let blockSaving = 0;
-  let unsavedBlock;
-  let blockError = '';
   let navigationNotice = '';
   let finalResult = false;
   let reviewStage = '';
@@ -423,20 +414,11 @@ export function startReviewUI() {
 
   function clearReview() {
     restoreNativeSurface();
-    blockRequest++;
-    blockProgress = undefined;
-    blockLoading = false;
-    blockSaving = 0;
-    unsavedBlock = undefined;
-    blockError = '';
-    syncingViewed.clear();
-    nativeObservations.clear();
     selectedTopicId = undefined;
     selectedFile = undefined;
     navigationNotice = '';
     nativeNotice.hidden = true;
     nativeNotice.replaceChildren();
-    manualViewed.clear();
     snapshot = undefined;
     analysis = undefined;
     finalResult = false;
@@ -594,10 +576,9 @@ export function startReviewUI() {
       const control = nativeReviewControl(native);
       if (control && !control.disabled && control.getAttribute('aria-disabled') !== 'true') {
         const reviewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
-        if (input.checked !== reviewed) { manualViewed.add(path); control.click(); }
+        if (input.checked !== reviewed) control.click();
       }
       readReviewControls();
-      syncBlockProgress();
       renderFileProgress();
     });
     label.append(input, element('span', '', 'Reviewed by you'), element('span', 'rf-review-unavailable'));
@@ -634,9 +615,6 @@ export function startReviewUI() {
       label.dataset.state = file.state;
       row.append(button(path, () => finalResult ? selectFile(path) : showNativeFile(path), 'rf-file-path'), label, reviewToggle(path));
       if (finalResult) {
-        const progress = element('span', 'rf-block-progress');
-        progress.dataset.path = path;
-        row.append(progress);
         const owners = fileTopics(path);
         const references = analysis.topics.filter(topic => !owners.includes(topic) && topic.excerpts.some(excerpt => excerpt.path === path));
         const links = element('div', 'rf-file-sections');
@@ -657,7 +635,7 @@ export function startReviewUI() {
       const replacement = focused.tagName === 'INPUT' ? row?.querySelector('input') : [...row?.querySelectorAll('button') ?? []].find(button => button.textContent === focused.textContent);
       (replacement ?? filters.querySelector('[aria-pressed="true"]')).focus({ preventScroll: true });
     }
-    refreshBlockControls();
+    for (const node of result.querySelectorAll('.rf-reviewed-toggle')) updateReviewToggle(node, node.closest('.rf-guide-file').dataset.path);
     renderFilePanels();
   }
 
@@ -804,7 +782,7 @@ export function startReviewUI() {
       } });
       if (request !== operation || !isActive()) return;
       snapshot = captured;
-      mode = 'guide';
+      mode = 'full';
       reviewStage = 'files';
       for (const file of snapshot.files) {
         const hasEdits = file.hunks.some(hunk => hunk.items.some(item => item.type === 'edit'));
@@ -841,7 +819,7 @@ export function startReviewUI() {
         busy = true;
         cacheOnly = message.restoring;
         openingSavedReview = message.restoring;
-        mode = 'guide';
+        mode = 'full';
         reviewStage = 'files';
         fileStates.clear();
         for (const file of snapshot.files) fileStates.set(file.path, { state: 'queued' });
@@ -867,13 +845,6 @@ export function startReviewUI() {
       const identity = readPageIdentity(document, location.href);
       if (message.type !== 'error' && (!identity || !snapshot || `${identity.owner}/${identity.repo}/${identity.number}` !== identityKey || isDiffPage() && (identity.headSha && identity.headSha !== snapshot.headSha || identity.baseSha && identity.baseSha !== snapshot.baseSha))) {
         checkPage();
-        return;
-      }
-      if (message.type === 'block-progress') {
-        if (message.baseSha === snapshot.baseSha && message.headSha === snapshot.headSha) {
-          acceptBlockProgress(message.progress);
-          syncBlockProgress();
-        }
         return;
       }
       if (message.type === 'file-progress') {
@@ -933,7 +904,6 @@ export function startReviewUI() {
         selectedTopicId = analysis.topics.some(topic => topic.id === selectedTopicId) ? selectedTopicId : analysis.topics[0]?.id;
         selectedFile = undefined;
         expanded.clear();
-        void loadBlockProgress();
         renderAnalysis();
         renderFileProgress();
         updateSurface();
@@ -990,155 +960,6 @@ export function startReviewUI() {
     const path = new URL(snapshot.url).pathname.split('/').filter(Boolean);
     return identity.owner === path[0] && identity.repo === path[1] && String(identity.number) === path[3]
       && identity.headSha === snapshot.headSha && (!identity.baseSha || identity.baseSha === snapshot.baseSha);
-  }
-
-  function fileEdits(path) {
-    return snapshot?.files.find(file => file.path === path)?.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit')) ?? [];
-  }
-
-  function progressFor(path) {
-    const file = blockProgress?.files.find(file => file.path === path);
-    const checked = new Set(file?.checkedIds ?? []);
-    if (unsavedBlock?.type === 'set-block-reviewed' && unsavedBlock.path === path) {
-      if (unsavedBlock.checked) checked.add(unsavedBlock.editId);
-      else checked.delete(unsavedBlock.editId);
-    }
-    const edits = fileEdits(path);
-    return { file, checked, total: edits.length, count: edits.filter(edit => checked.has(edit.id)).length };
-  }
-
-  function acceptBlockProgress(progress) {
-    if (!progress || blockProgress && progress.key === blockProgress.key && progress.version < blockProgress.version) return;
-    blockProgress = progress;
-    refreshBlockControls();
-  }
-
-  async function loadBlockProgress() {
-    if (!snapshot || !verifiedPage() || blockLoading) return;
-    const request = ++blockRequest;
-    blockLoading = true;
-    try {
-      const response = await chrome.runtime.sendMessage({ type: 'get-block-progress', baseSha: snapshot.baseSha, headSha: snapshot.headSha });
-      if (request !== blockRequest || !isActive()) return;
-      if (response?.error) throw new Error(response.error);
-      acceptBlockProgress(response.progress);
-      blockError = '';
-      syncBlockProgress();
-    } catch (failure) {
-      if (request !== blockRequest || !isActive()) return;
-      blockError = `Block progress could not load. ${failure.message}`;
-    } finally {
-      if (request === blockRequest) {
-        blockLoading = false;
-        refreshBlockControls();
-      }
-    }
-  }
-
-  async function saveBlockChange(change) {
-    if (!blockProgress || !verifiedPage()) return;
-    const request = blockRequest;
-    blockSaving++;
-    refreshBlockControls();
-    try {
-      const response = await chrome.runtime.sendMessage({ ...change, key: blockProgress.key, baseSha: snapshot.baseSha, headSha: snapshot.headSha });
-      if (request !== blockRequest || !isActive()) return;
-      if (response?.error) throw new Error(response.error);
-      if (unsavedBlock === change) unsavedBlock = undefined;
-      if (!unsavedBlock) blockError = '';
-      acceptBlockProgress(response.progress);
-    } catch (failure) {
-      if (request !== blockRequest || !isActive()) return;
-      unsavedBlock ??= change;
-      blockError = `Block progress is not saved. ${failure.message}`;
-    } finally {
-      if (request === blockRequest) {
-        blockSaving--;
-        refreshBlockControls();
-        if (!blockSaving && !unsavedBlock) syncBlockProgress();
-      }
-    }
-  }
-
-  function setBlockReviewed(path, editId, checked) {
-    if (!isActive() || !verifiedPage() || !blockProgress || blockSaving || unsavedBlock) {
-      refreshBlockControls();
-      return;
-    }
-    unsavedBlock = { type: 'set-block-reviewed', path, editId, checked };
-    void saveBlockChange(unsavedBlock);
-  }
-
-  function syncBlockProgress() {
-    if (!blockProgress || blockSaving || unsavedBlock || !finalResult || !verifiedPage()) return;
-    const natives = new Map(findNativeFiles(document).map(file => [file.path, file]));
-    for (const file of blockProgress.files) {
-      const native = natives.get(file.path);
-      const control = nativeReviewControl(native);
-      if (!control || control.disabled || control.getAttribute('aria-disabled') === 'true') continue;
-      const viewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
-      if (manualViewed.has(file.path)) {
-        manualViewed.delete(file.path);
-        syncingViewed.delete(file.path);
-        nativeObservations.set(file.path, viewed);
-        void saveBlockChange({ type: 'observe-file-viewed', path: file.path, viewed, manual: true });
-        continue;
-      }
-      if (file.pendingViewed !== null) {
-        const syncing = syncingViewed.get(file.path);
-        if (viewed === file.pendingViewed) {
-          if (syncing?.generation === file.generation && syncing.confirming) continue;
-          syncingViewed.set(file.path, { generation: file.generation, expected: file.pendingViewed, confirming: true });
-          nativeObservations.set(file.path, viewed);
-          void saveBlockChange({ type: 'confirm-file-viewed', path: file.path, viewed, generation: file.generation });
-        } else if (syncing?.generation === file.generation) {
-          syncing.failed = true;
-        } else {
-          syncingViewed.set(file.path, { generation: file.generation, expected: file.pendingViewed });
-          control.click();
-          scheduleCheck();
-        }
-        continue;
-      }
-      const syncing = syncingViewed.get(file.path);
-      if (syncing && viewed === syncing.expected) {
-        // Another tab can change the checklist before our native click finishes.
-        nativeObservations.set(file.path, viewed);
-      } else if (syncing?.generation === file.generation && syncing.expected === file.nativeViewed) {
-        syncing.failed = true;
-        continue;
-      }
-      syncingViewed.delete(file.path);
-      if (nativeObservations.get(file.path) === viewed) continue;
-      const manual = nativeObservations.has(file.path);
-      nativeObservations.set(file.path, viewed);
-      void saveBlockChange({ type: 'observe-file-viewed', path: file.path, viewed, manual });
-    }
-    refreshBlockControls();
-  }
-
-  function refreshBlockControls() {
-    for (const input of shadow.querySelectorAll('.rf-block-review input')) {
-      const path = input.closest('.rf-guide-file').dataset.path;
-      input.checked = progressFor(path).checked.has(input.dataset.editId);
-      input.disabled = !blockProgress || !finalResult;
-      input.setAttribute('aria-disabled', String(input.disabled || Boolean(blockSaving || unsavedBlock)));
-    }
-    for (const node of shadow.querySelectorAll('.rf-block-progress')) {
-      const { file, count, total } = progressFor(node.dataset.path);
-      node.textContent = !total ? 'No captured blocks to review' : !blockProgress ? 'Loading block progress…' : `${count} of ${total} blocks inspected`;
-      if (file?.pendingViewed !== null && file?.pendingViewed !== undefined) node.textContent += ` · Viewed ${file.pendingViewed ? 'check' : 'uncheck'} pending`;
-      if (syncingViewed.get(node.dataset.path)?.failed) node.textContent += ' · GitHub has not confirmed the Viewed update';
-      if (unsavedBlock?.path === node.dataset.path) node.textContent += ' · Not saved';
-      node.dataset.complete = String(total > 0 && count === total);
-    }
-    for (const node of shadow.querySelectorAll('.rf-guide-file .rf-reviewed-toggle')) updateReviewToggle(node, node.closest('.rf-guide-file').dataset.path);
-    for (const node of shadow.querySelectorAll('.rf-viewed-retry')) node.hidden = !syncingViewed.get(node.dataset.path)?.failed;
-    const notice = result.querySelector('.rf-block-error');
-    if (notice) {
-      notice.hidden = !blockError;
-      notice.querySelector('span').textContent = blockError;
-    }
   }
 
   function restoreNativeSurface() {
@@ -1269,24 +1090,7 @@ export function startReviewUI() {
       content.append(label);
     } else if (!id && protectedFile) content.append(element('div', 'rf-context-label', 'Protected context'));
     if (rows[0].outsideDiff) content.append(element('div', 'rf-context-label', 'Captured source outside the diff'));
-    if (id) {
-      const header = element('div', 'rf-block-heading');
-      const edits = fileEdits(path);
-      header.append(element('span', '', `Block ${edits.findIndex(edit => edit.id === id) + 1} of ${edits.length}`));
-      const label = element('label', 'rf-block-review');
-      const input = element('input');
-      input.type = 'checkbox';
-      input.dataset.editId = id;
-      input.setAttribute('aria-label', `Inspected block ${edits.findIndex(edit => edit.id === id) + 1} in ${path}`);
-      input.addEventListener('click', event => {
-        if (blockSaving || unsavedBlock) event.preventDefault();
-      });
-      input.addEventListener('change', () => setBlockReviewed(path, id, input.checked));
-      label.append(input, element('span', '', 'Inspected'));
-      header.append(label);
-      content.append(header);
-      if (classification?.uncertainty) content.append(element('p', 'rf-uncertainty', classification.uncertainty));
-    }
+    if (classification?.uncertainty) content.append(element('p', 'rf-uncertainty', classification.uncertainty));
     content.append(renderRows(rows, path));
     return content;
   }
@@ -1296,40 +1100,11 @@ export function startReviewUI() {
     card.dataset.path = file.path;
     card.tabIndex = -1;
     const heading = element('div', 'rf-guide-file-heading');
-    const progress = element('span', 'rf-block-progress');
-    progress.dataset.path = file.path;
-    const remaining = button('Find remaining blocks', () => {
-      const { checked } = progressFor(file.path);
-      const edit = fileEdits(file.path).find(edit => !checked.has(edit.id));
-      if (!edit) return;
-      const owner = analysis.topics.find(entry => entry.editIds.includes(edit.id));
-      if (owner) selectTopic(owner.id, file.path);
-      else selectFile(file.path);
-      const input = [...result.querySelectorAll('.rf-block-review input')].find(input => input.dataset.editId === edit.id);
-      const fold = input?.closest('details');
-      if (fold) fold.open = true;
-      input?.focus();
-    }, 'rf-link-button');
-    heading.append(element('strong', '', file.path), progress, reviewToggle(file.path), remaining);
-    const retryViewed = button('Retry Viewed update', () => {
-      const syncing = syncingViewed.get(file.path);
-      const progress = progressFor(file.path).file;
-      const native = findNativeFiles(document).find(entry => entry.path === file.path);
-      const control = nativeReviewControl(native);
-      if (progress?.pendingViewed === null && syncing && control && !control.disabled && control.getAttribute('aria-disabled') !== 'true') {
-        const viewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
-        if (viewed !== syncing.expected) control.click();
-        syncing.failed = false;
-        scheduleCheck();
-      } else { syncingViewed.delete(file.path); syncBlockProgress(); }
-    }, 'rf-link-button rf-viewed-retry');
-    retryViewed.dataset.path = file.path;
-    retryViewed.hidden = true;
-    heading.append(retryViewed);
+    heading.append(element('strong', '', file.path), reviewToggle(file.path));
     const links = element('div', 'rf-file-links');
     const excerpts = topic?.excerpts.filter(excerpt => excerpt.path === file.path) ?? [];
     links.append(button('Show in diff', () => void showNativeFile(file.path, excerpts[0]), 'rf-link-button'));
-    const edits = fileEdits(file.path);
+    const edits = file.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit'));
     const capturedRows = file.hunks.flatMap(hunk => hunk.items.flatMap(item => item.type === 'edit' ? item.rows : [item]));
     for (const [side, key] of [['before', 'oldLine'], ['after', 'newLine']]) {
       const first = capturedRows.find(row => row[key] !== null);
@@ -1398,7 +1173,7 @@ export function startReviewUI() {
     const reviews = analysis.topics.filter(topic => topic.priority === 'review').length;
     summary.append(element('h2', 'rf-overview-title', `${reviews} review ${reviews === 1 ? 'decision' : 'decisions'}`));
     summary.append(element('p', 'rf-summary', analysis.summary));
-    summary.append(element('p', 'rf-caption', 'Inspect each changed block. Checking every block marks the file Viewed. Comments, draft reviews and approval stay in Full diff.'));
+    summary.append(element('p', 'rf-caption', 'Mark each file Reviewed by you when you finish it. Comments, draft reviews and approval stay in Full diff.'));
     if (!reviews) summary.append(element('p', 'rf-caption', 'All sections are supporting. You can inspect every captured change.'));
     const excluded = generatedCount();
     if (excluded) summary.append(element('p', 'rf-generated-notice', `${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} skipped by AI. Open the file list to read captured code or choose Review anyway.`));
@@ -1408,13 +1183,6 @@ export function startReviewUI() {
       for (const topic of analysis.topics.filter(topic => unresolved.some(entry => topic.editIds.includes(entry.editId)))) notice.append(button(topic.title, () => selectTopic(topic.id), 'rf-link-button'));
       summary.append(notice);
     }
-    const blockNotice = element('div', 'rf-block-error');
-    blockNotice.setAttribute('role', 'alert');
-    blockNotice.append(element('span'), button('Retry saving progress', () => {
-      if (unsavedBlock) void saveBlockChange(unsavedBlock);
-      else void loadBlockProgress();
-    }));
-    summary.append(blockNotice);
     const nav = element('nav', 'rf-section-overview');
     nav.setAttribute('aria-label', 'Guide sections');
     for (const [index, topic] of analysis.topics.entries()) {
@@ -1476,7 +1244,6 @@ export function startReviewUI() {
     details.append(element('p', 'rf-provenance', `Analyzed ${snapshot.baseSha.slice(0, 8)}…${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}, effort: ${reviewEffort || 'model default'}.`));
     for (const warning of snapshot.warnings ?? []) details.append(element('p', '', warning));
     result.append(summary, nav, section, sequence, details);
-    refreshBlockControls();
   }
 
 
@@ -1544,7 +1311,6 @@ export function startReviewUI() {
     resumeAnalysis(identity);
     if (readReviewControls()) renderFileProgress();
     else renderFilePanels();
-    syncBlockProgress();
     updateSurface();
     renderControls();
     void refreshSavedReview();
@@ -1583,12 +1349,6 @@ export function startReviewUI() {
     if (relevant) scheduleCheck();
   });
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-pressed', 'aria-label', 'aria-disabled', 'checked', 'disabled'] });
-  document.addEventListener('click', event => {
-    const control = event.target.closest('input.js-reviewed-checkbox, button[aria-pressed][aria-label="Viewed"], button[aria-pressed][aria-label="Not Viewed"]');
-    if (!event.isTrusted || !control) return;
-    const file = findNativeFiles(document).find(file => nativeReviewControl(file) === control);
-    if (file) manualViewed.add(file.path);
-  }, eventOptions);
   document.addEventListener('change', event => {
     if (event.target.matches('input.js-reviewed-checkbox')) scheduleCheck();
   }, eventOptions);
