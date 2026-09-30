@@ -5,6 +5,7 @@ import { defaultReviewPreferences, validateReviewPreferences } from './review-pr
 
 const jobs = new Map();
 const connectionChecks = new Map();
+const blockProgressWrites = new Map();
 const storageReady = chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 
 function isOptions(sender) {
@@ -91,8 +92,101 @@ async function publicSettings(settings, refreshConnection) {
   return { ...settings, ...await connectionStatus(settings.provider, refreshConnection) };
 }
 
+async function blockProgressIdentity(session) {
+  const inventory = session.snapshot.files.map(file => ({ path: file.path, edits: file.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit')) }));
+  const bytes = new TextEncoder().encode(JSON.stringify([session.snapshot.url, session.snapshot.baseSha, session.snapshot.headSha, inventory]));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const key = `block-progress:${[...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  session.blockProgressKey = key;
+  return { key, inventory };
+}
+
+function validateBlockProgress(progress, identity) {
+  if (!progress || progress.key !== identity.key || !Number.isSafeInteger(progress.version) || progress.version < 0 || !Array.isArray(progress.files) || progress.files.length !== identity.inventory.length) throw new Error('Saved block-review progress is invalid. Your GitHub Viewed state has not been changed.');
+  for (const [index, file] of progress.files.entries()) {
+    const captured = identity.inventory[index];
+    const editIds = new Set(captured.edits.map(edit => edit.id));
+    if (!file || file.path !== captured.path || !Array.isArray(file.checkedIds) || new Set(file.checkedIds).size !== file.checkedIds.length || file.checkedIds.some(id => !editIds.has(id)) || ![null, true, false].includes(file.nativeViewed) || ![null, true, false].includes(file.pendingViewed) || !Number.isSafeInteger(file.generation) || file.generation < 0 || file.pendingViewed !== null && (!editIds.size || file.pendingViewed !== (file.checkedIds.length === editIds.size))) throw new Error('Saved block-review progress is invalid. Your GitHub Viewed state has not been changed.');
+  }
+  return progress;
+}
+
+async function handleBlockProgress(message, sender) {
+  const session = jobs.get(sender.tab.id);
+  const currentSession = () => jobs.get(sender.tab.id) === session && !session?.disposed && pullRequestUrl(session?.snapshot?.url) === pullRequestUrl(sender.url) && session.snapshot.baseSha === message.baseSha && session.snapshot.headSha === message.headSha;
+  if (!currentSession()) throw new Error('Block-review progress does not match this captured pull request. Reopen its review.');
+  session.blockProgressIdentity ??= blockProgressIdentity(session);
+  const identity = await session.blockProgressIdentity;
+  if (message.type !== 'get-block-progress' && message.key !== identity.key) throw new Error('Block-review progress does not match these captured blocks. Reopen its review.');
+  const previous = blockProgressWrites.get(identity.key) ?? Promise.resolve();
+  const update = previous.catch(() => {}).then(async () => {
+    await storageReady;
+    if (!currentSession()) throw new Error('The captured pull request changed before block-review progress could be saved.');
+    let stored;
+    try { stored = (await chrome.storage.local.get(identity.key))[identity.key]; }
+    catch { throw new Error('Could not read block-review progress from local browser storage. Retry to restore your checklist.'); }
+    const progress = stored !== undefined ? structuredClone(validateBlockProgress(stored, identity)) : {
+      key: identity.key, version: 0,
+      files: identity.inventory.map(file => ({ path: file.path, checkedIds: [], nativeViewed: null, pendingViewed: null, generation: 0 }))
+    };
+    let changed = false;
+    if (message.type !== 'get-block-progress') {
+      const file = progress.files.find(file => file.path === message.path);
+      const captured = identity.inventory.find(file => file.path === message.path);
+      if (!file || !captured) throw new Error('Block-review progress references a file outside this captured pull request.');
+      const before = JSON.stringify(file);
+      if (message.type === 'set-block-reviewed') {
+        if (typeof message.checked !== 'boolean' || !captured.edits.some(edit => edit.id === message.editId)) throw new Error('Block-review progress references an unknown block or checked state.');
+        const checkedIds = new Set(file.checkedIds);
+        if (message.checked) checkedIds.add(message.editId);
+        else checkedIds.delete(message.editId);
+        file.checkedIds = captured.edits.filter(edit => checkedIds.has(edit.id)).map(edit => edit.id);
+        const viewed = captured.edits.length > 0 && checkedIds.size === captured.edits.length;
+        file.pendingViewed = viewed === file.nativeViewed ? null : viewed;
+      } else if (message.type === 'observe-file-viewed') {
+        if (typeof message.viewed !== 'boolean' || typeof message.manual !== 'boolean') throw new Error('Viewed observations must include a boolean state and origin.');
+        if (message.manual || file.pendingViewed === null && (message.viewed || file.nativeViewed === true)) {
+          file.checkedIds = message.viewed ? captured.edits.map(edit => edit.id) : [];
+          file.pendingViewed = null;
+        }
+        file.nativeViewed = message.viewed;
+      } else if (message.type === 'confirm-file-viewed') {
+        if (typeof message.viewed !== 'boolean' || !Number.isSafeInteger(message.generation) || message.generation < 0) throw new Error('Viewed confirmation must identify its requested state.');
+        if (file.generation === message.generation && file.pendingViewed === message.viewed) {
+          file.nativeViewed = message.viewed;
+          file.pendingViewed = null;
+        }
+      }
+      changed = JSON.stringify(file) !== before;
+      if (changed) {
+        if (message.type === 'set-block-reviewed' || message.type === 'observe-file-viewed' && message.manual) file.generation++;
+        progress.version++;
+      }
+    }
+    if (!currentSession()) throw new Error('The captured pull request changed before block-review progress could be saved.');
+    if (changed) {
+      try { await chrome.storage.local.set({ [identity.key]: progress }); }
+      catch { throw new Error('Could not save block-review progress locally. Retry saving your checklist before reloading.'); }
+    }
+    const response = { progress };
+    if (changed) {
+      for (const job of jobs.values()) {
+        if (job.blockProgressKey === identity.key) job.send({ type: 'block-progress', baseSha: session.snapshot.baseSha, headSha: session.snapshot.headSha, ...response });
+      }
+    }
+    return response;
+  });
+  blockProgressWrites.set(identity.key, update);
+  try { return await update; }
+  finally { if (blockProgressWrites.get(identity.key) === update) blockProgressWrites.delete(identity.key); }
+}
+
 async function handleMessage(message, sender) {
   if (!isOptions(sender) && !isPullRequest(sender)) throw new Error('This page cannot use PRiorities.');
+  if (['get-block-progress', 'set-block-reviewed', 'observe-file-viewed', 'confirm-file-viewed'].includes(message?.type)) {
+    if (!isPullRequest(sender)) throw new Error('Only a captured pull request can update block-review progress.');
+    return handleBlockProgress(message, sender);
+  }
   if (message?.type === 'get-settings') {
     if (message.provider !== undefined && !isOptions(sender)) throw new Error('Only the settings page can select the provider.');
     if (message.provider !== undefined && !['codex', 'claude'].includes(message.provider)) throw new Error('Choose Codex or Claude Code.');
@@ -159,6 +253,7 @@ function createSession(tabId, url, port) {
       job.detach();
     }
   };
+  job.send = send;
 
   function setFileState(entry, state, message) {
     entry.state = state;

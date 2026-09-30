@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PRiorities reading comparison</title>
+  <style>
+    :root { color-scheme: light dark; --bg: light-dark(#ffffff, #171719); --surface: light-dark(#f7f7f8, #202023); --text: light-dark(#202124, #eeeeef); --muted: light-dark(#65666b, #aaabb1); --line: light-dark(#dedee3, #414148); --added: light-dark(#eaf6ee, #193125); --deleted: light-dark(#fff0ef, #382123); --focus: light-dark(#155abd, #91bcff); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button, select, input, textarea { border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
+    button { padding: 7px 12px; cursor: pointer; text-align: left; }
+    button:hover, button[aria-pressed="true"] { background: var(--surface); }
+    button.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+    button:disabled { opacity: .5; cursor: default; }
+    a { color: var(--focus); text-underline-offset: 3px; }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+    [hidden] { display: none !important; }
+    h1 { font-size: 26px; font-weight: 600; line-height: 1.3; margin: 0 0 18px; }
+    h2 { font-size: 21px; font-weight: 550; line-height: 1.4; margin: 0 0 16px; }
+    h3 { font-size: 16px; font-weight: 600; margin: 22px 0 5px; }
+    p { margin: 0 0 16px; max-width: 78ch; }
+    .muted, .meta { color: var(--muted); }
+    .meta { font-size: 13px; }
+    .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
+    .chrome { border-bottom: 1px solid var(--line); padding: 12px 24px; justify-content: space-between; background: var(--surface); }
+    .shell { max-width: 1480px; margin: auto; }
+    .start { max-width: 780px; padding: 44px 24px; margin: auto; }
+    .start ol { padding-left: 24px; margin: 22px 0; }
+    .start li { margin-bottom: 8px; }
+    label { display: block; margin: 18px 0; }
+    select, input { padding: 7px 9px; max-width: 100%; }
+    label select { display: block; margin-top: 8px; }
+    .intro, .controls, .navigation, .full-diff, .answers { padding: 22px 26px; }
+    .intro { border-bottom: 1px solid var(--line); }
+    .intro h1 { font-size: 23px; }
+    .description { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .controls, .navigation { border-bottom: 1px solid var(--line); }
+    .controls { padding-top: 14px; padding-bottom: 14px; }
+    .controls details { width: 100%; }
+    .controls input { min-width: 0; flex: 1; }
+    .controls details .row { margin-top: 10px; }
+    summary { cursor: pointer; }
+    .guide-summary { padding: 24px 26px 0; }
+    .navigation { display: grid; gap: 7px; }
+    .navigation button { width: 100%; }
+    .priority { display: inline-block; font-size: 12px; color: var(--muted); margin-left: 8px; }
+    .section { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.2fr); gap: 30px; padding: 26px; }
+    .section > * { min-width: 0; }
+    .section p { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .check { border-left: 2px solid var(--text); padding-left: 14px; margin: 22px 0; }
+    .check h3 { margin-top: 0; }
+    .file { border: 1px solid var(--line); border-radius: 5px; margin-bottom: 18px; overflow: hidden; }
+    .file-header { padding: 10px 12px; background: var(--surface); overflow-wrap: anywhere; }
+    .file-links { padding: 8px 12px; border-top: 1px solid var(--line); }
+    .file-links button { padding: 2px 7px; font-size: 13px; }
+    .code { overflow: auto; font: 12px/1.75 'SFMono-Regular', Consolas, monospace; padding: 7px 0; }
+    .code-row { display: grid; grid-template-columns: 4em 4em 1.5em minmax(max-content, 1fr); min-width: max-content; }
+    .code-row[data-kind="add"] { background: var(--added); }
+    .code-row[data-kind="delete"] { background: var(--deleted); }
+    .line-number { text-align: right; padding-right: 10px; color: var(--muted); text-decoration: none; }
+    .sign { color: var(--muted); }
+    .source-text { white-space: pre; padding-right: 16px; }
+    .gap { background: var(--surface); color: var(--muted); padding: 4px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .section-controls { padding: 0 26px 26px; justify-content: space-between; }
+    .answers { border-top: 1px solid var(--line); max-width: 960px; margin: auto; }
+    .answers label { font-weight: 500; }
+    textarea { display: block; width: 100%; min-height: 86px; padding: 9px 11px; margin-top: 8px; resize: vertical; font-weight: 400; }
+    .status { padding: 0 24px; color: var(--muted); }
+    .status:empty { display: none; }
+    .results { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 13px; }
+    .notice { padding: 12px 26px; border-bottom: 1px solid var(--line); background: var(--surface); }
+    @media (max-width: 800px) { .section { grid-template-columns: minmax(0, 1fr); gap: 12px; } }
+    @media (max-width: 480px) { .chrome, .intro, .controls, .navigation, .section, .full-diff, .answers, .guide-summary, .notice { padding-left: 14px; padding-right: 14px; } h1 { font-size: 23px; } .section-controls { padding-left: 14px; padding-right: 14px; } textarea { font-size: 16px; } }
+    @media (pointer: coarse) { button, select, summary, input { min-height: 44px; } }
+  </style>
+</head>
+<body>
+  <header class="chrome row"><strong>PRiorities</strong><span>Reading comparison</span><button id="download" type="button">Download results</button></header>
+  <p id="storage-status" class="status" role="status"></p>
+  <main id="app" class="shell"></main>
+  <script id="evaluation-data" type="application/json">EVALUATION_DATA_PLACEHOLDER</script>
+  <script>
+    (() => {
+      const data = JSON.parse(document.getElementById('evaluation-data').textContent);
+      const sequence = [{ caseIndex: 0, view: 'guide' }, { caseIndex: 1, view: 'diff' }, { caseIndex: 0, view: 'diff' }, { caseIndex: 1, view: 'guide' }];
+      const questions = [
+        'What changes in behavior, before and after?',
+        'What role does each changed file play?',
+        'In what order should someone read this change, and what depends on what?',
+        'Which source lines are decisive evidence for your answers? Give the file, before/after side and line numbers.',
+        'What still needs checking before you would accept this change?'
+      ];
+      const storageKey = `priorities-reading-${data.id}`;
+      const freshState = () => ({ version: 1, evaluationId: data.id, createdAt: new Date().toISOString(), familiarity: {}, sessions: [], current: 0 });
+      let state = freshState();
+      let storageFailure = false;
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey));
+        if (saved && saved.evaluationId === data.id && Array.isArray(saved.sessions) && Number.isInteger(saved.current)) state = saved;
+      } catch { storageFailure = true; }
+      const app = document.getElementById('app');
+      const currentSession = () => state.sessions[state.current];
+      const currentCase = () => data.cases[sequence[state.current].caseIndex];
+      const viewName = view => view === 'guide' ? 'Guide' : 'Full captured diff';
+      const identity = item => item.snapshot.url.replace('https://github.com/', '').replace('/pull/', ' #');
+      function element(tag, text, className) {
+        const node = document.createElement(tag);
+        if (text !== undefined) node.textContent = text;
+        if (className) node.className = className;
+        return node;
+      }
+      function button(text, action, className) {
+        const node = element('button', text, className);
+        node.type = 'button';
+        node.addEventListener('click', action);
+        return node;
+      }
+      function save() {
+        try { localStorage.setItem(storageKey, JSON.stringify(state)); }
+        catch { storageFailure = true; }
+        document.getElementById('storage-status').textContent = storageFailure ? 'This browser could not save progress. Keep this page open and download your results before closing it.' : '';
+      }
+      function elapsed(session) { return Math.max(0, (session.finishedAt ?? Date.now()) - session.startedAt); }
+      function formatTime(ms) { return `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`; }
+      function exportResults() {
+        return JSON.parse(JSON.stringify({
+          ...state, exportedAt: new Date().toISOString(), questions,
+          cases: data.cases.map(item => ({ label: item.label, url: item.snapshot.url, baseSha: item.snapshot.baseSha, headSha: item.snapshot.headSha })),
+          protocol: { sequence, surfaces: 'Guide baseline template versus full captured diff; neither includes GitHub review threads.', timing: 'Elapsed wall time from ready content to submitted answers, including reading, answer entry, departures and interruptions. Model latency excluded.', departureRule: 'Switch away from the assigned surface, open pinned source, or explicitly log another page. Returning and internal section/file navigation are not departures. Window blur is not counted.', limitations: ['A single reader revisits each PR. Later sessions reflect prior reading.', 'Two different PRs and a small sample cannot establish a general speed advantage.', 'Manual visits to other pages must be logged by the reader.'] },
+          sessions: state.sessions.map(session => ({ ...session, elapsedMs: session.startedAt ? elapsed(session) : null, departureCount: session.departures.length }))
+        }));
+      }
+      window.__guideEvaluationExport = exportResults;
+      document.getElementById('download').addEventListener('click', () => {
+        const link = element('a');
+        link.href = URL.createObjectURL(new Blob([JSON.stringify(exportResults(), null, 2)], { type: 'application/json' }));
+        link.download = 'priorities-reading-results.json';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      });
+      function departure(destination, kind) {
+        const session = currentSession();
+        if (!session || session.finishedAt || !session.startedAt) return;
+        session.departures.push({ at: Date.now(), destination, kind, fromView: session.activeView });
+        save();
+      }
+      function sourceLink(item, file, side, startLine, endLine, label) {
+        const sha = side === 'before' ? item.snapshot.baseSha : item.snapshot.headSha;
+        const repo = item.snapshot.url.split('/pull/')[0];
+        const path = file.split('/').map(encodeURIComponent).join('/');
+        const anchor = startLine ? `#L${startLine}${endLine > startLine ? `-L${endLine}` : ''}` : '';
+        const link = element('a', label);
+        link.href = `${repo}/blob/${sha}/${path}${anchor}`;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.addEventListener('click', () => departure(link.href, 'source'));
+        link.addEventListener('auxclick', event => { if (event.button === 1) departure(link.href, 'source'); });
+        return link;
+      }
+      function codeRows(item, path, rows) {
+        const code = element('div', undefined, 'code');
+        code.setAttribute('role', 'region');
+        code.setAttribute('aria-label', `Source for ${path}; old line, new line, change, code`);
+        code.tabIndex = 0;
+        for (const row of rows) {
+          if (row.type === 'marker' || row.type === 'gap') { code.append(element('div', row.text, 'gap')); continue; }
+          const line = element('div', undefined, 'code-row');
+          line.dataset.kind = row.type;
+          for (const [key, side] of [['oldLine', 'before'], ['newLine', 'after']]) {
+            const number = row[key] == null ? element('span', '', 'line-number') : sourceLink(item, path, side, row[key], row[key], String(row[key]));
+            number.className = 'line-number';
+            if (row[key] != null) number.setAttribute('aria-label', `Open ${side} line ${row[key]} in source`);
+            line.append(number);
+          }
+          line.append(element('span', row.type === 'add' ? '+' : row.type === 'delete' ? '−' : ' ', 'sign'), element('span', row.text, 'source-text'));
+          code.append(line);
+        }
+        return code;
+      }
+      function fileBox(item, path, rows, caption, range) {
+        const file = element('div', undefined, 'file');
+        file.append(element('div', `${path}${caption ? ` · ${caption}` : ''}`, 'file-header'), codeRows(item, path, rows));
+        const links = element('div', undefined, 'file-links row');
+        for (const side of range ? [range.side] : ['before', 'after']) links.append(sourceLink(item, path, side, range?.startLine, range?.endLine, `Open ${side} source`));
+        file.append(links);
+        return file;
+      }
+      function allRows(file) { return file.hunks.flatMap(hunk => [{ type: 'gap', text: hunk.header }, ...hunk.items.flatMap(item => item.type === 'edit' ? item.rows : [item])]); }
+      function renderGuide(item, container) {
+        container.append(element('p', item.analysis.summary, 'guide-summary'));
+        const nav = element('nav', undefined, 'navigation');
+        nav.setAttribute('aria-label', 'Guide sections');
+        const session = currentSession();
+        item.analysis.topics.forEach((topic, index) => {
+          const entry = button(`${index + 1}. ${topic.title}`, () => { session.section = index; save(); renderReading(); document.getElementById('section-title').focus(); });
+          entry.append(element('span', topic.priority === 'review' ? 'Review' : 'Supporting', 'priority'));
+          entry.setAttribute('aria-pressed', String(index === session.section));
+          nav.append(entry);
+        });
+        container.append(nav);
+        const topic = item.analysis.topics[session.section];
+        const section = element('section', undefined, 'section');
+        const prose = element('div');
+        const title = element('h2', topic.title);
+        title.id = 'section-title'; title.tabIndex = -1;
+        prose.append(element('p', `Section ${session.section + 1} of ${item.analysis.topics.length}`, 'meta'), title);
+        for (const [field, heading] of [['before', 'Before'], ['after', 'After'], ['reason', 'Why it matters'], ['question', 'Check during review'], ['uncertainty', 'Uncertainty'], ['evidenceSummary', 'Evidence']]) {
+          if (!topic[field]) continue;
+          const block = element('div', undefined, field === 'question' ? 'check' : '');
+          block.append(element('h3', heading), element('p', topic[field]));
+          prose.append(block);
+        }
+        const evidence = element('div');
+        for (const excerpt of topic.excerpts) evidence.append(fileBox(item, excerpt.path, excerpt.rows, `${excerpt.side}, lines ${excerpt.startLine}–${excerpt.endLine}`, excerpt));
+        if (!topic.excerpts.length) {
+          for (const file of item.snapshot.files) {
+            const edits = file.hunks.flatMap(hunk => hunk.items).filter(edit => edit.type === 'edit' && topic.editIds.includes(edit.id));
+            if (!edits.length) continue;
+            const rows = edits.flatMap((edit, index) => index ? [{ type: 'gap', text: '… other captured rows omitted …' }, ...edit.rows] : edit.rows);
+            evidence.append(fileBox(item, file.path, rows, 'Assigned edits'));
+          }
+        }
+        const assignedPaths = item.snapshot.files.filter(file => file.hunks.some(hunk => hunk.items.some(edit => edit.type === 'edit' && topic.editIds.includes(edit.id)))).map(file => file.path);
+        const assigned = element('p', `Files in this section: ${assignedPaths.join(', ')}`, 'meta');
+        evidence.append(assigned, button('See all captured diff rows', () => switchView('diff')));
+        section.append(prose, evidence); container.append(section);
+        const nextPrev = element('div', undefined, 'section-controls row');
+        for (const [label, offset] of [['Previous section', -1], ['Next section', 1]]) {
+          const control = button(label, () => { session.section += offset; save(); renderReading(); document.getElementById('section-title').focus(); });
+          control.disabled = session.section + offset < 0 || session.section + offset >= item.analysis.topics.length;
+          nextPrev.append(control);
+        }
+        container.append(nextPrev);
+      }
+      function renderDiff(item, container) {
+        const full = element('div', undefined, 'full-diff');
+        const fileList = element('nav', undefined, 'row');
+        fileList.setAttribute('aria-label', 'Changed files');
+        item.snapshot.files.forEach((file, index) => fileList.append(button(file.path, () => document.getElementById(`diff-file-${index}`).scrollIntoView({ block: 'start' }))));
+        full.append(fileList, element('p', 'Old line numbers are on the left; new line numbers are on the right. Omitted source between hunks was not captured.', 'meta'));
+        item.snapshot.files.forEach((file, index) => {
+          const box = fileBox(item, file.path, allRows(file));
+          box.id = `diff-file-${index}`;
+          if (!file.hunks.length) box.append(element('p', 'No source rows were captured for this file.', 'meta'));
+          full.append(box);
+        });
+        for (const source of item.snapshot.context) {
+          const details = element('details');
+          details.append(element('summary', `Additional captured source: ${source.path} (${source.side})`));
+          const lines = source.text.split('\n');
+          if (lines.at(-1) === '') lines.pop();
+          details.append(codeRows(item, source.path, lines.map((text, index) => ({ type: 'context', text, oldLine: source.side === 'before' ? index + 1 : null, newLine: source.side === 'after' ? index + 1 : null }))));
+          full.append(details);
+        }
+        container.append(full);
+      }
+      function switchView(view) {
+        const session = currentSession();
+        if (view === session.activeView) return;
+        if (view !== session.assignedView) departure(viewName(view), 'alternate-view');
+        session.activeView = view; save(); renderReading();
+        document.getElementById('reading-title').focus();
+      }
+      function renderAnswers(container) {
+        const session = currentSession();
+        const form = element('form', undefined, 'answers');
+        form.id = 'answers';
+        form.append(element('h2', 'Your answers'), element('p', 'Brief answers are enough. Write “not sure” where needed; keep reading or use source links whenever useful.', 'muted'));
+        questions.forEach((question, index) => {
+          const label = element('label', question);
+          const input = element('textarea');
+          input.name = `answer-${index}`; input.required = true; input.value = session.answers[index] ?? '';
+          input.addEventListener('input', () => { session.answers[index] = input.value; save(); });
+          label.append(input); form.append(label);
+        });
+        const label = element('label', 'How far did you get?');
+        const status = element('select');
+        status.name = 'completion';
+        for (const [value, text] of [['answered', 'I can answer the questions'], ['incomplete', 'I am stopping with gaps in my understanding']]) {
+          const option = element('option', text); option.value = value; status.append(option);
+        }
+        status.value = session.completion ?? 'answered';
+        status.addEventListener('change', () => { session.completion = status.value; save(); });
+        label.append(status); form.append(label);
+        const submit = element('button', 'Submit answers and stop timer', 'primary'); submit.type = 'submit';
+        submit.disabled = !session.startedAt;
+        form.append(submit);
+        form.addEventListener('submit', event => {
+          event.preventDefault();
+          if (!session.startedAt || session.finishedAt) return;
+          session.finishedAt = Date.now(); session.completion = status.value;
+          if (session.interruptions.at(-1)?.endedAt === null) session.interruptions.at(-1).endedAt = session.finishedAt;
+          save(); render(); window.scrollTo(0, 0);
+        });
+        container.append(form);
+      }
+      function renderReading() {
+        app.replaceChildren();
+        const item = currentCase(); const session = currentSession();
+        const intro = element('div', undefined, 'intro');
+        intro.append(element('p', `Session ${state.current + 1} of 4 · Case ${item.label} · Started in ${viewName(session.assignedView)}`, 'meta'));
+        const title = element('h1', item.snapshot.title); title.id = 'reading-title'; title.tabIndex = -1;
+        intro.append(title, element('p', `${identity(item)} · ${item.snapshot.baseSha.slice(0, 7)} → ${item.snapshot.headSha.slice(0, 7)}`, 'meta'));
+        const description = element('details'); description.open = true;
+        description.append(element('summary', 'Pull request description'), element('p', item.snapshot.description || 'No description supplied.', 'description'));
+        intro.append(description);
+        for (const warning of item.snapshot.warnings) intro.append(element('p', warning, 'meta'));
+        app.append(intro);
+        const controls = element('div', undefined, 'controls row');
+        controls.append(element('strong', viewName(session.activeView)));
+        const timer = element('span', '', 'meta'); timer.id = 'timer'; controls.append(timer);
+        controls.append(button(`Open ${viewName(session.activeView === 'guide' ? 'diff' : 'guide')}`, () => switchView(session.activeView === 'guide' ? 'diff' : 'guide')));
+        controls.append(button('Go to answers', () => document.getElementById('answers').scrollIntoView({ block: 'start' })));
+        const interrupt = button(session.interruptions.at(-1)?.endedAt === null ? 'End interruption' : 'Log interruption', () => {
+          const last = session.interruptions.at(-1);
+          if (last?.endedAt === null) last.endedAt = Date.now();
+          else session.interruptions.push({ startedAt: Date.now(), endedAt: null });
+          save(); renderReading();
+        });
+        controls.append(interrupt);
+        const outside = element('details'); outside.append(element('summary', 'Used another page to help answer?'));
+        const row = element('div', undefined, 'row');
+        const destination = element('input'); destination.placeholder = 'Page or destination'; destination.setAttribute('aria-label', 'Other page destination');
+        const logged = element('span', '', 'meta'); logged.setAttribute('role', 'status');
+        row.append(destination, button('Log visit', () => { if (!destination.value.trim()) { destination.focus(); return; } departure(destination.value.trim(), 'other-page'); destination.value = ''; logged.textContent = 'Visit recorded.'; }), logged);
+        outside.append(row); controls.append(outside); app.append(controls);
+        app.append(element('p', 'Captured source only. GitHub comments and review controls are not included. Source links open pinned commits; visits and alternate views are counted.', 'notice meta'));
+        if (session.activeView === 'guide') renderGuide(item, app); else renderDiff(item, app);
+        renderAnswers(app); updateTimer();
+      }
+      function updateTimer() {
+        const timer = document.getElementById('timer'); const session = currentSession();
+        if (timer && session) timer.textContent = session.startedAt ? `${formatTime(elapsed(session))} elapsed · ${session.departures.length} visits outside the assigned view` : 'Preparing timer…';
+      }
+      function startSession(familiarity) {
+        const step = sequence[state.current];
+        if (familiarity) state.familiarity[step.caseIndex] = familiarity;
+        state.sessions[state.current] = { caseLabel: currentCase().label, assignedView: step.view, activeView: step.view, section: 0, repeatReading: state.current > 1, startedAt: null, finishedAt: null, answers: [], completion: 'answered', departures: [], interruptions: [] };
+        renderReading();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          currentSession().startedAt = Date.now(); save();
+          document.querySelector('#answers button[type="submit"]').disabled = false;
+          updateTimer(); document.getElementById('reading-title').focus();
+        }));
+      }
+      function render() {
+        app.replaceChildren();
+        if (state.current >= sequence.length) {
+          const done = element('section', undefined, 'start');
+          done.append(element('h1', 'Reading comparison complete'), element('p', 'Download the results and return to the conversation. Your answers and measurements are saved in this browser.'), element('p', 'The later sessions include prior knowledge of each PR. These results help compare the views but cannot establish a general speed advantage.', 'muted'));
+          state.sessions.forEach((session, index) => done.append(element('p', `Session ${index + 1}: case ${session.caseLabel}, ${viewName(session.assignedView)} — ${formatTime(elapsed(session))}, ${session.departures.length} departures${session.repeatReading ? ', repeated reading' : ''}.`)));
+          app.append(done); return;
+        }
+        const session = currentSession();
+        if (session?.startedAt && !session.finishedAt) { renderReading(); return; }
+        const start = element('section', undefined, 'start');
+        if (session?.finishedAt) {
+          start.append(element('h1', 'Answers saved'), element('p', `${formatTime(elapsed(session))} elapsed, with ${session.departures.length} visits outside the assigned view.`));
+          start.append(button(state.current === 3 ? 'Finish comparison' : 'Continue to next session', () => { state.current++; save(); render(); window.scrollTo(0, 0); }, 'primary'));
+          app.append(start); return;
+        }
+        const item = currentCase(); const step = sequence[state.current];
+        start.append(element('h1', `Session ${state.current + 1} of 4`), element('p', `Case ${item.label}: ${identity(item)}. You will start with ${viewName(step.view)}.`));
+        start.append(element('p', 'Read until you can answer these five questions. Then submit your answers to stop the timer. Switching sections or files stays within the view; source links, alternate views and other pages count as departures.'));
+        const list = element('ol'); questions.forEach(question => list.append(element('li', question))); start.append(list);
+        start.append(element('p', 'All four sessions use this sequence: A Guide, B Full captured diff, A Full captured diff, B Guide. Later sessions are repeated readings. Reading, writing answers and time away from this page all count; log unrelated interruptions separately.', 'muted'));
+        if (state.current < 2) {
+          const label = element('label', 'Before this exercise, had you read this pull request?');
+          const familiar = element('select');
+          for (const [value, text] of [['', 'Choose one'], ['unfamiliar', 'No, this PR is unfamiliar'], ['familiar', 'Yes, I have read it'], ['unsure', 'I am not sure']]) { const option = element('option', text); option.value = value; familiar.append(option); }
+          label.append(familiar); start.append(label);
+          const startButton = button('Start reading', () => startSession(familiar.value), 'primary'); startButton.disabled = true;
+          familiar.addEventListener('change', () => { startButton.disabled = !familiar.value; });
+          start.append(startButton);
+        } else {
+          start.append(element('p', 'This is your second reading of this PR. Your earlier answers stay hidden during this session.', 'muted'), button('Start reading', () => startSession(), 'primary'));
+        }
+        app.append(start);
+      }
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') save(); });
+      window.addEventListener('pagehide', save);
+      setInterval(updateTimer, 1000);
+      render();
+      if (storageFailure) save();
+    })();
+  </script>
+</body>
+</html>

@@ -85,21 +85,23 @@ if (mode === 'generated-final-failed' && !schema.required.includes('edits')) pro
 const evidence = JSON.parse(input);
 let labels = ${JSON.stringify(classifications)};
 let review = ${JSON.stringify(assessment)};
-if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-final-failed' || mode === 'many-decisions' || mode === 'priority-order') {
+if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-final-failed' || mode === 'many-decisions' || mode === 'guide-sections') {
   labels = evidence.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => ({editId:item.id,kinds:['behavior'],reason:'Synthetic change.',uncertainty:''}))));
   review = { summary:'Synthetic parallel review.', topics:[{...review.topics[0],id:'parallel-change',priority:'supporting',title:'Synthetic supporting changes',editIds:labels.map(entry=>entry.editId),excerpts:[]}] };
 }
-if (mode === 'priority-order') {
-  const ids = index => evidence.files[index].hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => item.id));
-  const unknown = new Set(evidence.files.filter(file => file.path === 'tests/change-2.ts').flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => item.id))));
+if (mode === 'guide-sections') {
+  const idsFor = file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => item.id));
+  const unknown = new Set(evidence.files.flatMap(file => file.path === 'tests/change-2.ts' ? idsFor(file) : file.path === 'tests/change-3.ts' ? idsFor(file).slice(2) : []));
   labels = labels.map(label => unknown.has(label.editId) ? {...label, kinds:['unknown'], uncertainty:'The external caller contract is unavailable.'} : label);
   if (!schema.required.includes('edits')) {
-    const topic = (id, title, priority, indices) => ({...review.topics[0], id, title, priority,
-      editIds:indices.flatMap(ids), excerpts:priority === 'review' ? indices.map(index => ({path:evidence.files[index].path, side:'after', startLine:1, endLine:1})) : []});
-    review.topics = [topic('supporting', 'Supporting cleanup', 'supporting', [0,4]),
-      {...topic('contract', 'Check the contract and its implementation', 'review', [2,4]), editIds:ids(2)},
-      topic('validation', 'Check the separate validation path', 'review', [3]),
-      {...topic('unknown', 'External caller contract', 'supporting', [1]), uncertainty:'The external caller contract is unavailable.'}];
+    const ids = index => idsFor(evidence.files[index]);
+    const topic = (id, title, priority, editIds, excerpts = []) => ({...review.topics[0], id, title, priority, editIds, excerpts});
+    review.topics = [
+      topic('supporting', 'Supporting setup', 'supporting', [...ids(0), ...ids(4), ids(2)[0]]),
+      topic('contract', 'Check the contract and its implementation', 'review', [ids(2)[1]], [{path:evidence.files[2].path,side:'after',startLine:3,endLine:3},{path:evidence.files[4].path,side:'before',startLine:1,endLine:1}]),
+      topic('validation', 'Check the separate validation path', 'review', ids(3), [{path:evidence.files[3].path,side:'after',startLine:1,endLine:1}]),
+      {...topic('unknown', 'External caller contract', 'supporting', [...ids(1), ids(2)[2]]), uncertainty:'The external caller contract is unavailable.'}
+    ];
   }
 }
 if (mode === 'many-decisions') {
@@ -284,11 +286,29 @@ async function handleEvent(message) {
         route.diffContents = route.diffContents.slice(0,3);
       }
       if (changesMode === 'many-decisions') route.diffSummaries = route.diffSummaries.slice(0,5);
-      if (changesMode === 'priority-order') route.diffSummaries = route.diffSummaries.slice(0,6);
+      if (changesMode === 'guide-sections') {
+        route.diffSummaries = route.diffSummaries.slice(0,6);
+        const file = route.diffContents[2];
+        file.linesAdded = 3;
+        file.linesDeleted = 3;
+        file.linesChanged = 6;
+        file.diffLines = [{type:'HUNK',text:'@@ -1,5 +1,5 @@'},
+          {type:'DELETION',text:'-before prerequisite',left:1,right:0}, {type:'ADDITION',text:'+after prerequisite',left:1,right:1},
+          {type:'CONTEXT',text:' unchanged context',left:2,right:2},
+          {type:'DELETION',text:'-before contract',left:3,right:2}, {type:'ADDITION',text:'+after contract',left:3,right:3},
+          {type:'CONTEXT',text:' unchanged context',left:4,right:4},
+          {type:'DELETION',text:'-before external caller',left:5,right:4}, {type:'ADDITION',text:'+after external caller',left:5,right:5}];
+        Object.assign(route.diffSummaries[2], {linesAdded:3, linesDeleted:3, linesChanged:6});
+      }
       if (changesMode === 'all-generated') for (const entry of route.diffContents) entry.newTreeEntry = { isGenerated: true };
       if (changesMode === 'duplicate-summary') route.diffSummaries[4] = route.diffSummaries[0];
       if (changesMode === 'truncated-list') route.pageLimits.filesLimitExceeded = true;
       if (changesMode === 'inline-revision') route.diffContents[0].newCommitOid = '1'.repeat(40);
+      if (changesMode === 'inline-base-revision') route.diffContents[1].oldCommitOid = '1'.repeat(40);
+      if (changesMode === 'merge-base-context') {
+        route.diffContents = [{ ...route.diffContents[0], path: 'src/merge-base.ts' }];
+        route.diffSummaries = [{ ...route.diffSummaries[0], path: 'src/merge-base.ts' }];
+      }
       if (changesMode === 'deferred-large') {
         route.diffContents[0].isTooBig = true;
         route.diffContents[0].diffLines = [];
@@ -297,7 +317,7 @@ async function handleEvent(message) {
         route.diffContents[0].newTreeEntry = { isGenerated: true };
         route.diffContents[0].diffLines = [];
       }
-      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range', 'collapsed-first', 'priority-order'].includes(changesMode));
+      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range', 'collapsed-first', 'guide-sections'].includes(changesMode));
       if (changesMode === 'collapsed-first') {
         let index = 0;
         body = body.replace(/<table\b[^>]*>.*?<\/table>/gs, table => index++ < 2 ? '' : table);
@@ -306,7 +326,7 @@ async function handleEvent(message) {
       const paths = url.searchParams.get('paths').split(',').map(decodeURIComponent);
       const isRange = url.searchParams.get('range') === selectedRange;
       const entries = structuredClone((isRange ? rangeEntries : changes.entries).filter(entry => paths.includes(entry.path)));
-      if (changesMode === 'priority-order') for (const entry of entries) if (entry.path === changes.paths[5]) entry.newTreeEntry = { isGenerated: true };
+      if (changesMode === 'guide-sections') for (const entry of entries) if (entry.path === changes.paths[5]) entry.newTreeEntry = { isGenerated: true };
       if (isRange && paths.includes(changes.paths[0])) {
         entries[0].isTooBig = true;
         entries[0].diffLines = [];
@@ -320,6 +340,7 @@ async function handleEvent(message) {
         if (changesMode === 'duplicate') entries.push(entries[0]);
         if (changesMode === 'wrong-path') entries[0].path = 'tests/unrequested.ts';
         if (changesMode === 'wrong-revision') entries[0].newCommitOid = '1'.repeat(40);
+        if (changesMode === 'wrong-base-revision') entries[0].oldCommitOid = '1'.repeat(40);
         if (changesMode === 'truncated') entries[0].truncatedReason = 'SIZE';
         if (changesMode === 'deferred-large' && paths.length > 1) {
           entries[0].isTooBig = true;
@@ -406,7 +427,7 @@ try {
     }
     throw new Error('The installed extension execution context is unavailable.');
   };
-  await page('Page.addScriptToEvaluateOnNewDocument', { source: `
+  const reviewFixtureSource = `
     window.fixtureViewedClicks = 0;
     window.fixtureInstallReviewControl = (container, path, modern = false) => {
       const header = container.querySelector('.file-header, .diff-file-header');
@@ -431,7 +452,7 @@ try {
           control.setAttribute('aria-label', checked ? 'Viewed' : 'Not Viewed');
         }
         control.disabled = true;
-        setTimeout(() => {
+        const saveViewed = () => {
           const rollback = window.fixtureViewedRollback;
           window.fixtureViewedRollback = false;
           if (!rollback) {
@@ -444,7 +465,13 @@ try {
           replacement.querySelector('input.js-reviewed-checkbox, button[aria-pressed]')?.remove();
           header.replaceWith(replacement);
           window.fixtureInstallReviewControl(container, path, modern);
-        }, window.fixtureViewedDelay || 0);
+        };
+        if (window.fixtureHoldViewedPath === path) window.fixtureReleaseViewed = () => {
+          delete window.fixtureHoldViewedPath;
+          delete window.fixtureReleaseViewed;
+          saveViewed();
+        };
+        else setTimeout(saveViewed, window.fixtureViewedDelay || 0);
       });
       header.append(control);
     };
@@ -484,7 +511,8 @@ try {
         window.fixtureInstallReviewControl(file, path, true);
       }
     });
-  ` });
+  `;
+  await page('Page.addScriptToEvaluateOnNewDocument', {source:reviewFixtureSource});
   await page('Page.enable');
   await page('Runtime.enable');
   await page('Emulation.setDeviceMetricsOverride', { width: 1512, height: 1080, deviceScaleFactor: 1, mobile: false });
@@ -686,38 +714,38 @@ try {
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-progress').hidden`), true, 'Analysis keeps the file list closed until requested.');
   const initialLayout = await evaluate(`(() => {
     const overview = ${shadow};
-    const file = ${fileShadow};
     return {
-      height: document.querySelector('#review-focus-extension').getBoundingClientRect().height,
-      indexOpen: overview.querySelector('.rf-review-index').open,
       filesOpen: !overview.querySelector('.rf-file-progress').hidden,
-      visibleOverviewDecisions: [...overview.querySelectorAll('.rf-topic-body')].filter(node => node.checkVisibility()).length,
-      visibleFileDecisions: [...file.querySelectorAll('.rf-review > .rf-topic-body')].filter(node => node.checkVisibility()).length,
-      change: file.querySelector('.rf-change-explanation').textContent,
-      rationale: file.querySelector('.rf-reason').textContent,
-      limits: file.querySelector('.rf-uncertainty').textContent,
-      limitsVisible: file.querySelector('.rf-uncertainty').checkVisibility(),
-      questionVisible: Boolean(file.querySelector('.rf-question')?.checkVisibility()),
+      sections: overview.querySelectorAll('.rf-section-link').length,
+      panels: overview.querySelectorAll('.rf-guide-file').length,
+      change: overview.querySelector('.rf-change-explanation').textContent,
+      rationale: overview.querySelector('.rf-reason').textContent,
+      limits: overview.querySelector('.rf-uncertainty').textContent,
+      question: overview.querySelector('.rf-question').textContent,
       visibleActions: [...overview.querySelectorAll('button')].filter(node => node.checkVisibility()).map(node => node.textContent),
-      headerBadge: Boolean(document.querySelector('.file-header > .review-focus-file-status')?.shadowRoot.querySelector('.rf-file-state')?.checkVisibility()),
-      repeatedBrand: Boolean(file.querySelector('.rf-file-heading')),
-      visibleCode: [...overview.querySelectorAll('.rf-code'), ...file.querySelectorAll('.rf-code')].filter(node => node.checkVisibility()).length
+      nativeExplanation: ${fileShadow}.querySelector('.rf-change-explanation'),
+      visibleCode: [...overview.querySelectorAll('.rf-code')].filter(node => node.checkVisibility()).length,
+      blocks: overview.querySelectorAll('.rf-block-review input').length
     };
   })()`);
-  assert.ok(initialLayout.height <= 110, `The default toolbar should fit within 110px, got ${initialLayout.height}.`);
-  assert.equal(initialLayout.indexOpen, false);
   assert.equal(initialLayout.filesOpen, false);
-  assert.equal(initialLayout.visibleOverviewDecisions, 0, 'The overview must not duplicate the file explanations by default.');
-  assert.equal(initialLayout.visibleFileDecisions, 1, 'Important file explanations must be readable without opening a disclosure.');
+  assert.equal(initialLayout.sections, 1);
+  assert.equal(initialLayout.panels, 1, 'A section combines each file’s before and after in one panel.');
   assert.equal(initialLayout.change, assessment.topics[0].after);
   assert.equal(initialLayout.rationale, assessment.topics[0].reason);
-  assert.ok(initialLayout.limits.includes(assessment.topics[0].uncertainty));
-  assert.equal(initialLayout.visibleCode, 0, 'Native code must not be duplicated in the default annotations.');
-  assert.equal(initialLayout.limitsVisible, true, 'Evidence limits stay visible without opening Details.');
-  assert.equal(initialLayout.questionVisible, false, 'The review question is available on demand.');
-  assert.equal(initialLayout.headerBadge, true, 'AI status belongs inside GitHub’s file header.');
-  assert.equal(initialLayout.repeatedBrand, false, 'Each file must not add a separate branded status bar.');
-  assert.ok(!initialLayout.visibleActions.includes('Settings') && !initialLayout.visibleActions.includes('Run fresh review'), 'Secondary actions stay in the overflow menu.');
+  assert.equal(initialLayout.limits, assessment.topics[0].uncertainty);
+  assert.equal(initialLayout.question, assessment.topics[0].question);
+  assert.equal(initialLayout.nativeExplanation, null, 'Native files retain status only; explanations belong to Guide.');
+  assert.ok(initialLayout.visibleCode > 0, 'The Guide keeps evidence beside its explanation.');
+  assert.equal(initialLayout.blocks, 2, 'Separate continuous edit blocks have separate checkboxes.');
+  const sourceOnlyRows = await evaluate(`[...${shadow}.querySelectorAll('tr[data-outside-diff]')].map(row=>({oldLine:row.dataset.oldLine,newLine:Number(row.dataset.newLine),text:row.querySelector('.rf-code-text').textContent}))`);
+  assert.ok(sourceOnlyRows.length > 0, 'Captured full-file context remains reachable beyond the patch.');
+  for (const row of sourceOnlyRows) {
+    assert.equal(row.text, rawLines[row.newLine - 1], 'Source-only context must preserve the exact captured text and line.');
+    assert.equal(row.oldLine, '', 'An uncaptured before side must not acquire an invented line number.');
+  }
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-context-label').textContent.includes('Captured source outside the diff')`));
+  assert.ok(!initialLayout.visibleActions.includes('Settings') && !initialLayout.visibleActions.includes('Run fresh review'));
   await evaluate(`${shadow}.querySelector('.rf-menu > summary').focus()`);
   await page('Input.dispatchKeyEvent', {type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
   await page('Input.dispatchKeyEvent', {type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
@@ -732,93 +760,75 @@ try {
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-progress-toggle').getAttribute('aria-expanded') === 'true' && ${shadow}.querySelector('.rf-file-list').checkVisibility()`), true, 'The progress control exposes its file list accessibly.');
   await evaluate(`${shadow}.querySelector('.rf-progress-toggle').click()`);
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-progress-toggle').getAttribute('aria-expanded') === 'false' && ${shadow}.querySelector('.rf-file-progress').hidden`), true);
-  await evaluate(`${fileShadow}.querySelector('.rf-evidence > summary').click()`);
-  await waitFor(() => evaluate(`${fileShadow}.querySelector('.rf-code tr')?.checkVisibility()`), 'optional evidence without hiding the main explanation');
-  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-before').textContent`), `Before: ${assessment.topics[0].before}`);
-  assert.equal(await evaluate(`${fileShadow}.querySelectorAll('.rf-edit').length`), 2);
-  assert.ok(await evaluate(`${fileShadow}.querySelector('.rf-question').checkVisibility() && ${fileShadow}.querySelector('.rf-question').textContent.includes(${JSON.stringify(assessment.topics[0].question)})`), 'Details retains the complete review question.');
-  await evaluate(`${fileShadow}.querySelector('.rf-excerpt .rf-link-button').click()`);
-  assert.ok(await evaluate('document.querySelector(".review-focus-native-target")?.checkVisibility()'), 'Show in diff must reveal and identify the captured source in GitHub’s native rows.');
+  await evaluate(`${shadow}.querySelector('.rf-evidence > summary').click()`);
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-edit').length`), 2);
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-before').textContent`), assessment.topics[0].before);
+  await evaluate(`${shadow}.querySelector('.rf-guide-file .rf-file-links button').click()`);
+  await waitFor(() => evaluate('document.querySelector(".review-focus-native-target")?.checkVisibility()'), 'Show in diff reveals the captured native source');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-view-toggle [aria-pressed=true]').textContent`), 'Full diff');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0);
+  await click('Guide');
+  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length > 0'));
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'Guide never mutates individual native rows.');
   await evaluate('window.scrollTo(0,0)');
-
-  await evaluate(`${fileShadow}.querySelector('.rf-evidence > summary').click()`);
-  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length > 10'));
   await writeFile('/tmp/review-focus-extension-installed.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
   await page('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
-  const mobileLayout = await evaluate(`(() => {
-    const overview = document.querySelector('#review-focus-extension');
-    const file = ${fileShadow};
-    return {
-      overviewWidth: overview.getBoundingClientRect().width,
-      actionOverflow: ${shadow}.querySelector('.rf-actions').scrollWidth > ${shadow}.querySelector('.rf-actions').clientWidth,
-      explanationWidth: file.querySelector('.rf-change-explanation').getBoundingClientRect().width,
-      visibleCode: [...file.querySelectorAll('.rf-code')].filter(node => node.checkVisibility()).length
-    };
-  })()`);
-  assert.ok(mobileLayout.overviewWidth <= 390);
+  const mobileLayout = await evaluate(`({
+    width:document.querySelector('#review-focus-extension').getBoundingClientRect().width,
+    actionOverflow:${shadow}.querySelector('.rf-actions').scrollWidth > ${shadow}.querySelector('.rf-actions').clientWidth,
+    explanationWidth:${shadow}.querySelector('.rf-guide-explanation').getBoundingClientRect().width,
+    panelOverflow:${shadow}.querySelector('.rf-panel').scrollWidth > ${shadow}.querySelector('.rf-panel').clientWidth
+  })`);
+  assert.ok(mobileLayout.width <= 390);
   assert.equal(mobileLayout.actionOverflow, false);
   assert.ok(mobileLayout.explanationWidth <= 390);
-  assert.equal(mobileLayout.visibleCode, 0);
+  assert.equal(mobileLayout.panelOverflow, false, 'Long code scrolls within its panel on narrow screens.');
   await writeFile('/tmp/review-focus-extension-mobile.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
-  await evaluate("document.querySelector('.review-focus-file-progress').scrollIntoView({block:'start'})");
-  await writeFile('/tmp/review-focus-extension-mobile-file.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
   await page('Emulation.setDeviceMetricsOverride', { width: 1512, height: 1080, deviceScaleFactor: 1, mobile: false });
-  await evaluate('window.scrollTo(0,0)');
   await evaluate(`(() => {
     const style = document.createElement('style');
     style.id = 'fixture-dark-theme';
-    style.textContent = ':root{--bgColor-default:#0d1117;--bgColor-muted:#151b23;--fgColor-default:#f0f6fc;--fgColor-muted:#9198a1;--borderColor-default:#3d444d;--fgColor-accent:#4493f8;--diffBlob-additionLine-bgColor:#12261e;--diffBlob-deletionLine-bgColor:#331c1f}body{color:var(--fgColor-default);background:var(--bgColor-default)}.file{border-color:var(--borderColor-default)}.file-header{background:var(--bgColor-muted)}.blob-code-addition{background:var(--diffBlob-additionLine-bgColor)}.blob-code-hunk{background:#162536;color:var(--fgColor-muted)}a{color:var(--fgColor-accent)}';
+    style.textContent = ':root{--bgColor-default:#0d1117;--bgColor-muted:#151b23;--fgColor-default:#f0f6fc;--fgColor-muted:#9198a1;--borderColor-default:#3d444d;--fgColor-accent:#4493f8;--diffBlob-additionLine-bgColor:#12261e;--diffBlob-deletionLine-bgColor:#331c1f}body{color:var(--fgColor-default);background:var(--bgColor-default)}';
     document.head.append(style);
   })()`);
   await writeFile('/tmp/review-focus-extension-dark.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
   await evaluate("document.querySelector('#fixture-dark-theme').remove()");
-  console.log(`Compact review overview: ${initialLayout.height}px; explanations are visible beside the native diff.`);
-  assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-view-toggle button')].map(button=>button.textContent)`), ['Full diff', 'Explained', 'Folded']);
+  assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-view-toggle button')].map(button=>button.textContent)`), ['Full diff', 'Guide']);
   const requestsBeforeViews = (await modelRequests()).length;
-  await click('Explained');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'Explained must keep the full diff expanded.');
-  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-change-explanation').textContent`), assessment.topics[0].after);
-  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-reason').textContent`), assessment.topics[0].reason);
-  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-file-decisions').checkVisibility()`), true);
-  await writeFile('/tmp/priorities-explained.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
-  await evaluate(`window.viewEvidence = ${fileShadow}.querySelector('.rf-evidence'); window.viewEvidence.open = true;`);
-  await click('Folded');
-  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-evidence') === window.viewEvidence && window.viewEvidence.open`), true, 'Explained and Folded share the same explanations and preserve expanded details.');
-  await evaluate('window.viewEvidence.open = false');
+  await evaluate(`window.viewFold = ${shadow}.querySelector('.rf-fold'); window.viewFold.open = true`);
   await click('Full diff');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0);
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-result').checkVisibility()`), false);
-  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-file-decisions')`), null, 'Full diff removes the review explanations beside files.');
-  await click('Folded');
-  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length > 10'));
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0);
+  await click('Guide');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-fold') === window.viewFold && window.viewFold.open`), true, 'Returning to Guide preserves expanded context.');
   await evaluate(`${shadow}.querySelector('.rf-view-toggle [aria-pressed=true]').focus()`);
-  for (const [key, code, view] of [['ArrowLeft',37,'Explained'], ['Home',36,'Full diff'], ['End',35,'Folded'], ['ArrowRight',39,'Full diff'], ['ArrowLeft',37,'Folded']]) {
+  for (const [key, code, view] of [['ArrowLeft',37,'Full diff'], ['End',35,'Guide'], ['ArrowRight',39,'Full diff'], ['ArrowLeft',37,'Guide'], ['Home',36,'Full diff']]) {
     await page('Input.dispatchKeyEvent', {type:'keyDown',key,windowsVirtualKeyCode:code});
     await page('Input.dispatchKeyEvent', {type:'keyUp',key,windowsVirtualKeyCode:code});
-    assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-view-toggle button')].filter(button=>button.getAttribute('aria-pressed')==='true').map(button=>[button.textContent,button.tabIndex,button===${shadow}.activeElement])`), [[view,0,true]], 'Keyboard view selection must keep exactly one selected and focused control.');
+    assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-view-toggle button')].filter(button=>button.getAttribute('aria-pressed')==='true').map(button=>[button.textContent,button.tabIndex,button===${shadow}.activeElement])`), [[view,0,true]]);
   }
-  assert.equal((await modelRequests()).length, requestsBeforeViews, 'Switching between all three views must reuse the same analysis.');
+  assert.equal((await modelRequests()).length, requestsBeforeViews, 'Switching views must reuse the assessment.');
   await evaluate(`(() => {
-    window.commentedLine = document.querySelectorAll('.review-focus-native-hidden')[3];
+    window.commentedLine = document.querySelector('td[data-line-number]').closest('tr');
     window.classicThread = document.createElement('tr');
     window.classicThread.className = 'inline-comments';
-    window.classicThread.innerHTML = '<td colspan="3"><div class="review-thread-component">Check the behavior on this line.</div></td>';
+    window.classicThread.innerHTML = '<td colspan="3"><div class="review-thread-component">Check this behavior.</div><form><textarea>Unsubmitted review comment</textarea></form></td>';
     window.commentedLine.after(window.classicThread);
+    window.savedDraft = window.classicThread.querySelector('textarea');
   })()`);
-  await waitFor(() => evaluate('!window.commentedLine.classList.contains("review-focus-native-hidden")'), 'classic comment keeps its preceding code line visible');
-  assert.equal(await evaluate('window.classicThread.checkVisibility() && window.commentedLine.checkVisibility()'), true);
-  await click('Explained');
-  await click('Folded');
-  assert.equal(await evaluate('!window.commentedLine.classList.contains("review-focus-native-hidden")'), true, 'Switching views must preserve the code attached to a sibling review thread.');
+  await click('Guide');
+  assert.equal(await evaluate('window.classicThread.isConnected && window.savedDraft.value === "Unsubmitted review comment"'), true);
+  await click('Full diff');
+  assert.equal(await evaluate('window.classicThread.checkVisibility() && window.commentedLine.checkVisibility() && window.savedDraft.value === "Unsubmitted review comment"'), true, 'Full diff restores the original review thread and unsubmitted draft.');
   await evaluate('window.classicThread.remove()');
-  await waitFor(() => evaluate('window.commentedLine.classList.contains("review-focus-native-hidden")'), 'removed comment allows the supporting code to fold again');
+  await click('Guide');
 
-  const humanReviewInputs = `[...${shadow}.querySelectorAll('.rf-reviewed-toggle input')]`;
+  const humanReviewInputs = `[...${shadow}.querySelectorAll('.rf-file-list .rf-reviewed-toggle input')]`;
   assert.equal(await evaluate(`${fileShadow}.querySelector('input[type=checkbox]')`), null, 'The diff panel must not duplicate GitHub’s Viewed checkbox.');
   assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => [input.checked, input.indeterminate])`), [[false, false]], 'AI completion must not mark a file reviewed by the user.');
   assert.equal(await evaluate('window.fixtureViewedClicks'), 0);
   await evaluate(`(() => {
-    const root = ${fileShadow};
+    const root = ${shadow};
     root.querySelector('.rf-evidence').open = true;
     window.savedReviewEvidence = root.querySelector('.rf-evidence');
     if (${shadow}.querySelector('.rf-file-progress').hidden) ${shadow}.querySelector('.rf-progress-toggle').click();
@@ -829,9 +839,9 @@ try {
   await waitFor(() => evaluate(`${humanReviewInputs}.every(input => input.checked && input.getAttribute('aria-disabled') === 'false')`), 'file-list checkmark forwarded to GitHub');
   assert.equal(await evaluate('document.querySelector(".js-reviewed-checkbox").checked'), true);
   assert.equal(await evaluate('document.querySelectorAll(".file-header .review-focus-file-status").length'), 1, 'Replacing GitHub’s header must not duplicate the AI badge.');
-  assert.ok(await evaluate(`${fileBadge}.querySelector('.rf-file-state').checkVisibility()`), 'The live badge survives a native header replacement.');
+  assert.ok(await evaluate(`${fileBadge}.querySelector('.rf-file-state').isConnected`), 'The live badge survives a native header replacement.');
   assert.ok(await evaluate(`${shadow}.querySelector('.rf-progress-toggle').textContent.includes('Viewed 1/1')`));
-  assert.ok(await evaluate(`window.savedReviewEvidence.isConnected && window.savedReviewEvidence.open && !${fileShadow}.querySelector('.rf-file-decisions').checkVisibility()`), 'Marking a file keeps its evidence state while compacting the reviewed file.');
+  assert.ok(await evaluate(`window.savedReviewEvidence.isConnected && window.savedReviewEvidence.open`), 'Marking a file preserves the Guide and its evidence disclosure.');
   assert.equal(await evaluate(`${shadow}.activeElement?.type`), 'checkbox', 'The file-list checkbox retains keyboard focus after GitHub replaces its header.');
   await evaluate('document.querySelector(".js-reviewed-checkbox").click()');
   await waitFor(() => evaluate(`${humanReviewInputs}.every(input => !input.checked && input.getAttribute('aria-disabled') === 'false')`), 'native uncheck reflected in the file list');
@@ -869,14 +879,14 @@ try {
     const file = document.querySelector('.file');
     const replacement = file.cloneNode(true);
     replacement.querySelectorAll('[data-review-focus-owned]').forEach(node => node.remove());
-    replacement.querySelectorAll('.review-focus-native-hidden').forEach(row => row.classList.remove('review-focus-native-hidden'));
+    replacement.classList.remove('review-focus-native-surface-hidden');
     window.fileBeforeExtensionReload = file;
     file.replaceWith(replacement);
     document.dispatchEvent(new Event('pjax:end'));
   })()`);
   await waitFor(() => evaluate('!document.querySelector("#review-focus-extension")'), 'invalidated UI removed after a diff replacement');
-  assert.equal(await evaluate('document.querySelectorAll("[data-review-focus-owned], .review-focus-native-hidden").length'), 0, 'No stale panels or folded code may remain after extension invalidation.');
-  assert.equal(await evaluate('window.fileBeforeExtensionReload.querySelectorAll("[data-review-focus-owned], .review-focus-native-hidden").length'), 0, 'Cleanup also restores rows retained from the previous file rendering.');
+  assert.equal(await evaluate('document.querySelectorAll("[data-review-focus-owned], .review-focus-native-surface-hidden").length'), 0, 'No stale panels or folded code may remain after extension invalidation.');
+  assert.equal(await evaluate('window.fileBeforeExtensionReload.querySelectorAll("[data-review-focus-owned], .review-focus-native-surface-hidden").length'), 0, 'Cleanup also restores rows retained from the previous file rendering.');
   await evaluate(`(() => {
     window.dispatchEvent(new Event('focus'));
     window.dispatchEvent(new Event('popstate'));
@@ -902,7 +912,7 @@ try {
   await evaluate(`${shadow}.querySelector('.rf-reviewed-toggle input').click()`);
   await waitFor(() => evaluate(`${humanReviewInputs}.every(input => !input.checked && input.getAttribute('aria-disabled') === 'false')`), 'saved Viewed state can be undone after reload');
 
-  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length > 10'));
+  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length > 0'));
 
   await evaluate(`(() => {
     window.originalViewedControl = document.querySelector('.js-reviewed-checkbox');
@@ -918,22 +928,22 @@ try {
     })()`);
     await waitFor(() => evaluate(`${humanReviewInputs}.every(input => input.checked === ${checked})`), 'native checked-property change synchronized without an attribute mutation');
     assert.equal(await evaluate('window.propertyViewedControl.hasAttribute("checked")'), false, 'The native checkbox fixture must change only its checked property.');
-    assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-file-decisions').hidden`), checked);
+    await waitFor(() => evaluate(`[...${shadow}.querySelectorAll('.rf-block-review input')].every(input=>input.checked === ${checked})`), 'manual native Viewed updates every block');
   }
   await evaluate('window.propertyViewedControl.replaceWith(window.originalViewedControl)');
 
   const stableFolds = await evaluate(`(async () => {
-    const toggle = document.querySelector('.review-focus-native-toggle');
+    const toggle = ${shadow}.querySelector('.rf-fold > summary');
     toggle.focus();
     const banner = document.createElement('div');
     banner.textContent = 'Unrelated GitHub page update';
     document.body.append(banner);
     await new Promise(resolve => setTimeout(resolve, 400));
-    const retained = toggle.isConnected && document.activeElement === toggle;
+    const retained = toggle.isConnected && ${shadow}.activeElement === toggle;
     banner.remove();
     return retained;
   })()`);
-  assert.equal(stableFolds, true, 'An unrelated page mutation must retain the existing Show lines button and keyboard focus.');
+  assert.equal(stableFolds, true, 'An unrelated page mutation must retain the existing Guide fold control and keyboard focus.');
 
   await evaluate('window.reviewPanelBeforeNavigation = document.querySelector("#review-focus-extension")');
   for (const [away, back] of [['', '/files'], ['/checks', '/changes'], ['/commits', '/changes/abc123']]) {
@@ -943,9 +953,9 @@ try {
       history.pushState({}, '', ${JSON.stringify(prUrl)} + ${JSON.stringify(away)});
       window.dispatchEvent(new PopStateEvent('popstate'));
     })()`);
-    await waitFor(() => evaluate('!document.querySelector("#review-focus-extension, .review-focus-file-progress, .review-focus-file-status, .review-focus-native-hidden, .review-focus-native-fold")'), `PRiorities hidden on ${away || 'Conversation'}`);
+    await waitFor(() => evaluate('!document.querySelector("#review-focus-extension, .review-focus-file-progress, .review-focus-file-status, .review-focus-native-surface-hidden")'), `PRiorities hidden on ${away || 'Conversation'}`);
     await evaluate(`for (const [node,value] of window.diffMetadata) node.setAttribute('data-url',value); history.pushState({}, '', ${JSON.stringify(prUrl)} + ${JSON.stringify(back)}); window.dispatchEvent(new PopStateEvent('popstate'));`);
-    await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title') && document.querySelector('.review-focus-file-progress') && document.querySelector('.review-focus-native-hidden')`), 'the same review restored on the diff tab');
+    await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title') && document.querySelector('.review-focus-file-progress') && document.querySelector('.review-focus-native-surface-hidden')`), 'the same review restored on the diff tab');
     assert.equal(await evaluate('document.querySelector("#review-focus-extension") === window.reviewPanelBeforeNavigation'), true, 'GitHub subtab navigation must retain the existing review panel and its state.');
     assert.equal((await modelRequests()).length, initialRequestCount, 'Changing GitHub subtabs must not invoke another analysis.');
   }
@@ -958,7 +968,7 @@ try {
     await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved review before a transient context failure');
     await click('Open saved review');
     await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('does not match')`), 'incomplete context refused without erasing the saved review');
-    assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'), 0);
+    assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0);
     await evaluate(`(async () => {
       document.body.append(document.createElement('aside'));
       window.dispatchEvent(new Event('focus'));
@@ -984,11 +994,10 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-unresolved')?.textContent.includes('1 edit') && !${shadow}.querySelector('.rf-analyze').disabled`), 'unresolved classification visibility');
   let afterUnresolved = (await modelRequests()).length;
   assert.equal(afterUnresolved - beforeUnresolved, 2);
-  assert.equal(await evaluate(`document.querySelector('[id$="R151"][data-line-number]').closest('tr').classList.contains('review-focus-native-hidden')`), false, 'An unresolved edit stays visible even when prioritization assigns it to supporting.');
-  assert.ok(await evaluate(`${fileShadow}.querySelector('.rf-kept-visible').checkVisibility() && ${fileShadow}.querySelector('.rf-kept-visible').textContent.includes('cannot be established')`), 'Unresolved visible code must explain its missing evidence beside the file.');
-  assert.equal(await evaluate(`${fileShadow}.querySelector('.rf-supporting').open`), false);
-  await evaluate(`${shadow}.querySelector('.rf-review-index > summary').click(); ${shadow}.querySelector('.rf-supporting > summary').click(); ${shadow}.querySelector('.rf-supporting .rf-evidence > summary').click()`);
-  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-edit[data-edit-id="0-1-3"] .rf-change-kind')?.textContent === 'Change type: unknown'`), 'classification evidence disclosure');
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-block-review input[data-edit-id="0-1-3"]').checkVisibility()`), 'An unresolved edit stays open even in another section.');
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-foreign-edit').textContent.includes('The other rendering path') && ${shadow}.querySelector('.rf-foreign-edit').textContent.includes('unresolved evidence')`), 'Foreign visible code identifies its owning section and reason.');
+  await evaluate(`${shadow}.querySelector('.rf-section-link[data-topic-id="second-path"]').click(); ${shadow}.querySelector('.rf-evidence > summary').click()`);
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-edit[data-edit-id="0-1-3"] .rf-change-kind').textContent`), 'Change type: unknown');
   assert.ok(await evaluate(`${shadow}.querySelector('.rf-edit[data-edit-id="0-1-3"] .rf-uncertainty').textContent.includes('cannot be established')`));
 
   await writeFile(modeFile, 'reconciled');
@@ -1004,10 +1013,10 @@ try {
       await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'revised classifications restored');
       assert.equal((await modelRequests()).length, afterUnresolved, 'Restoring revised classifications must not invoke the model.');
     }
-    assert.equal(await evaluate(`document.querySelector('[id$="R137"][data-line-number]').closest('tr').classList.contains('review-focus-native-hidden')`), true, 'Resolved supporting edits may fold using the final labels.');
-    assert.equal(await evaluate(`document.querySelector('[id$="R151"][data-line-number]').closest('tr').classList.contains('review-focus-native-hidden')`), false, 'Remaining unknown edits must stay visible.');
-    assert.deepEqual(await evaluate(`[...${fileShadow}.querySelectorAll('.rf-kept-visible')].map(node=>node.textContent)`), ['Kept visible because evidence is incomplete: Only the external caller contract remains unavailable.'], 'The file must display only the remaining gap after reconciliation.');
-    assert.equal(await evaluate(`${fileShadow}.textContent.includes('missing from this file pass')`), false, 'First-pass evidence gaps must not reappear in explanations.');
+    assert.ok(await evaluate(`[...${shadow}.querySelectorAll('.rf-block-review input')].every(input=>input.checkVisibility())`), 'An all-supporting section still shows all of its assigned changes.');
+    assert.ok(await evaluate(`${shadow}.querySelector('.rf-unresolved').textContent.includes('1 edit')`));
+    assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').textContent.includes('missing from this file pass')`), false, 'First-pass evidence gaps must not reappear after reconciliation.');
+    assert.ok(await evaluate(`${shadow}.querySelector('.rf-guide-section').textContent.includes('Only the external caller contract remains unavailable.')`));
   }
   await writeFile(modeFile, 'normal');
   checkEvidence(await modelRequests());
@@ -1042,50 +1051,7 @@ try {
     const doc=new DOMParser().parseFromString(${JSON.stringify(react)},'text/html');
     const files=module.findNativeFiles(doc);
     const snapshot=await module.capturePullRequest();
-    const {createNativeFolding}=await import(${JSON.stringify(`chrome-extension://${extensionId}/review-ui.js`)});
-    const editIds=snapshot.files.flatMap(file=>file.hunks.flatMap(hunk=>hunk.items.filter(item=>item.type==='edit').map(item=>item.id)));
-    const folding=createNativeFolding(doc,snapshot,{topics:[{priority:'supporting',title:'Fixture changes',editIds,excerpts:[]}],classifications:editIds.map(editId=>({editId,kinds:['behavior'],reason:'Fixture label.',uncertainty:''}))});
-    const folded=folding.apply();
-    const toggle = doc.querySelector('.review-focus-native-toggle');
-    const toggledRow = toggle.closest('.review-focus-native-fold').nextElementSibling;
-    toggle.click();
-    if (toggle.getAttribute('aria-expanded') !== 'true' || toggledRow.classList.contains('review-focus-native-hidden')) throw new Error('Show lines must expand the matching native rows.');
-    toggle.click();
-    if (toggle.getAttribute('aria-expanded') !== 'false' || !toggledRow.classList.contains('review-focus-native-hidden')) throw new Error('Collapse must hide the same rows again.');
-
-    doc.querySelector('.review-focus-native-fold').remove();
-    const repaired=folding.apply();
-    if (doc.querySelectorAll('.review-focus-native-fold').length !== repaired.groups) throw new Error('Missing fold controls were not recreated.');
-    const discussionRow = doc.querySelector('.review-focus-native-hidden');
-    const discussionCell = discussionRow.querySelector('td') ?? discussionRow;
-    for (const [tag, className] of [['form',''],['textarea',''],['div','review-thread-component'],['div','js-comment-container']]) {
-      const discussion = doc.createElement(tag);
-      discussion.className = className;
-      discussionCell.append(discussion);
-      folding.apply();
-      if (discussionRow.classList.contains('review-focus-native-hidden')) throw new Error('A newly added discussion or form must reveal its row.');
-      folding.apply();
-      if (discussionRow.classList.contains('review-focus-native-hidden')) throw new Error('An unchanged layout must preserve visible discussion rows.');
-      discussion.remove();
-      folding.apply();
-      if (!discussionRow.classList.contains('review-focus-native-hidden')) throw new Error('Removing discussion must allow the supporting row to fold again.');
-    }
-    folding.restore();
-    const classifications=editIds.map(editId=>({editId,kinds:['behavior'],reason:'Fixture label.',uncertainty:''}));
-    const reviewFolding=createNativeFolding(doc,snapshot,{topics:[{priority:'review',title:'Fixture decision',editIds,excerpts:[]}],classifications});
-    const reviewFolded=reviewFolding.apply();
-    const reviewLabels=[...doc.querySelectorAll('.review-focus-native-reason')].map(label=>label.textContent);
-    reviewFolding.restore();
-    const protectedFolding=createNativeFolding(doc,snapshot,{topics:[{priority:'supporting',title:'Fixture changes',editIds,excerpts:[]}],classifications},()=>{},new Set(),[],['.github/workflows/']);
-    const protectedFolded=protectedFolding.apply();
-    const workflowHidden=files[0].rows.some(row=>row.element.classList.contains('review-focus-native-hidden'));
-    protectedFolding.restore();
-    const changeKinds=[['behavior'],['formatting'],['formatting','behavior']];
-    const alwaysShowFolding=createNativeFolding(doc,snapshot,{topics:[{priority:'supporting',title:'Fixture changes',editIds,excerpts:[]}],classifications:editIds.map((editId,index)=>({...classifications[index],kinds:changeKinds[index]}))},()=>{},new Set(),['behavior']);
-    const alwaysShowFolded=alwaysShowFolding.apply();
-    const alwaysShowHidden=files.map(file=>file.rows.filter(row=>row.type!=='context').map(row=>row.element.classList.contains('review-focus-native-hidden')));
-    alwaysShowFolding.restore();
-    return {files:files.map(file=>({path:file.path,rows:file.rows.map(({oldLine,newLine,type,text})=>({oldLine,newLine,type,text}))})), snapshot, folded, repaired, reviewFolded, reviewLabels, protectedFolded, workflowHidden, alwaysShowFolded, alwaysShowHidden, restored:doc.querySelectorAll('.review-focus-native-hidden, .review-focus-native-fold').length};
+    return {files:files.map(file=>({path:file.path,rows:file.rows.map(({oldLine,newLine,type,text})=>({oldLine,newLine,type,text}))})), snapshot};
   })()`);
   assert.deepEqual(modern.files.map(file => file.path), ['.github/workflows/wait-for-checks.yml', '5854', 'play with this file, not readme']);
   assert.deepEqual(modern.files.map(file => file.rows.length), [5, 2, 2]);
@@ -1096,15 +1062,6 @@ try {
   assert.equal(modern.snapshot.files.length, 3);
   assert.equal(modern.snapshot.files.reduce((sum, file) => sum + file.additions + file.deletions, 0), 4);
   assert.equal(modern.snapshot.headSha, 'c28cc8e5271452b5b4c347d46a63f717c29417d6');
-  assert.deepEqual(modern.folded, { hidden: 9, hiddenChanges: 4, matched: 9, unmatched: 0, groups: 3 });
-  assert.deepEqual(modern.repaired, modern.folded);
-  assert.equal(modern.reviewFolded.hiddenChanges, 0, 'Changed lines of a review decision must stay visible even outside its excerpts.');
-  assert.ok(modern.reviewLabels.every(label => /^\d+ context lines$/.test(label)), 'Only unchanged context may fold around a review decision.');
-  assert.equal(modern.workflowHidden, false, 'A protected path must never fold.');
-  assert.deepEqual([modern.protectedFolded.hidden, modern.protectedFolded.groups], [4, 2], 'Unprotected files still fold.');
-  assert.deepEqual(modern.alwaysShowHidden, [[false], [true, true], [false]], 'Always-visible kinds preserve matching and mixed-kind edits while other supporting edits fold.');
-  assert.equal(modern.alwaysShowFolded.hiddenChanges, 2);
-  assert.equal(modern.restored, 0);
   assert.equal((await modelRequests()).length, afterUnresolved, 'Collecting issue context must not trigger additional model requests.');
   modernMode = false;
   await page('Page.reload');
@@ -1185,23 +1142,12 @@ try {
   changesRequests.length = 0;
   const completeChanges = await captureFixture();
   assert.equal(completeChanges.error, undefined, 'Capture must read the Changes route and load the 49 entries missing from the rendered split view.');
-  const splitFolds = await evaluate(`(async () => {
-    const {createNativeFolding} = await import(${JSON.stringify(`chrome-extension://${extensionId}/review-ui.js`)});
-    const snapshot = ${JSON.stringify(completeChanges.snapshot)};
-    const editIds = snapshot.files.flatMap(file=>file.hunks.flatMap(hunk=>hunk.items.filter(item=>item.type==='edit').map(item=>item.id)));
-    const folding = createNativeFolding(document, snapshot, {topics:[{priority:'supporting',title:'Split fixture',editIds,excerpts:[]}],classifications:editIds.map(editId=>({editId,kinds:['behavior'],reason:'Fixture change.',uncertainty:''}))});
-    const result = folding.apply();
-    const splitRows = [...document.querySelectorAll('tr.diff-line-row')].filter(row=>row.querySelectorAll('.diff-text').length === 2);
-    const visible = splitRows.every(row=>!row.classList.contains('review-focus-native-hidden') && row.checkVisibility());
-    folding.restore();
-    return {...result, splitRows:splitRows.length, visible};
-  })()`);
-  assert.equal(splitFolds.hidden, 0, 'Split rows must remain visible even when every edit is supporting.');
-  assert.equal(splitFolds.splitRows, 4, 'The fixture must contain four split rows with code on both sides.');
-  assert.equal(splitFolds.visible, true, 'Every split row must remain visible after applying focus.');
+  const splitRows = await evaluate(`[...document.querySelectorAll('tr.diff-line-row')].filter(row=>row.querySelectorAll('.diff-text').length === 2).map(row=>row.checkVisibility())`);
+  assert.deepEqual(splitRows, [true, true, true, true], 'Capture leaves every native split row visible and unchanged.');
 
   assert.deepEqual(completeChanges.snapshot.files.map(file => file.path), changes.paths);
   assert.equal(completeChanges.snapshot.baseSha, changes.baseSha);
+  assert.notEqual(completeChanges.snapshot.baseSha, changes.route.comparison.fullDiff.baseOid, 'Full-PR capture must use the file diff merge base, not the target branch tip.');
   assert.equal(completeChanges.snapshot.headSha, changes.headSha);
   assert.equal(JSON.stringify(completeChanges.snapshot).includes(changes.fetchNonce), false, 'GitHub request metadata must never enter model evidence.');
   for (const file of completeChanges.snapshot.files) {
@@ -1254,7 +1200,15 @@ try {
   assert.equal(new URL(generatedRequest.url).searchParams.get('range'), changes.headSha);
   assert.equal(new URL(generatedRequest.url).searchParams.get('w'), '0');
 
-  for (const mode of ['missing', 'duplicate', 'wrong-path', 'wrong-revision', 'truncated', 'duplicate-summary', 'truncated-list', 'inline-revision', 'generated-missing', 'generated-incomplete']) {
+  changesMode = 'merge-base-context';
+  changesRequests.length = 0;
+  const mergeBaseContext = await captureFixture();
+  assert.equal(mergeBaseContext.error, undefined);
+  assert.equal(mergeBaseContext.snapshot.baseSha, changes.baseSha);
+  const mergeBaseSources = changesRequests.map(request => new URL(request.url).pathname).filter(path => path.includes('/blob/'));
+  assert.deepEqual(mergeBaseSources.sort(), [`/microsoft/vscode/blob/${changes.baseSha}/src/merge-base.ts`, `/microsoft/vscode/blob/${changes.headSha}/src/merge-base.ts`].sort(), 'Captured before/after context must use the same commits as the diff rows.');
+
+  for (const mode of ['missing', 'duplicate', 'wrong-path', 'wrong-revision', 'wrong-base-revision', 'truncated', 'duplicate-summary', 'truncated-list', 'inline-revision', 'inline-base-revision', 'generated-missing', 'generated-incomplete']) {
     changesMode = mode;
     const rejected = await captureFixture();
     assert.equal(typeof rejected.error, 'string', `${mode} must reject the capture.`);
@@ -1284,10 +1238,11 @@ try {
   }
   assert.equal(peak,3,'The installed extension runs exactly three independent native Codex processes in parallel.');
   assert.equal(active,0);
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'),6,'Current GitHub unified rows use new-diff-line-number and must fold after a validated review.');
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-guide-file').length`), 3, 'An all-supporting Guide renders every assigned file.');
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-code-add, .rf-code-delete').length`), 6, 'Guide pairs all captured before/after rows independently of the native layout.');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-file-progress[data-state=complete]").length'),3);
   await click('Full diff');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'),0);
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'),0);
 
   const beforeGenerated = (await modelRequests()).length;
   changesMode = 'generated-review';
@@ -1304,7 +1259,7 @@ try {
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-file-progress[data-state=excluded]").length'), 1);
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-file-progress[data-state=complete]").length'), 2);
   assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[0].pathDigest}').querySelectorAll('.review-focus-native-hidden, .review-focus-native-fold').length`), 0, 'An excluded file must never be folded as if reviewed.');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'), 4);
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-guide-file').length`), 2);
   await page('Page.reload');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved review with an excluded generated file');
   const restoreWorker = workers.at(-1);
@@ -1321,14 +1276,16 @@ try {
   await send('Runtime.evaluate', {expression:'releaseRestoreDigest(); crypto.subtle.digest = originalRestoreDigest; delete globalThis.releaseRestoreDigest; delete globalThis.originalRestoreDigest;'}, restoreWorker);
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'restore excluded-file controls');
   assert.equal((await modelRequests()).length, beforeGenerated + defaultRequests.length);
+  await openFiles();
+  await evaluate(`${shadow}.querySelector('.rf-file-progress-row[data-path="${changes.paths[0]}"] .rf-file-path').click()`);
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-section-title').textContent.includes('not analyzed')`), 'An excluded file can be read before opting it into analysis.');
   const beforeOptIn = (await modelRequests()).length;
   await writeFile(modeFile, 'generated-final-failed');
-  await evaluate('[...document.querySelector(".review-focus-file-status[data-state=excluded]").shadowRoot.querySelectorAll("button")].find(button=>button.textContent==="Review anyway").click()');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'Opting in a file must immediately restore folds from the previous assessment.');
+  await evaluate(`[...${shadow}.querySelector('.rf-file-progress-row[data-path="${changes.paths[0]}"]').querySelectorAll('button')].find(button=>button.textContent==='Review anyway').click()`);
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0, 'Opting in a file must immediately restore the native diff while replacing the assessment.');
   await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').textContent.length > 0 && !${shadow}.querySelector('.rf-analyze').disabled`), 'opt-in PR review failure');
-  await click('Explained');
-  await click('Folded');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'A failed replacement assessment must not reapply stale folding when the view changes.');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-view-toggle').checkVisibility()`), false, 'A failed replacement cannot expose the stale Guide.');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0, 'A failed replacement restores native diff access.');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-result').checkVisibility()`), false, 'The failed replacement must not present the old summary as current.');
   await writeFile(modeFile, 'generated-review');
   await click('Retry review decisions');
@@ -1337,7 +1294,8 @@ try {
   assert.equal(forcedRequests.length, 2, 'Opt-in runs only the chosen file’s classification and a new PR review.');
   assert.deepEqual(forcedRequests[0].evidence.files.map(file => file.path), [changes.paths[0]]);
   assert.equal(forcedRequests.at(-1).evidence.files.length, 3);
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'), 6);
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-guide-file').length`), 3);
+  assert.ok(await evaluate(`!${shadow}.querySelector('.rf-section-title').textContent.includes('not analyzed')`), 'A successful replacement clears the previously excluded-file selection.');
   await click('Full diff');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0);
   await writeFile(modeFile,'normal');
@@ -1399,7 +1357,7 @@ try {
   assert.ok(claudeRequests.every(request => request.provider === 'claude' && request.args[request.args.indexOf('--model')+1] === 'claude-fixture-model' && request.args[request.args.indexOf('--effort')+1] === 'medium'));
   assert.equal(claudeRequests[0].evidence.classifications, undefined);
   assert.deepEqual(claudeRequests[1].evidence.classifications, classifications);
-  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length') > 0);
+  assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length') > 0);
   await click('Full diff');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0);
   await page('Page.reload');
@@ -1432,9 +1390,9 @@ try {
     await page('Page.bringToFront');
     await evaluate("window.dispatchEvent(new Event('focus'))");
   }
-  await evaluate(`window.reviewBeforeSettings = document.querySelector('#review-focus-extension'); window.explanationBeforeSettings = ${fileShadow}.querySelector('.rf-change-explanation')`);
+  await evaluate(`window.reviewBeforeSettings = document.querySelector('#review-focus-extension'); window.explanationBeforeSettings = ${shadow}.querySelector('.rf-change-explanation')`);
   const originalRunLabel = await evaluate(`${shadow}.querySelector('.rf-run-settings').textContent`);
-  const originalHiddenLines = await evaluate('document.querySelectorAll(".review-focus-native-hidden").length');
+  const originalHiddenLines = await evaluate(`${shadow}.querySelectorAll('.rf-fold:not([open])').length`);
   for (const choice of [
     { provider:'claude', model:'claude-custom-older', effort:'medium' },
     { provider:'claude', model:'claude-fixture-model', effort:'high' },
@@ -1447,7 +1405,7 @@ try {
     assert.ok(status.visible && status.text.includes('Settings changed') && status.text.includes(providerLabel) && status.text.includes(choice.model) && status.text.includes(choice.effort), 'The visible notice identifies the settings for the next analysis.');
     assert.equal(await evaluate(`${shadow}.querySelector('.rf-run-settings').textContent`), originalRunLabel, 'Existing results retain their original provider, model and effort label.');
     assert.ok(await evaluate(`window.reviewBeforeSettings === document.querySelector('#review-focus-extension') && window.explanationBeforeSettings.isConnected`), 'Returning from Settings preserves the mounted PR and its existing explanations.');
-    assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'), originalHiddenLines, 'Changing future settings must not alter current folding.');
+    assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-fold:not([open])').length`), originalHiddenLines, 'Changing future settings must not alter current folding.');
     assert.equal((await modelRequests()).length, afterClaude, 'Saving settings and returning to the PR must not invoke a model.');
     await saveModelChoice('claude', 'claude-fixture-model', 'medium');
     await waitFor(() => evaluate(`${shadow}.querySelector('.rf-menu .rf-analyze')?.textContent === 'Run fresh review' && !${shadow}.querySelector('.rf-status').textContent.includes('Settings changed')`), 'returning to the review settings removes the mismatch action');
@@ -1472,7 +1430,7 @@ try {
   await click('Open saved review');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('does not match')`), 'changed description invalidates cached assessment');
   assert.equal((await modelRequests()).length, afterModelSettings, 'A stale saved-review action must not silently start a paid analysis.');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'), 0);
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0);
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-analyze').textContent`), 'Run fresh review');
   await click('Run fresh review');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '1 review decision' && !${shadow}?.querySelector('.rf-analyze')?.disabled`), 'explicit fresh analysis after changed intent');
@@ -1561,9 +1519,9 @@ try {
     const input = {url:${JSON.stringify(prUrl)},baseSha:${JSON.stringify(baseSha)},headSha:${JSON.stringify(headSha)},description:'first',context:[]};
     const original = await cache.reviewCacheKey(input,settings);
     const earlierLookup = JSON.parse(original.lookup);
-    earlierLookup[0] = 3;
-    await cache.saveReview({key:'unprotected-review',lookup:JSON.stringify(earlierLookup)},{text:'Review without preserved always-visible classifications'});
-    const earlierReview = {offered:(await cache.peekReview(original.lookup)).available,retained:Boolean(await cache.readReview('unprotected-review'))};
+    earlierLookup[0] = 4;
+    await cache.saveReview({key:'folding-review',lookup:JSON.stringify(earlierLookup)},{text:'Consequence-ordered folding assessment'});
+    const earlierReview = {offered:(await cache.peekReview(original.lookup)).available,retained:Boolean(await cache.readReview('folding-review'))};
     await cache.clearCache();
     const variants = await Promise.all([
       cache.reviewCacheKey({...input,headSha:'c'.repeat(40)},settings),
@@ -1594,7 +1552,7 @@ try {
   assert.equal(cacheChecks.cancellation.previous.text, 'Paid review', 'Aborting a replacement must roll back deletion of the earlier review.');
   assert.equal(cacheChecks.cancellation.replacement, null);
   assert.equal(cacheChecks.cancellation.unstarted, null);
-  assert.deepEqual(cacheChecks.earlierReview, {offered:false,retained:true}, 'Reviews saved before always-visible classification preservation require fresh analysis without deleting their records.');
+  assert.deepEqual(cacheChecks.earlierReview, {offered:false,retained:true}, 'Reviews from the old folding prompt require fresh Guide analysis without deleting their records.');
   assert.equal(cacheChecks.keys, 9, 'Commits, intent, source context, provider, model, effort and review preferences each change the cache key.');
   assert.deepEqual([cacheChecks.lru.a, cacheChecks.lru.b, cacheChecks.lru.c], [true, false, true], 'Reading A keeps it while the older B is evicted.');
   assert.equal(cacheChecks.lru.info.count, 2);
@@ -1643,7 +1601,11 @@ try {
     await click('Analyze PR');
     await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-file-progress-row[data-state="${state}"]') && !${shadow}.querySelector('.rf-analyze').disabled`), 'review idle with an available file action');
     const action = state === 'failed' ? 'Retry file' : 'Review anyway';
-    if (state === 'excluded') assert.ok(await evaluate(`${shadow}.querySelector('.rf-progress-toggle').textContent.toLowerCase().includes('skipped')`), 'A generated-only PR must not claim that files were analyzed.');
+    if (state === 'excluded') {
+      assert.ok(await evaluate(`${shadow}.querySelector('.rf-progress-toggle').textContent.toLowerCase().includes('skipped')`), 'A generated-only PR must not claim that files were analyzed.');
+      assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-section-link').length`), 0);
+      assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0, 'A fully excluded PR keeps GitHub’s diff available before any file is included.');
+    }
     const headerAction = await evaluate(`(async () => {
       const badge = document.querySelector('.review-focus-file-status').shadowRoot;
       const action = [...badge.querySelectorAll('button')].find(button=>button.textContent===${JSON.stringify(action)});
@@ -1761,13 +1723,13 @@ try {
   await waitFor(() => evaluate(`${shadow}.querySelector('.rf-progress-detail').textContent.includes('Every file is classified')`), 'every file classified before the PR review');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-progress').hidden`), true, 'Progress updates must not reopen a list the user collapsed.');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-file-progress[data-state=classified]").length'), 3, 'The fixture only mounts three of the five classified files.');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'No code folds before the whole-PR review decisions arrive.');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0, 'Native code stays available before the whole-PR review decisions arrive.');
   assert.equal(await evaluate(`Array.from(document.querySelectorAll('.review-focus-file-progress'), file => file.shadowRoot.querySelectorAll('.rf-review').length).reduce((sum, count) => sum + count, 0) + ${shadow}.querySelectorAll('.rf-review').length`), 0, 'Classified files show progress only, without review decisions.');
   await page('Page.navigate', {url:prUrl + '/checks'});
   await waitFor(() => evaluateExtension('location.pathname.endsWith("/checks")').catch(() => false), 'Checks while the PR review runs');
   await page('Page.navigate', {url:prUrl + '/changes'});
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-phase')?.textContent === 'Choosing review decisions' && ${shadow}.querySelectorAll('.rf-file-progress-row[data-state=classified]').length === 5`), 'the same PR review reconnected with classified files');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'Reconnecting before the PR review finishes must not fold code.');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0, 'Reconnecting before the PR review finishes must leave native code available.');
   await page('Page.navigate', {url:prUrl});
   await waitFor(() => evaluateExtension('location.pathname === new URL(' + JSON.stringify(prUrl) + ').pathname').catch(() => false), 'Conversation while analysis remains in the background');
   assert.equal(await evaluate('Boolean(document.querySelector("#review-focus-extension"))'), false);
@@ -1776,7 +1738,8 @@ try {
   await page('Page.navigate', {url:prUrl + '/changes'});
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '5 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'all five final decisions restored on return');
   assert.equal((await modelRequests()).length - beforeMany, 6);
-  assert.equal(await evaluate(`Array.from(document.querySelectorAll('.review-focus-file-progress'), file => [...file.shadowRoot.querySelectorAll('.rf-review > .rf-topic-body')].filter(body => body.checkVisibility()).length).reduce((sum, count) => sum + count, 0)`), 3);
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-section-link').length`), 5, 'The overview includes all sections, including unloaded native files.');
+  await click('Full diff');
   const beforeExpansion = (await modelRequests()).length;
   for (const expanded of [true, false, true, false]) {
     await evaluate(`(() => {
@@ -1795,7 +1758,7 @@ try {
         insideStickyHeader: header.contains(panel),
         badgeCount: header.querySelectorAll('.review-focus-file-status').length,
         panelCount: file.querySelectorAll('.review-focus-file-progress').length,
-        explanation: panel.shadowRoot.querySelector('.rf-change-explanation').textContent,
+        explanation: panel.shadowRoot.querySelector('.rf-change-explanation'),
         contextRows: file.querySelectorAll('[data-fixture-context]').length,
         visibleContext: [...file.querySelectorAll('[data-fixture-context]')].every(row => row.checkVisibility()),
         headerHeight: header.getBoundingClientRect().height,
@@ -1805,29 +1768,31 @@ try {
     assert.equal(expandedLayout.insideStickyHeader, false, 'File explanations must scroll with the diff instead of covering expanded lines inside GitHub’s sticky header.');
     assert.equal(expandedLayout.badgeCount, 1);
     assert.equal(expandedLayout.panelCount, 1);
-    assert.equal(expandedLayout.explanation, 'The fixture returns the replacement value.');
+    assert.equal(expandedLayout.explanation, null, 'Native expansion keeps analysis status without duplicating Guide prose.');
     assert.equal(expandedLayout.contextRows, expanded ? 201 : 0);
     assert.equal(expandedLayout.visibleContext, true, 'Newly expanded native context must remain accessible.');
     if (expanded) {
       assert.ok(expandedLayout.headerHeight < 80, 'Only the compact native header should remain sticky.');
-      assert.ok(expandedLayout.panelBottom < 0, 'The explanation must scroll out of view while reading expanded code.');
+      assert.equal(await evaluate(`${shadow}.querySelector('.rf-result').checkVisibility()`), false);
       await writeFile('/tmp/priorities-native-expand-all.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
     }
   }
   assert.equal((await modelRequests()).length, beforeExpansion, 'Native expansion must reuse the existing analysis.');
   await evaluate('window.scrollTo({top:0,behavior:"instant"})');
-  await evaluate(`${shadow}.querySelector('.rf-review-index > summary').click(); [...${shadow}.querySelectorAll('.rf-review-index > .rf-review > summary')].at(-1).click()`);
-  assert.ok(await evaluate(`[...${shadow}.querySelectorAll('.rf-review-index > .rf-review')].at(-1).querySelector('.rf-change-explanation').checkVisibility()`), 'The fifth decision must be readable even though its file is unloaded.');
-  assert.ok(await evaluate(`[...${shadow}.querySelectorAll('.rf-review-index > .rf-review')].at(-1).querySelector('.rf-reason').checkVisibility()`));
-  await evaluate(`[...${shadow}.querySelectorAll('.rf-review-index > .rf-review')].at(-1).querySelector('.rf-evidence > summary').click()`);
-  await waitFor(() => evaluate(`[...${shadow}.querySelectorAll('.rf-review-index > .rf-review')].at(-1).querySelector('.rf-code')?.checkVisibility()`), 'unloaded file source evidence available from the saved review');
+  await click('Guide');
+  await evaluate(`[...${shadow}.querySelectorAll('.rf-section-link')].at(-1).click()`);
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-change-explanation').checkVisibility()`), 'The fifth section remains readable even though its native file is unloaded.');
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-code').checkVisibility()`), 'The saved snapshot supplies code for an unloaded file.');
+  await evaluate(`${shadow}.querySelector('.rf-guide-file .rf-file-links button').click()`);
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-navigation-notice').textContent.includes('has not loaded')`), 'unloaded native file receives honest navigation guidance');
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-navigation-notice a').href.includes('/blob/${headSha}/')`), 'Source fallback is pinned to the captured commit, separately from diff discussion.');
   const beforeHumanReview = (await modelRequests()).length;
   const firstModernFile = `document.querySelector('section[id^="diff-"][role="region"]')`;
   const firstModernPanel = `${firstModernFile}.querySelector('.review-focus-file-progress').shadowRoot`;
   const firstModernRow = `${shadow}.querySelector('.rf-file-progress-row[data-path="tests/change-1.ts"]')`;
   await openFiles();
   assert.ok(await evaluate(`(${shadow}.querySelector('.rf-progress-toggle').textContent + ${shadow}.querySelector('.rf-progress-toggle').title).includes('2 unknown')`), 'Unloaded native review statuses must be identified in the summary.');
-  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-reviewed-toggle input:indeterminate:disabled').length`), 2);
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-file-list .rf-reviewed-toggle input:indeterminate:disabled').length`), 2);
   assert.equal(await evaluate('window.fixtureViewedClicks'), 0, 'Parallel AI completion never marks the native files viewed.');
   await click('AI needs retry');
   assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-file-progress-row').length`), 0, 'Important decisions must not appear in the AI retry filter after successful analysis.');
@@ -1844,9 +1809,9 @@ try {
   assert.ok(await evaluate(`${firstModernFile}.querySelector('.review-focus-file-status').shadowRoot.querySelector('.rf-file-state').checkVisibility()`));
   assert.equal(await evaluate(`${firstModernPanel}.querySelector('input[type=checkbox]')`), null, 'The modern diff panel also leaves Viewed to GitHub.');
   await evaluate(`window.collapsedDiffTable = ${firstModernFile}.querySelector('table'); window.collapsedDiffTable.remove()`);
-  await waitFor(() => evaluate(`${firstModernRow}.querySelector('.rf-reviewed-toggle input').checked && !${firstModernPanel}.querySelector('.rf-file-decisions').checkVisibility()`), 'reviewed modern file remains compact when its native diff collapses');
+  await waitFor(() => evaluate(`${firstModernRow}.querySelector('.rf-reviewed-toggle input').checked`), 'reviewed modern file remains compact when its native diff collapses');
   await evaluate(`${firstModernFile}.querySelector('button[aria-pressed]').click()`);
-  await waitFor(() => evaluate(`${shadow}.querySelectorAll('.rf-file-progress-row').length === 0 && ${firstModernPanel}.querySelector('.rf-file-decisions').checkVisibility()`), 'native modern uncheck reflected in file and filter');
+  await waitFor(() => evaluate(`${shadow}.querySelectorAll('.rf-file-progress-row').length === 0`), 'native modern uncheck reflected in file and filter');
   await evaluate(`${firstModernFile}.append(window.collapsedDiffTable)`);
   await click('All files');
   await evaluate(`${firstModernFile}.querySelector('button[aria-pressed]').setAttribute('aria-disabled', 'true')`);
@@ -1947,7 +1912,7 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title') && !${shadow}.querySelector('.rf-analyze').disabled`), 'analysis with custom visibility preferences');
   assert.equal((await modelRequests()).length, beforeCustomReview + 2);
   assert.ok(await evaluate(`${shadow}.querySelector('.rf-run-settings').textContent.includes('Effort: medium · Focus: thorough')`));
-  assert.ok(await evaluate(`${fileShadow}.querySelector('.rf-kept-visible').textContent.includes('settings keep behavior')`));
+  assert.ok(await evaluate(`[...${shadow}.querySelectorAll('.rf-block-review input')].every(input=>input.checkVisibility())`));
   assert.equal(await evaluate(`import(${JSON.stringify(moduleUrl)}).then(module => module.findNativeFiles(document).flatMap(file=>file.rows).filter(row=>['add','delete'].includes(row.type)).every(row=>!row.element.classList.contains('review-focus-native-hidden')))`), true, 'Always-visible change types must remain expanded regardless of model excerpt selection.');
   await page('Page.reload');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'custom preferences have their own reusable cache identity');
@@ -2046,142 +2011,215 @@ try {
   assert.equal((await modelRequests()).length, beforeRange + 6);
   await page('Page.navigate', { url: prUrl + '/changes' });
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !${shadow}.querySelector('.rf-analyze').disabled`), 'range result is not offered as a full PR review');
-  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden").length'), 0, 'Range decisions must not fold the full PR.');
+  assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0, 'Range decisions must not fold the full PR.');
   assert.equal((await modelRequests()).length, beforeRange + 6);
   await evaluate(`history.replaceState(null, '', '/changes/files/pull/200000/changes'); window.dispatchEvent(new PopStateEvent('popstate'));`);
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !${shadow}.querySelector('.rf-analyze').disabled && !${shadow}.querySelector('.rf-run-settings').textContent.includes('Range:')`), 'repository names must not be mistaken for a selected range');
-  changesMode = 'priority-order';
-  await writeFile(modeFile, 'priority-order');
-  await evaluateExtension('chrome.runtime.sendMessage({type:"clear-cache"})');
-  await evaluate('localStorage.removeItem("fixture-viewed-files")');
-  await page('Page.navigate', { url: prUrl + '/changes' });
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !${shadow}.querySelector('.rf-analyze').disabled`), 'priority order fixture ready');
-  const nativePaths = `Array.from(document.querySelectorAll('[data-testid="progressive-diffs-list"] > .fixture-diff-entry'), entry => entry.querySelector('.diff-file-header code')?.textContent).filter(Boolean)`;
-  const priorityPaths = [2, 4, 3, 1, 0, 5].map(index => changes.paths[index]);
-  const chooseOrder = value => evaluate(`(() => {
-    const control = ${shadow}.querySelector('.rf-file-order');
-    control.value = ${JSON.stringify(value)};
-    control.dispatchEvent(new Event('change'));
+  changesMode = 'guide-sections';
+  await writeFile(modeFile, 'guide-sections');
+  await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});
+  await waitFor(() => evaluate('!document.querySelector("#save-review-preferences").disabled'), 'reset visibility preferences for the section fixture');
+  await evaluate(`(async () => {
+    const {preferences} = await chrome.runtime.sendMessage({type:'get-review-preferences'});
+    const saved = await chrome.runtime.sendMessage({type:'save-review-preferences',preferences:{...preferences,alwaysShow:[]}});
+    if (saved.error) throw new Error(saved.error);
+    const cleared = await chrome.runtime.sendMessage({type:'clear-cache'});
+    if (cleared.error) throw new Error(cleared.error);
   })()`);
+  await page('Page.navigate', { url: prUrl + '/changes' });
+  await evaluate('localStorage.removeItem("fixture-viewed-files")');
+  await page('Page.reload');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !${shadow}.querySelector('.rf-analyze').disabled`), 'Guide section fixture ready');
+  const nativePaths = `Array.from(document.querySelectorAll('[data-testid="progressive-diffs-list"] > .fixture-diff-entry'), entry => entry.querySelector('.diff-file-header code')?.textContent).filter(Boolean)`;
+  const sharedPath = changes.paths[2];
+  const sharedCard = `${shadow}.querySelector('.rf-guide-file[data-path="${sharedPath}"]')`;
+  const sharedInputs = `${sharedCard}.querySelectorAll('.rf-block-review input')`;
+  const chooseSection = id => evaluate(`${shadow}.querySelector('.rf-section-link[data-topic-id="${id}"]').click()`);
+  const waitForBlocks = () => waitFor(() => evaluate(`[...${shadow}.querySelectorAll('.rf-block-review input')].length > 0 && [...${shadow}.querySelectorAll('.rf-block-review input')].every(input=>input.getAttribute('aria-disabled') === 'false')`), 'saved block progress ready');
   await evaluate(`(() => {
-    window.priorityFileTemplate = document.querySelector('.fixture-diff-entry').outerHTML;
-    window.originalPriorityFiles = [...document.querySelectorAll('.fixture-diff-entry')];
+    window.guideFileTemplate = document.querySelector('.fixture-diff-entry').outerHTML;
+    window.originalGuideFiles = [...document.querySelectorAll('.fixture-diff-entry')];
     const loader = document.createElement('p');
     loader.id = 'fixture-list-control';
     loader.textContent = 'GitHub list control';
-    window.originalPriorityFiles[0].after(loader);
+    window.originalGuideFiles[0].after(loader);
   })()`);
-  const beforePriority = (await modelRequests()).length;
+  const beforeGuide = (await modelRequests()).length;
   await click('Analyze PR');
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'decisions ranked across files');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'comprehension-ordered Guide complete');
+  await waitForBlocks();
   await openFiles();
-  assert.deepEqual(await evaluate(nativePaths), [2, 1, 0].map(index => changes.paths[index]));
-  assert.deepEqual(await evaluate(`Array.from(${shadow}.querySelectorAll('.rf-file-progress-row'), row => row.dataset.path)`), priorityPaths, 'Important related files precede unresolved evidence, supporting code, and excluded generated files.');
-  assert.deepEqual(await evaluate(`Array.from(${shadow}.querySelectorAll('.rf-file-group'), group => group.textContent)`), ['Check the contract and its implementation', 'Check the separate validation path', 'Unresolved evidence', 'Supporting cleanup', 'Not analyzed']);
-  assert.equal(await evaluate('document.querySelector("[data-testid=progressive-diffs-list]").children[1].id'), 'fixture-list-control', 'Non-file controls retain their slots.');
-  assert.ok(await evaluate('window.originalPriorityFiles.every(file => file.isConnected)'), 'Priority order moves the native nodes without cloning them.');
-  assert.equal((await modelRequests()).length - beforePriority, 6, 'Ranking adds no model call beyond five classifications and one PR review.');
+  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,3), 'Guide never reorders native GitHub files.');
+  assert.deepEqual(await evaluate(`Array.from(${shadow}.querySelectorAll('.rf-file-progress-row'), row => row.dataset.path)`), changes.paths.slice(0,6), 'The file list retains captured order.');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-group, .rf-file-order, .rf-review-index')`), null, 'Superseded grouping and ordering controls are removed.');
+  assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-section-link')].map(button=>[button.dataset.topicId,button.querySelector('.rf-priority').textContent])`), [['supporting','Supporting'],['contract','Review'],['validation','Review'],['unknown','Supporting']], 'Supporting prerequisites precede their uses while overview priorities remain explicit.');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting');
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-guide-file').length`), 3);
+  assert.equal(await evaluate('document.querySelector("[data-testid=progressive-diffs-list]").children[1].id'), 'fixture-list-control');
+  assert.ok(await evaluate('window.originalGuideFiles.every(file=>file.isConnected)'));
+  assert.equal((await modelRequests()).length - beforeGuide, 6, 'Guide adds no model call beyond the existing file classifications and single assessment.');
+  const blockIds = await evaluate(`[...${sharedInputs}].map(input=>input.dataset.editId)`);
+  assert.equal(blockIds.length, 3);
+  assert.deepEqual(await evaluate(`[...${sharedInputs}].map(input=>input.checkVisibility())`), [true,false,true], 'The section’s block and unresolved foreign block remain open; the other review section’s block folds.');
+  assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-foreign-edit')].some(label=>label.checkVisibility() && label.textContent.includes('External caller contract') && label.textContent.includes('unresolved evidence'))`));
+  assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-fold-sections button')].some(button=>button.textContent==='Check the contract and its implementation')`), 'Hidden foreign changes link to their section.');
+  assert.deepEqual(await evaluate(`[...${shadow}.querySelector('.rf-file-progress-row[data-path="${sharedPath}"]').querySelectorAll('.rf-file-sections button')].map(button=>button.textContent)`), ['Supporting setup','Check the contract and its implementation','External caller contract']);
+  for (const id of blockIds) {
+    assert.deepEqual(await evaluate(`[...${sharedCard}.querySelectorAll('tr[data-edit-id="${id}"]')].map(row=>row.className)`), ['rf-code-delete','rf-code-add'], 'Each checkbox owns both sides of one continuous edit.');
+  }
+  await evaluate(`window.focusedBlock = ${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]'); window.focusedBlock.focus(); window.focusedBlock.click()`);
+  assert.equal(await evaluate(`${shadow}.activeElement === window.focusedBlock`), true, 'Saving a block must not drop keyboard focus while its request is pending.');
+  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent.includes('1 of 3') && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'first block saved');
+  assert.equal(await evaluate(`${shadow}.activeElement === window.focusedBlock`), true, 'The block checkbox retains keyboard focus after progress is saved.');
+  assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed')`), 'false');
+  await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[2]}"]').click()`);
+  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent.includes('2 of 3') && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'both visible blocks saved');
+  assert.equal(await evaluate('window.fixtureViewedClicks'), 0, 'Finishing the visible blocks cannot complete a file whose other section has an unchecked block.');
+  await click('Next section');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'contract');
+  assert.equal(await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').checked`), true, 'A block shares its reviewed state across sections.');
+  const evidenceCard = `${shadow}.querySelector('.rf-guide-file[data-path="${changes.paths[4]}"]')`;
+  assert.deepEqual(await evaluate(`[...${evidenceCard}.querySelectorAll('tr[data-edit-id]')].map(row=>row.className)`), ['rf-code-delete','rf-code-add'], 'A before-only excerpt includes its entire removed-and-added block.');
+  assert.ok(await evaluate(`${evidenceCard}.querySelector('.rf-foreign-edit').textContent.includes('selected evidence')`));
+  await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[1]}"]').click()`);
+  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '3 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true'`), 'all blocks apply GitHub Viewed');
+  await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[1]}"]').click()`);
+  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'false'`), 'unchecking a block makes the native file incomplete');
+  await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').click()`);
+  await waitFor(() => evaluate(`[...${sharedInputs}].every(input=>input.checked && input.getAttribute('aria-disabled') === 'false')`), 'manual Viewed checks every block');
+  await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').click()`);
+  await waitFor(() => evaluate(`[...${sharedInputs}].every(input=>!input.checked && input.getAttribute('aria-disabled') === 'false')`), 'manual uncheck clears every block');
+  await chooseSection('supporting');
+  await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`);
+  await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '1 of 3 blocks inspected' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'partial progress saved before reload');
+  await page('Page.reload');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved Guide after reload');
+  await click('Open saved review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'Guide restored');
+  await waitForBlocks();
+  assert.deepEqual(await evaluate(`[...${sharedInputs}].map(input=>input.checked)`), [true,false,false], 'Partial block progress persists across reloads for the captured commits.');
+  const guideTab = await send('Target.createTarget', {url:'about:blank'});
+  const guideSession = (await send('Target.attachToTarget', {targetId:guideTab.targetId,flatten:true})).sessionId;
+  try {
+    await send('Runtime.enable', {}, guideSession);
+    await send('Page.enable', {}, guideSession);
+    await send('Page.addScriptToEvaluateOnNewDocument', {source:reviewFixtureSource}, guideSession);
+    await send('Fetch.enable', {patterns:[{urlPattern:'https://github.com/*'}]}, guideSession);
+    await send('Page.navigate', {url:prUrl+'/changes'}, guideSession);
+    await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`, guideSession), 'saved Guide in another tab');
+    await evaluate(`${shadow}.querySelector('.rf-analyze').click()`, guideSession);
+    await waitFor(() => evaluate(`${sharedCard}?.querySelector('.rf-block-progress').textContent === '1 of 3 blocks inspected' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`, guideSession), 'partial progress restored in the second tab');
+    await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[2]}"]').click()`, guideSession);
+    await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && ${sharedCard}.querySelector('input[data-edit-id="${blockIds[2]}"]').checked`), 'a block inspected in another tab updates this Guide');
+    await chooseSection('contract');
+    await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[1]}"]').click()`);
+    for (const tab of [sessionId, guideSession]) await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '3 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true' && !document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled`, tab), 'completed file synchronized in both tabs');
+    await chooseSection('supporting');
+    await evaluate('window.fixtureViewedDelay = 100', guideSession);
+    const simultaneous = await Promise.allSettled([sessionId, guideSession].map(tab => evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`, tab)));
+    for (const outcome of simultaneous) assert.equal(outcome.status, 'fulfilled');
+    for (const tab of [sessionId, guideSession]) {
+      await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && !document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled`, tab), 'simultaneous block uncheck settled');
+      assert.deepEqual(await evaluate(`[...${sharedInputs}].map(input=>input.checked)`, tab), [false,true,true], 'A programmatic Viewed confirmation in another tab must not clear the remaining checklist.');
+    }
+    await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`);
+    for (const tab of [sessionId, guideSession]) await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '3 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true' && !document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`, tab), 'file completed again before a delayed older Viewed echo');
+    await evaluate(`window.fixtureHoldViewedPath = ${JSON.stringify(sharedPath)}; ${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`);
+    await waitFor(() => evaluate(`typeof window.fixtureReleaseViewed === 'function' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled && ${sharedCard}.querySelector('.rf-reviewed-toggle input').getAttribute('aria-disabled') === 'true'`), 'first tab has observed its held programmatic native uncheck');
+    await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'false' && !document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`, guideSession), 'second tab confirms Viewed before the first tab receives its echo');
+    await evaluate(`${shadow}.querySelector('.rf-section-link[data-topic-id="contract"]').click(); ${sharedCard}.querySelector('input[data-edit-id="${blockIds[1]}"]').click()`, guideSession);
+    for (const tab of [sessionId, guideSession]) await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '1 of 3 blocks inspected' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`, tab), 'a newer block generation is saved before the old Viewed echo');
+    assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').disabled`), true);
+    await evaluate('window.fixtureReleaseViewed()');
+    await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-reviewed-toggle input').getAttribute('aria-disabled') === 'false' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'older programmatic Viewed echo has been observed');
+    for (const tab of [sessionId, guideSession]) assert.deepEqual(await evaluate(`[...${sharedInputs}].map(input=>input.checked)`, tab), [false,false,true], 'A delayed Viewed echo from an older generation must preserve the remaining inspected block.');
+    await evaluate(`${sharedCard}.querySelector('input[data-edit-id="${blockIds[0]}"]').click()`);
+    await waitFor(() => evaluate(`${sharedCard}.querySelector('.rf-block-progress').textContent === '2 of 3 blocks inspected' && ${sharedCard}.querySelector('.rf-block-review input').getAttribute('aria-disabled') === 'false'`), 'partial checklist retained after cross-tab races');
+  } finally { await send('Target.closeTarget', {targetId:guideTab.targetId}); }
+  await page('Page.bringToFront');
+  await chooseSection('contract');
+  const missingPath = changes.paths[4];
+  const missingCard = `${shadow}.querySelector('.rf-guide-file[data-path="${missingPath}"]')`;
+  await evaluate(`${missingCard}.querySelector('.rf-block-review input').click()`);
+  await waitFor(() => evaluate(`${missingCard}.querySelector('.rf-block-progress').textContent.includes('1 of 1 blocks inspected') && ${missingCard}.querySelector('.rf-block-progress').textContent.includes('Viewed check pending')`), 'completed unloaded file keeps its checklist and pending Viewed state');
   await click('Full diff');
-  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0, 3));
-  assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-order').hidden`), true);
-  await click('Explained');
-  assert.deepEqual(await evaluate(nativePaths), [2, 1, 0].map(index => changes.paths[index]));
-  await chooseOrder('github');
-  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0, 3));
-  await click('Folded');
-  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0, 3), 'Switching explained/folded respects the user’s ordering choice.');
-  await chooseOrder('priority');
-  await click('Explained');
   await evaluate(`(() => {
     const list = document.querySelector('[data-testid=progressive-diffs-list]');
-    for (const entry of ${JSON.stringify(changes.entries.slice(3, 6).map(({path, pathDigest}) => ({path, pathDigest})))}) {
-      const html = window.priorityFileTemplate.replaceAll(${JSON.stringify(changes.paths[0])}, entry.path).replaceAll(${JSON.stringify(changes.entries[0].pathDigest)}, entry.pathDigest);
+    const template = list.querySelector('.fixture-diff-entry').outerHTML;
+    for (const entry of ${JSON.stringify(changes.entries.slice(3, 6).map(({path,pathDigest})=>({path,pathDigest})))}) {
+      const html = template.replaceAll(${JSON.stringify(changes.paths[0])}, entry.path).replaceAll(${JSON.stringify(changes.entries[0].pathDigest)}, entry.pathDigest);
       list.insertAdjacentHTML('beforeend', html);
-      window.fixtureInstallReviewControl(list.lastElementChild, entry.path, true);
+      const mounted = list.lastElementChild;
+      mounted.querySelectorAll('input.js-reviewed-checkbox, button[aria-pressed], [data-review-focus-owned]').forEach(node=>node.remove());
+      window.fixtureInstallReviewControl(mounted, entry.path, true);
     }
-    for (const file of list.querySelectorAll('.fixture-diff-entry')) file.style.minHeight = '420px';
-    document.head.insertAdjacentHTML('beforeend', ${JSON.stringify(fixtureStyle)});
   })()`);
-  await waitFor(() => evaluate(`JSON.stringify(${nativePaths}) === ${JSON.stringify(JSON.stringify(priorityPaths))}`), 'lazy-loaded files join their decision groups');
+  assert.equal(await evaluate(`document.getElementById('diff-${changes.entries[4].pathDigest}').querySelectorAll('button[aria-pressed]').length`), 1, 'The lazy fixture must install one live native Viewed control.');
+  await waitFor(() => evaluate(`document.getElementById('diff-${changes.entries[4].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true'`), 'pending Viewed applies when GitHub loads the control');
+  assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,6));
   await evaluate(`(() => {
     const file = document.getElementById('diff-${changes.entries[2].pathDigest}');
-    const form = document.createElement('form');
-    const comment = document.createElement('textarea');
-    comment.value = 'Unsubmitted review comment';
-    form.append(comment);
-    file.append(form);
-    window.priorityComment = comment;
-    comment.focus({preventScroll:true});
-    file.scrollIntoView({block:'start',behavior:'instant'});
-    window.scrollBy({top:120,behavior:'instant'});
-    window.priorityReadingTop = file.getBoundingClientRect().top;
+    window.guideDraft = document.createElement('textarea');
+    window.guideDraft.value = 'Unsubmitted review comment';
+    file.append(window.guideDraft);
+    window.guideThread = document.createElement('div');
+    window.guideThread.className = 'review-thread-component';
+    window.guideThread.textContent = 'Existing reviewer discussion';
+    file.append(window.guideThread);
   })()`);
-  await chooseOrder('github');
+  await click('Guide');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'contract', 'Native navigation preserves the current Guide section.');
+  await click('Full diff');
+  assert.ok(await evaluate('window.guideDraft.checkVisibility() && window.guideDraft.value === "Unsubmitted review comment" && window.guideThread.checkVisibility()'), 'Switching views preserves native discussion and pending drafts.');
+  await evaluate(`document.getElementById('diff-${changes.entries[0].pathDigest}').querySelector('.js-expand-all-difflines-button').click()`);
+  await waitFor(() => evaluate(`document.getElementById('diff-${changes.entries[0].pathDigest}').querySelectorAll('[data-fixture-context]').length === 201`), 'native context expansion remains available');
   assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,6));
-  assert.ok(await evaluate('document.activeElement === window.priorityComment && window.priorityComment.value === "Unsubmitted review comment"'), 'Reordering preserves focus and the pending comment.');
-  assert.ok(await evaluate(`Math.abs(document.getElementById('diff-${changes.entries[2].pathDigest}').getBoundingClientRect().top - window.priorityReadingTop) < 2`), 'Changing order keeps the current file at its reading position.');
-  await chooseOrder('priority');
-  assert.ok(await evaluate('document.activeElement === window.priorityComment'));
-  await evaluate(`(() => {
-    const file = document.getElementById('diff-${changes.entries[0].pathDigest}');
-    file.scrollIntoView({block:'start',behavior:'instant'});
-    window.scrollBy({top:40,behavior:'instant'});
-    window.priorityReadingTop = file.getBoundingClientRect().top;
-  })()`);
-  await chooseOrder('github');
-  assert.ok(await evaluate(`Math.abs(document.getElementById('diff-${changes.entries[0].pathDigest}').getBoundingClientRect().top - window.priorityReadingTop) < 2`), 'An offscreen focused comment must not override the file currently being read.');
-  await chooseOrder('priority');
-  await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').click()`);
-  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-file-progress-row[data-path="${changes.paths[2]}"] input').checked`), 'Viewed reflected in priority order');
-  assert.deepEqual(await evaluate(nativePaths), priorityPaths, 'Marking Viewed never shuffles files.');
-  await evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('.js-expand-all-difflines-button').click()`);
-  await waitFor(() => evaluate(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelectorAll('[data-fixture-context]').length === 201`), 'native expansion after reordering');
-  assert.deepEqual(await evaluate(nativePaths), priorityPaths);
-  await evaluate(`(() => {
-    const list = document.querySelector('[data-testid=progressive-diffs-list]');
-    const replacement = list.cloneNode(true);
-    list.replaceWith(replacement);
-    const entries = [...replacement.querySelectorAll('.fixture-diff-entry')];
-    entries.sort((left,right) => ${JSON.stringify(changes.paths)}.indexOf(left.querySelector('.diff-file-header code').textContent) - ${JSON.stringify(changes.paths)}.indexOf(right.querySelector('.diff-file-header code').textContent));
-    for (const entry of entries) replacement.append(entry);
-  })()`);
-  await waitFor(() => evaluate(`JSON.stringify(${nativePaths}) === ${JSON.stringify(JSON.stringify(priorityPaths))}`), 'GitHub list replacement reapplies the same ranking');
-  await evaluate(`(() => {
-    const list = document.querySelector('[data-testid=progressive-diffs-list]');
-    list.removeAttribute('data-testid');
-    list.classList.add('js-diff-progressive-container');
-    for (const entry of [...list.children].filter(entry => entry.matches('.fixture-diff-entry'))) {
-      const file = entry.querySelector('section');
-      file.classList.add('js-file');
-      file.dataset.tagsearchPath = file.querySelector('.diff-file-header code').textContent;
-      entry.replaceWith(file);
-    }
-  })()`);
-  const classicPaths = `Array.from(document.querySelectorAll('.js-diff-progressive-container > .js-file'), file => file.dataset.tagsearchPath)`;
-  await chooseOrder('github');
-  assert.deepEqual(await evaluate(classicPaths), changes.paths.slice(0,6), 'Classic file containers restore their original order.');
-  await chooseOrder('priority');
-  assert.deepEqual(await evaluate(classicPaths), priorityPaths, 'Classic file containers follow the same decision ordering.');
-  await evaluate('history.replaceState(null,"",location.pathname.replace(/changes$/,"checks")); window.dispatchEvent(new PopStateEvent("popstate"))');
-  await waitFor(() => evaluate('!document.querySelector("#review-focus-extension")'), 'priority UI removed on Checks');
-  assert.deepEqual(await evaluate(classicPaths), changes.paths.slice(0,6), 'Leaving the diff restores GitHub order.');
-  await page('Page.navigate', {url:prUrl + '/changes'});
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' || ${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'review available after navigation');
-  if (await evaluate(`!${shadow}.querySelector('.rf-overview-title')`)) await click('Open saved review');
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions'`), 'saved decisions restore priority order');
-  assert.deepEqual(await evaluate(nativePaths), [2,1,0].map(index => changes.paths[index]));
-  assert.equal((await modelRequests()).length - beforePriority, 6, 'View switches, remounts, and restoring a review reuse the assessment.');
+  await click('Guide');
+  await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
+  assert.ok(await evaluate(`[...${sharedInputs}].every(input=>input.checkVisibility())`), 'Turning off folding shows every captured block in the section’s files.');
+  await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
+  await click('Previous section');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting');
+  await evaluate(`${sharedCard}.querySelector('.rf-guide-file-heading .rf-link-button').click()`);
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'contract', 'Find remaining blocks routes to the section owning the unchecked block.');
+  assert.equal(await evaluate(`${shadow}.activeElement.dataset.editId`), blockIds[1]);
   await openFiles();
+  await evaluate(`${shadow}.querySelector('.rf-file-progress-row[data-path="${changes.paths[5]}"] .rf-file-path').click()`);
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), undefined);
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-section-title').textContent.includes('not analyzed')`));
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-code-add, .rf-code-delete').length`), 2, 'Excluded generated code remains readable without an invented explanation.');
+  await chooseSection('contract');
   await evaluate('document.querySelector("#review-focus-extension").scrollIntoView({block:"start"})');
-  await writeFile('/tmp/priorities-priority-order.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
+  await writeFile('/tmp/priorities-guide-sections.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
   await page('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:false});
-  assert.equal(await evaluate(`${shadow}.querySelector('.rf-panel').scrollWidth > ${shadow}.querySelector('.rf-panel').clientWidth`), false, 'Order controls and grouped file names fit a narrow viewport.');
-  await writeFile('/tmp/priorities-priority-order-mobile.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-panel').scrollWidth > ${shadow}.querySelector('.rf-panel').clientWidth`), false, 'Sections, file names and block controls fit a narrow viewport.');
+  await writeFile('/tmp/priorities-guide-sections-mobile.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
   await page('Emulation.setDeviceMetricsOverride', {width:1512,height:1080,deviceScaleFactor:1,mobile:false});
+  assert.equal((await modelRequests()).length - beforeGuide, 6, 'Section navigation, block checks, native controls, reload and another tab reuse the assessment.');
+  for (const override of ['always-visible', 'protected']) {
+    await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});
+    await waitFor(() => evaluate('!document.querySelector("#save-review-preferences").disabled'), 'visibility override preferences ready');
+    await evaluate(`(async () => {
+      const {preferences} = await chrome.runtime.sendMessage({type:'get-review-preferences'});
+      const result = await chrome.runtime.sendMessage({type:'save-review-preferences',preferences:{...preferences,alwaysShow:${JSON.stringify(override === 'always-visible' ? ['behavior'] : [])},protectedPaths:${JSON.stringify(override === 'protected' ? [sharedPath] : [])}}});
+      if (result.error) throw new Error(result.error);
+    })()`);
+    const beforeOverride = (await modelRequests()).length;
+    await page('Page.navigate', {url:prUrl+'/changes'});
+    await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze') && !${shadow}.querySelector('.rf-analyze').disabled`), 'fresh Guide visibility override');
+    await click('Analyze PR');
+    await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'visibility override assessment completed');
+    await waitForBlocks();
+    assert.ok(await evaluate(`[...${sharedInputs}].every(input=>input.checkVisibility())`), 'User visibility rules keep foreign section changes open.');
+    const reason = override === 'protected' ? 'protected file' : 'your always-visible types: behavior';
+    assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-foreign-edit')].some(label=>label.checkVisibility() && label.textContent.includes('Check the contract and its implementation') && label.textContent.includes(${JSON.stringify(reason)}))`), 'Foreign changes state their owner and the concrete visibility override.');
+    assert.equal(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-code-context')].every(row=>row.checkVisibility())`), override === 'protected', 'Only protected paths keep uncited surrounding context open.');
+    assert.equal((await modelRequests()).length - beforeOverride, 6);
+  }
   assert.ok(workers.length > 0);
   assert.deepEqual(eventErrors, []);
   assert.deepEqual(exceptions, []);
-  console.log('Installed extension passed: Codex connection/model settings, complete GitHub capture, 53 deferred files and deferred total count, 53-file Changes route with four split-view entries and validated lazy loading, bounded linked issue intent and local failures, classic/React source fixtures, per-file Codex classification + PR review → focused diff → full restore, unresolved edit visibility, incomplete diff rejection. A fake Codex process supplied results through the real native host; no live model calls.');
+  console.log('Installed extension passed: Codex connection/model settings, complete GitHub capture, 53 deferred files and deferred total count, 53-file Changes route with four split-view entries and validated lazy loading, bounded linked issue intent and local failures, classic/React source fixtures, per-file Codex classification + PR review → paired Guide → native Full diff, section folding and unresolved labels, persisted block progress and GitHub Viewed synchronization, incomplete diff rejection. A fake Codex process supplied results through the real native host; no live model calls.');
 } finally {
   for (const request of pending.values()) clearTimeout(request.timer);
   chrome.kill('SIGTERM');

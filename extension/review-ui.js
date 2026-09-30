@@ -2,7 +2,7 @@ import { capturePullRequest, findNativeFiles, readPageIdentity } from './github.
 import { isGeneratedFile } from './review-data.js';
 import { isProtectedPath } from './review-preferences.js';
 
-const hiddenClass = 'review-focus-native-hidden';
+const surfaceHiddenClass = 'review-focus-native-surface-hidden';
 const ownedAttribute = 'data-review-focus-owned';
 
 function element(tag, className, text) {
@@ -40,141 +40,52 @@ function rowSelected(row, excerpts) {
   });
 }
 
-function topicLabel(topics) {
-  const unique = [...new Set(topics.filter(Boolean))];
-  if (!unique.length) return 'Surrounding context';
-  return `Supporting changes: ${unique.map(topic => topic.title).join('; ')}`;
-}
-
-export function createNativeFolding(doc, snapshot, analysis, onChange = () => {}, revealed = new Set(), alwaysShow = [], protectedPaths = []) {
-  const topicsByEdit = new Map(analysis.topics.flatMap(topic => topic.editIds.map(id => [id, topic])));
-  const keptEdits = new Set(analysis.classifications.filter(entry => entry.kinds.some(kind => kind === 'unknown' || alwaysShow.includes(kind))).map(entry => entry.editId));
-  const fileRows = new Map(snapshot.files.map(file => {
-    const rows = new Map();
-    const protectedFile = isProtectedPath(file.path, protectedPaths);
-    for (const hunk of file.hunks) {
-      for (const item of hunk.items) {
-        const topic = topicsByEdit.get(item.id);
-        const kept = protectedFile || keptEdits.has(item.id) || topic?.priority === 'review';
-        for (const row of item.type === 'edit' ? item.rows : [item]) {
-          if (row.type !== 'marker') rows.set(rowKey(row), { row, topic, kept });
-        }
+function guideFileRows(snapshot, file) {
+  const sources = ['before', 'after'].map(side => {
+    const source = snapshot.context.find(entry => entry.path === file.path && entry.side === side);
+    if (!source) return null;
+    const lines = source.text.split('\n');
+    if (lines.at(-1) === '') lines.pop();
+    return lines;
+  });
+  const [before, after] = sources;
+  const rows = [];
+  let oldLine = 1;
+  let newLine = 1;
+  function contextUntil(oldEnd, newEnd) {
+    const count = oldEnd - oldLine;
+    if (count !== newEnd - newLine || count < 0) throw new Error('Captured source does not align with this diff. Open Full diff to inspect the file.');
+    if (count && !before && !after) {
+      rows.push({ type: 'marker', text: '… Source between these ranges was not captured …', oldLine: null, newLine: null });
+      oldLine = oldEnd;
+      newLine = newEnd;
+      return;
+    }
+    while (oldLine < oldEnd) {
+      const oldText = before?.[oldLine - 1];
+      const newText = after?.[newLine - 1];
+      if (oldText === undefined && newText === undefined || oldText !== undefined && newText !== undefined && oldText !== newText) throw new Error('Captured source does not align with this diff. Open Full diff to inspect the file.');
+      rows.push({ type: 'context', text: oldText ?? newText, oldLine: oldText === undefined ? null : oldLine, newLine: newText === undefined ? null : newLine, outsideDiff: true });
+      oldLine++;
+      newLine++;
+    }
+  }
+  for (const hunk of file.hunks) {
+    const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(hunk.header);
+    if (!match) throw new Error('The captured hunk has no line range. Open Full diff to inspect the file.');
+    contextUntil(Number(match[1]) + (match[2] === '0' ? 1 : 0), Number(match[3]) + (match[4] === '0' ? 1 : 0));
+    rows.push({ type: 'marker', text: hunk.header, oldLine: null, newLine: null });
+    for (const item of hunk.items) {
+      for (const row of item.type === 'edit' ? item.rows : [item]) {
+        rows.push({ ...row, ...(item.type === 'edit' ? { editId: item.id } : {}) });
+        if (row.oldLine !== null) oldLine = row.oldLine + 1;
+        if (row.newLine !== null) newLine = row.newLine + 1;
       }
     }
-    return [file.path, rows];
-  }));
-  const excerptsByPath = new Map();
-  for (const topic of analysis.topics.filter(topic => topic.priority === 'review')) {
-    for (const excerpt of topic.excerpts) {
-      const excerpts = excerptsByPath.get(excerpt.path) ?? [];
-      excerpts.push(excerpt);
-      excerptsByPath.set(excerpt.path, excerpts);
-    }
   }
-  const hidden = new Set();
-  const folds = [];
-  let matched = 0;
-  let unmatched = 0;
-  let appliedLayout;
-
-  function restore() {
-    appliedLayout = undefined;
-    for (const row of hidden) row.classList.remove(hiddenClass);
-    hidden.clear();
-    for (const fold of folds) fold.marker.remove();
-    folds.length = 0;
-  }
-
-  function counts() {
-    const hiddenChanges = folds.filter(fold => !revealed.has(fold.key)).reduce((sum, fold) => sum + fold.changed, 0);
-    return { hidden: hidden.size, hiddenChanges, matched, unmatched, groups: folds.length };
-  }
-
-  function setExpanded(fold, expanded) {
-    if (expanded) revealed.add(fold.key);
-    else revealed.delete(fold.key);
-    for (const row of fold.rows) {
-      row.element.classList.toggle(hiddenClass, !expanded);
-      if (expanded) hidden.delete(row.element);
-      else hidden.add(row.element);
-    }
-    fold.toggle.textContent = expanded ? 'Hide' : 'Show';
-    fold.toggle.setAttribute('aria-expanded', String(expanded));
-    fold.toggle.setAttribute('aria-label', `${expanded ? 'Hide' : 'Show'} ${fold.rows.length} lines. ${fold.reason}`);
-    onChange(counts());
-  }
-
-  function foldRows(path, rows) {
-    if (rows.length < 2) return;
-    const first = rows[0].element;
-    const marker = doc.createElement(first.tagName === 'TR' ? 'tr' : 'div');
-    marker.className = 'review-focus-native-fold';
-    marker.setAttribute(ownedAttribute, '');
-    const container = doc.createElement(first.tagName === 'TR' ? 'td' : 'div');
-    if (first.tagName === 'TR') container.colSpan = Math.max(1, [...first.cells].reduce((sum, cell) => sum + cell.colSpan, 0));
-    const body = element('div', 'review-focus-native-fold-body');
-    const reason = topicLabel(rows.map(row => row.topic));
-    const label = element('span', 'review-focus-native-reason', `${rows.length} ${reason.startsWith('Surrounding') ? 'context' : 'supporting'} lines`);
-    label.title = reason;
-    const toggle = button('', () => setExpanded(fold, !revealed.has(fold.key)), 'review-focus-native-toggle');
-    const fold = { key: JSON.stringify([path, rowKey(rows[0]), rowKey(rows.at(-1))]), marker, toggle, rows, reason, changed: rows.filter(row => row.type !== 'context').length };
-    body.append(label, toggle);
-    container.append(body);
-    marker.append(container);
-    first.before(marker);
-    folds.push(fold);
-    setExpanded(fold, revealed.has(fold.key));
-  }
-
-  function apply() {
-    const files = findNativeFiles(doc);
-    const layout = files.flatMap(file => [file.element, file.path, ...file.rows.flatMap(row => {
-      let next = row.element.nextElementSibling;
-      while (next?.hasAttribute(ownedAttribute)) next = next.nextElementSibling;
-      return [row.element, row.element.parentElement, next, rowKey(row), row.element.getAttribute('role'), Boolean(row.element.querySelector('form, textarea, .review-thread-component, .js-comment-container') || next?.matches('tr.inline-comments'))];
-    })]);
-    const intactFolds = folds.every(fold => fold.marker.nextElementSibling === fold.rows[0].element);
-    if (intactFolds && appliedLayout?.length === layout.length && layout.every((value, index) => value === appliedLayout[index])) return counts();
-    restore();
-    appliedLayout = layout;
-    matched = 0;
-    unmatched = 0;
-    for (const file of files) {
-      const expected = fileRows.get(file.path);
-      if (!expected) continue;
-      const excerpts = excerptsByPath.get(file.path) ?? [];
-      const elementCounts = new Map();
-      for (const row of file.rows) elementCounts.set(row.element, (elementCounts.get(row.element) ?? 0) + 1);
-      let group = [];
-      const flush = () => { foldRows(file.path, group); group = []; };
-      for (const row of file.rows) {
-        const match = expected.get(rowKey(row));
-        const supported = row.element.tagName === 'TR' || row.element.getAttribute('role') === 'row';
-        const hasDiscussion = row.element.querySelector('form, textarea, .review-thread-component, .js-comment-container') || row.element.nextElementSibling?.matches('tr.inline-comments');
-        if (!match || !supported || elementCounts.get(row.element) !== 1 || hasDiscussion) {
-          unmatched++;
-          flush();
-          continue;
-        }
-        matched++;
-        if (match.kept || rowSelected(match.row, excerpts)) {
-          flush();
-          continue;
-        }
-        if (group.length && group.at(-1).element.nextElementSibling !== row.element) flush();
-        group.push({ ...row, topic: match.topic });
-      }
-      flush();
-    }
-    return counts();
-  }
-
-  function revealRow(row) {
-    const fold = folds.find(entry => entry.rows.some(item => item.element === row));
-    if (fold) setExpanded(fold, true);
-  }
-
-  return { apply, restore, counts, revealRow };
+  const remaining = before ? before.length + 1 - oldLine : after ? after.length + 1 - newLine : 0;
+  if (remaining > 0) contextUntil(oldLine + remaining, newLine + remaining);
+  return rows;
 }
 
 function sourceLink(snapshot, excerpt) {
@@ -185,11 +96,15 @@ function sourceLink(snapshot, excerpt) {
   return `https://github.com/${parts[0]}/${parts[1]}/blob/${revision}/${path}#L${excerpt.startLine}-L${excerpt.endLine}`;
 }
 
-function renderRows(rows) {
+function renderRows(rows, path) {
   const table = element('table', 'rf-code');
   const body = element('tbody');
   for (const row of rows) {
     const line = element('tr', `rf-code-${row.type}`);
+    if (row.editId) line.dataset.editId = row.editId;
+    if (row.outsideDiff) line.dataset.outsideDiff = 'true';
+    line.dataset.oldLine = row.oldLine ?? '';
+    line.dataset.newLine = row.newLine ?? '';
     line.append(element('td', 'rf-line-number', String(row.oldLine ?? '')));
     line.append(element('td', 'rf-line-number', String(row.newLine ?? '')));
     line.append(element('td', 'rf-line-marker', row.type === 'add' ? '+' : row.type === 'delete' ? '−' : ''));
@@ -198,6 +113,9 @@ function renderRows(rows) {
   }
   table.append(body);
   const scroll = element('div', 'rf-code-scroll');
+  scroll.tabIndex = 0;
+  scroll.setAttribute('role', 'region');
+  scroll.setAttribute('aria-label', `Before and after code${path ? ` for ${path}` : ''}`);
   scroll.append(table);
   return scroll;
 }
@@ -217,13 +135,12 @@ export function startReviewUI() {
   shadow.append(style, panel);
   let snapshot;
   let analysis;
-  let folding;
   let port;
   let controller;
   let operation = 0;
   let settingsRequest = 0;
   let busy = false;
-  let mode = 'focused';
+  let mode = 'guide';
   let identityKey = '';
   let pathKey = '';
   let resumeProbe = '';
@@ -240,7 +157,21 @@ export function startReviewUI() {
   const filePanels = new Map();
   const observedReviews = new Map();
   let reviewControls = new Map();
-  const revealed = new Set();
+  const expanded = new Set();
+  const hiddenSurfaces = new Set();
+  const syncingViewed = new Map();
+  const nativeObservations = new Map();
+  const manualViewed = new Set();
+  let selectedTopicId;
+  let selectedFile;
+  let foldOtherCode = true;
+  let blockProgress;
+  let blockRequest = 0;
+  let blockLoading = false;
+  let blockSaving = 0;
+  let unsavedBlock;
+  let blockError = '';
+  let navigationNotice = '';
   let finalResult = false;
   let reviewStage = '';
   let attempted = false;
@@ -260,8 +191,6 @@ export function startReviewUI() {
   let cacheProbeVersion = 0;
   let fileFilter = 'all';
   let fileListOpen = false;
-  let reviewGroups = [];
-  let fileOrder = 'priority';
 
   const header = element('div', 'rf-toolbar');
   const brand = element('strong', 'rf-brand', 'PRiorities');
@@ -273,19 +202,17 @@ export function startReviewUI() {
   const alternateReview = button('Run fresh review', () => analyzePullRequest(savedReview && missedSavedReviews.has(savedReview.candidate) ? { cacheOnly: true } : { force: true }));
   const cancel = button('Cancel', () => cancelAnalysis());
   const settings = button('Settings', () => openSettings());
-  const focused = button('Folded', () => setMode('focused'));
-  const explained = button('Explained', () => setMode('explained'));
+  const guide = button('Guide', () => setMode('guide'));
   const full = button('Full diff', () => setMode('full'));
-  full.title = 'All code, without PRiorities explanations.';
-  explained.title = 'All code, with PRiorities explanations beside each file.';
-  focused.title = 'PRiorities explanations, with supporting code folded.';
+  full.title = 'Read and discuss changes in GitHub’s original diff.';
+  guide.title = 'Understand the change with explanations and paired code.';
   const retryFinal = button('Retry review decisions', () => retryReview());
   retryFinal.hidden = true;
   cancel.hidden = true;
   const viewToggle = element('div', 'rf-view-toggle');
   viewToggle.setAttribute('role', 'group');
   viewToggle.setAttribute('aria-label', 'Review view');
-  const viewButtons = [full, explained, focused];
+  const viewButtons = [full, guide];
   viewToggle.append(...viewButtons);
   viewToggle.addEventListener('keydown', event => {
     const index = viewButtons.indexOf(event.target);
@@ -325,6 +252,8 @@ export function startReviewUI() {
   statusNode.setAttribute('aria-live', 'polite');
   const errorNode = element('p', 'rf-error');
   errorNode.setAttribute('role', 'alert');
+  const nativeNotice = element('p', 'rf-navigation-notice');
+  nativeNotice.hidden = true;
   const result = element('div', 'rf-result');
   const welcome = element('p', 'rf-welcome', 'Focus on the changes that need you. Every line stays accessible.');
   const progressPanel = element('div', 'rf-progress-panel');
@@ -341,24 +270,8 @@ export function startReviewUI() {
   fileProgress.id = 'rf-file-progress';
   fileProgress.hidden = true;
   const secondary = element('div', 'rf-secondary');
-  const orderControl = element('select', 'rf-file-order');
-  orderControl.setAttribute('aria-label', 'File order');
-  orderControl.title = 'Priority order groups related files by review decision. GitHub order restores the captured file order.';
-  for (const [value, label] of [['priority', 'Priority order'], ['github', 'GitHub order']]) {
-    const option = element('option', '', label);
-    option.value = value;
-    orderControl.append(option);
-  }
-  orderControl.addEventListener('change', () => {
-    if (!isActive()) return;
-    keepReadingPosition(() => {
-      fileOrder = orderControl.value;
-      applyFileOrder();
-      renderFileProgress();
-    });
-  });
-  secondary.append(runSettings, orderControl, result);
-  panel.append(header, secondary, welcome, progressPanel, statusNode, cacheNotice, errorNode, fileProgress);
+  secondary.append(runSettings);
+  panel.append(header, secondary, welcome, progressPanel, statusNode, cacheNotice, errorNode, nativeNotice, fileProgress, result);
 
   function canOpenSavedReview() {
     return Boolean(savedReview && !analysis && !missedSavedReviews.has(savedReview.candidate));
@@ -387,10 +300,10 @@ export function startReviewUI() {
     alternateReview.textContent = savedReview && missedSavedReviews.has(savedReview.candidate) ? 'Retry saved review' : 'Run fresh review';
     cancel.hidden = !busy;
     cancel.disabled = pendingAction?.type === 'cancel';
-    viewToggle.hidden = !analysis;
+    viewToggle.hidden = !finalResult;
     retryFinal.hidden = busy || !port || !['check-failed', 'cancelled'].includes(reviewStage) || [...fileStates.values()].some(file => !['classified', 'complete', 'skipped', 'excluded'].includes(file.state));
-    focused.setAttribute('aria-pressed', String(mode === 'focused'));
-    explained.setAttribute('aria-pressed', String(mode === 'explained'));
+    guide.setAttribute('aria-pressed', String(mode === 'guide'));
+    guide.disabled = !finalResult;
     full.setAttribute('aria-pressed', String(mode === 'full'));
     for (const control of viewButtons) control.tabIndex = control.getAttribute('aria-pressed') === 'true' ? 0 : -1;
     errorNode.hidden = !currentError;
@@ -414,16 +327,10 @@ export function startReviewUI() {
       ? `Connect your local ${providerName} helper in Settings, then analyze this PR.`
       : `Ready to analyze ${rangeSelected ? 'these commits' : 'this PR'} with ${providerName}${model ? ` (${model})` : ''}. Analysis starts only when you click ${analyzeLabel}.`;
     if (settingsChanged && !busy && !pendingAction && !currentError) nextStatus = `Settings changed. ${analyzeLabel} will use ${providerName} (${model}), effort: ${effort || 'model default'}.`;
-    const split = [...document.querySelectorAll('table[data-diff-anchor] tr.diff-line-row')].some(row => row.querySelectorAll('.diff-text').length > 1);
-    if (analysis && mode === 'focused' && split) nextStatus += ' GitHub is in split view. Choose Unified in its diff view settings to collapse lines.';
     if (statusNode.textContent !== nextStatus) statusNode.textContent = nextStatus;
-    const ordinaryStatus = (busy && snapshot || finalResult && verifiedPage() || !attempted && configured && !status) && !currentError && !pendingAction && !split && !(settingsChanged && !busy);
+    const ordinaryStatus = (busy && snapshot || finalResult && verifiedPage() || !attempted && configured && !status) && !currentError && !pendingAction && !(settingsChanged && !busy);
     statusNode.classList.toggle('rf-visually-hidden', Boolean(ordinaryStatus));
-    const foldingDetail = result.querySelector('.rf-folding-detail');
-    if (foldingDetail) foldingDetail.textContent = status;
     result.hidden = mode === 'full' || !finalResult;
-    orderControl.hidden = !finalResult || mode === 'full';
-    orderControl.value = fileOrder;
   }
 
   async function loadSettings(refreshConnection = false) {
@@ -515,9 +422,21 @@ export function startReviewUI() {
   }
 
   function clearReview() {
-    applyFileOrder(true);
-    folding?.restore();
-    folding = undefined;
+    restoreNativeSurface();
+    blockRequest++;
+    blockProgress = undefined;
+    blockLoading = false;
+    blockSaving = 0;
+    unsavedBlock = undefined;
+    blockError = '';
+    syncingViewed.clear();
+    nativeObservations.clear();
+    selectedTopicId = undefined;
+    selectedFile = undefined;
+    navigationNotice = '';
+    nativeNotice.hidden = true;
+    nativeNotice.replaceChildren();
+    manualViewed.clear();
     snapshot = undefined;
     analysis = undefined;
     finalResult = false;
@@ -535,9 +454,8 @@ export function startReviewUI() {
     cacheProbe = '';
     cacheProbeVersion++;
     fileFilter = 'all';
-    reviewGroups = [];
     fileStates.clear();
-    revealed.clear();
+    expanded.clear();
     removeFilePanels();
     fileProgress.hidden = true;
     fileListOpen = false;
@@ -548,6 +466,8 @@ export function startReviewUI() {
   function retryReview(path) {
     if (!isActive() || !port || openingSavedReview || !verifiedPage()) return;
     busy = true;
+    finalResult = false;
+    updateSurface();
     error = '';
     reviewStage = path ? 'files' : 'checking';
     pendingAction = { type: path ? 'file' : 'check', path, message: path ? `Retrying ${path}…` : 'Retrying review decisions…' };
@@ -562,7 +482,7 @@ export function startReviewUI() {
     fileFilter = 'all';
     busy = true;
     finalResult = false;
-    applyFolding();
+    updateSurface();
     error = '';
     reviewStage = 'files';
     pendingAction = { type: 'file', path, message: `Analyzing ${path}…` };
@@ -674,9 +594,10 @@ export function startReviewUI() {
       const control = nativeReviewControl(native);
       if (control && !control.disabled && control.getAttribute('aria-disabled') !== 'true') {
         const reviewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
-        if (input.checked !== reviewed) control.click();
+        if (input.checked !== reviewed) { manualViewed.add(path); control.click(); }
       }
       readReviewControls();
+      syncBlockProgress();
       renderFileProgress();
     });
     label.append(input, element('span', '', 'Reviewed by you'), element('span', 'rf-review-unavailable'));
@@ -702,32 +623,30 @@ export function startReviewUI() {
     }
     fileProgress.append(filters);
     const rows = element('div', 'rf-file-list');
-    const groups = priorityOrderActive() ? reviewGroups : [{ paths: [...fileStates.keys()] }];
-    for (const group of groups) {
-      let heading;
-      for (const path of group.paths) {
-        const file = fileStates.get(path);
-        if (fileFilter === 'reviewed' && observedReviews.get(path) !== true) continue;
-        if (fileFilter === 'unreviewed' && observedReviews.get(path) === true) continue;
-        if (fileFilter === 'failed' && !['failed', 'cancelled'].includes(file.state)) continue;
-        if (group.title && !heading) {
-          heading = element('h3', 'rf-file-group', group.title);
-          rows.append(heading);
-        }
-        const row = element('div', 'rf-file-progress-row');
-        row.dataset.state = file.state;
-        row.dataset.path = path;
-        const label = element('span', 'rf-file-state', fileLabel(file));
-        label.dataset.state = file.state;
-        row.append(button(path, () => {
-          const native = findNativeFiles(document).find(entry => entry.path === path);
-          native?.element.scrollIntoView({ block: 'start', behavior: 'auto' });
-        }, 'rf-file-path'), label, reviewToggle(path));
-        if (['failed', 'cancelled'].includes(file.state) && port && !openingSavedReview) row.append(button('Retry file', () => retryReview(path)));
-        if (file.state === 'excluded' && port && !openingSavedReview) row.append(button('Review anyway', () => reviewGeneratedFile(path)));
-        if (['failed', 'cancelled'].includes(file.state) && file.message) row.append(element('span', 'rf-caption', file.message));
-        rows.append(row);
+    for (const [path, file] of fileStates) {
+      if (fileFilter === 'reviewed' && observedReviews.get(path) !== true) continue;
+      if (fileFilter === 'unreviewed' && observedReviews.get(path) === true) continue;
+      if (fileFilter === 'failed' && !['failed', 'cancelled'].includes(file.state)) continue;
+      const row = element('div', 'rf-file-progress-row');
+      row.dataset.state = file.state;
+      row.dataset.path = path;
+      const label = element('span', 'rf-file-state', fileLabel(file));
+      label.dataset.state = file.state;
+      row.append(button(path, () => finalResult ? selectFile(path) : showNativeFile(path), 'rf-file-path'), label, reviewToggle(path));
+      if (finalResult) {
+        const progress = element('span', 'rf-block-progress');
+        progress.dataset.path = path;
+        row.append(progress);
+        const owners = fileTopics(path);
+        const references = analysis.topics.filter(topic => !owners.includes(topic) && topic.excerpts.some(excerpt => excerpt.path === path));
+        const links = element('div', 'rf-file-sections');
+        for (const topic of [...owners, ...references]) links.append(button(`${topic.title}${references.includes(topic) ? ' (cited evidence)' : ''}`, () => selectTopic(topic.id, path), 'rf-link-button'));
+        row.append(links);
       }
+      if (['failed', 'cancelled'].includes(file.state) && port && !openingSavedReview) row.append(button('Retry file', () => retryReview(path)));
+      if (file.state === 'excluded' && port && !openingSavedReview) row.append(button('Review anyway', () => reviewGeneratedFile(path)));
+      if (['failed', 'cancelled'].includes(file.state) && file.message) row.append(element('span', 'rf-caption', file.message));
+      rows.append(row);
     }
     if (!rows.childElementCount) rows.append(element('p', 'rf-caption', 'No files in this view.'));
     fileProgress.append(rows);
@@ -738,78 +657,8 @@ export function startReviewUI() {
       const replacement = focused.tagName === 'INPUT' ? row?.querySelector('input') : [...row?.querySelectorAll('button') ?? []].find(button => button.textContent === focused.textContent);
       (replacement ?? filters.querySelector('[aria-pressed="true"]')).focus({ preventScroll: true });
     }
+    refreshBlockControls();
     renderFilePanels();
-  }
-
-  function buildReviewGroups() {
-    const locations = editLocations();
-    const assigned = new Set();
-    const groups = [];
-    const add = (title, paths) => {
-      const remaining = [...new Set(paths)].filter(path => !assigned.has(path));
-      if (!remaining.length) return;
-      for (const path of remaining) assigned.add(path);
-      groups.push({ title, paths: remaining });
-    };
-    const topicPaths = topic => [...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)];
-    for (const topic of analysis.topics.filter(topic => topic.priority === 'review')) add(topic.title, topicPaths(topic));
-    add('Unresolved evidence', analysis.classifications.filter(entry => entry.kinds.includes('unknown')).map(entry => locations.get(entry.editId).file.path));
-    for (const topic of analysis.topics.filter(topic => topic.priority === 'supporting')) add(topic.title, topicPaths(topic));
-    add('Not analyzed', [...fileStates.keys()]);
-    return groups;
-  }
-
-  function priorityOrderActive() {
-    return finalResult && mode !== 'full' && fileOrder === 'priority';
-  }
-
-  function keepReadingPosition(update) {
-    const reading = host.isConnected && host.getBoundingClientRect().bottom < 0;
-    const visibleFiles = reading ? findNativeFiles(document).filter(file => {
-      const rect = file.element.getBoundingClientRect();
-      return rect.bottom > 0 && rect.top < innerHeight;
-    }) : [];
-    const anchor = visibleFiles.find(file => file.element.contains(document.activeElement))?.element ?? visibleFiles[0]?.element;
-    const top = anchor?.getBoundingClientRect().top;
-    update();
-    if (anchor) window.scrollBy({ top: anchor.getBoundingClientRect().top - top, behavior: 'instant' });
-  }
-
-  function applyFileOrder(restore = false) {
-    if (!snapshot) return;
-    const paths = !restore && priorityOrderActive() && verifiedPage()
-      ? reviewGroups.flatMap(group => group.paths) : snapshot.files.map(file => file.path);
-    const ranks = new Map(paths.map((path, index) => [path, index]));
-    const files = findNativeFiles(document);
-    const lists = new Map();
-    for (const file of files) {
-      if (!ranks.has(file.path)) continue;
-      const list = file.element.closest('[data-testid="progressive-diffs-list"], .js-diff-progressive-container')
-        ?? (file.element.matches('.js-file') ? file.element.parentElement : null);
-      if (!list) continue;
-      let entry = file.element;
-      while (entry.parentElement !== list) entry = entry.parentElement;
-      const entries = lists.get(list) ?? new Map();
-      if (entries.has(entry)) entries.set(entry, null);
-      else entries.set(entry, file.path);
-      lists.set(list, entries);
-    }
-    const moves = [];
-    for (const [list, entries] of lists) {
-      const children = [...list.children];
-      const ordered = children.filter(child => entries.get(child)).sort((left, right) => ranks.get(entries.get(left)) - ranks.get(entries.get(right)));
-      let index = 0;
-      const desired = children.map(child => entries.get(child) ? ordered[index++] : child);
-      if (desired.some((child, index) => child !== children[index])) moves.push({ list, desired });
-    }
-    if (!moves.length) return;
-    keepReadingPosition(() => {
-      for (const { list, desired } of moves) {
-        for (const [index, child] of desired.entries()) {
-          if (list.children[index] !== child) list.moveBefore(child, list.children[index] ?? null);
-        }
-      }
-    });
   }
 
   function editLocations() {
@@ -827,7 +676,6 @@ export function startReviewUI() {
 
   function renderFilePanels() {
     if (!isActive() || !isDiffPage()) return;
-    let locations;
     for (const [container, record] of filePanels) {
       if (container.isConnected) continue;
       record.node.remove();
@@ -894,43 +742,14 @@ export function startReviewUI() {
         if (wasFocused) (record.actions.firstElementChild ?? progressToggle).focus({ preventScroll: true });
         record.action = action;
       }
-      const topics = file.state === 'complete' && analysis && finalResult ? fileTopics(native.path) : [];
-      const existingDetails = record.content.querySelector('.rf-file-decisions');
-      if (existingDetails) existingDetails.hidden = observedReviews.get(native.path) === true;
-      const sameTopics = record.topics?.length === topics.length && topics.every((topic, index) => topic === record.topics[index]);
-      const showExplanations = mode !== 'full' && finalResult;
-      if (record.state === file.state && record.message === file.message && sameTopics && record.showExplanations === showExplanations) continue;
+      if (record.state === file.state && record.message === file.message) continue;
       record.state = file.state;
       record.message = file.message;
-      record.topics = topics;
-      record.showExplanations = showExplanations;
       record.node.dataset.state = file.state;
       record.content.replaceChildren();
       if (['failed', 'cancelled', 'skipped'].includes(file.state) && file.message) record.content.append(element('p', 'rf-file-message', file.message));
-      if (file.state !== 'complete' || !showExplanations || !analysis) {
-        record.node.hidden = !record.content.childElementCount;
-        continue;
-      }
-      record.node.hidden = false;
-      const details = element('div', 'rf-file-decisions');
-      details.hidden = observedReviews.get(native.path) === true;
-      if (!locations) locations = editLocations();
-      const limits = [...new Set([...locations.values()].filter(entry => entry.file.path === native.path && entry.classification?.kinds.includes('unknown')).map(entry => entry.classification.uncertainty || entry.classification.reason))];
-      for (const limit of limits) {
-        const notice = element('p', 'rf-uncertainty rf-kept-visible');
-        notice.append(element('strong', '', 'Kept visible because evidence is incomplete: '), document.createTextNode(limit));
-        details.append(notice);
-      }
-      const keptKinds = [...new Set([...locations.values()].filter(entry => entry.file.path === native.path).flatMap(entry => entry.classification?.kinds.filter(kind => reviewPreferences?.alwaysShow.includes(kind)) ?? []))];
-      if (keptKinds.length) details.append(element('p', 'rf-kept-visible rf-caption', `Your settings keep ${keptKinds.join(', ')} edits visible.`));
-      if (isProtectedPath(native.path, reviewPreferences?.protectedPaths ?? [])) details.append(element('p', 'rf-kept-visible rf-caption', 'Your protected paths keep this file visible.'));
-      for (const topic of topics) details.append(renderTopic(topic, locations));
-      record.content.append(details);
+      record.node.hidden = !record.content.childElementCount;
     }
-  }
-
-  function reviewedSnapshot() {
-    return { ...snapshot, files: snapshot.files.filter(file => fileStates.get(file.path)?.state === 'complete') };
   }
 
   function finishFailure(message, request) {
@@ -985,7 +804,7 @@ export function startReviewUI() {
       } });
       if (request !== operation || !isActive()) return;
       snapshot = captured;
-      mode = 'focused';
+      mode = 'guide';
       reviewStage = 'files';
       for (const file of snapshot.files) {
         const hasEdits = file.hunks.some(hunk => hunk.items.some(item => item.type === 'edit'));
@@ -1022,7 +841,7 @@ export function startReviewUI() {
         busy = true;
         cacheOnly = message.restoring;
         openingSavedReview = message.restoring;
-        mode = 'focused';
+        mode = 'guide';
         reviewStage = 'files';
         fileStates.clear();
         for (const file of snapshot.files) fileStates.set(file.path, { state: 'queued' });
@@ -1050,6 +869,13 @@ export function startReviewUI() {
         checkPage();
         return;
       }
+      if (message.type === 'block-progress') {
+        if (message.baseSha === snapshot.baseSha && message.headSha === snapshot.headSha) {
+          acceptBlockProgress(message.progress);
+          syncBlockProgress();
+        }
+        return;
+      }
       if (message.type === 'file-progress') {
         if (!fileStates.has(message.path)) return;
         if (pendingAction?.type === 'file' && pendingAction.path === message.path) pendingAction = undefined;
@@ -1057,7 +883,7 @@ export function startReviewUI() {
         if (!openingSavedReview && ['queued', 'classifying'].includes(message.state)) {
           busy = true;
           finalResult = false;
-          applyFolding();
+          updateSurface();
           reviewStage = 'files';
         }
         status = message.state === 'failed' ? 'A file needs another attempt. Completed classifications are kept.' : 'Review decisions follow once every file is classified.';
@@ -1093,7 +919,6 @@ export function startReviewUI() {
         pendingAction = undefined;
         if (restoringReview) missedSavedReviews.delete(restoringReview.candidate);
         controller = undefined;
-        folding?.restore();
         analysis = message.analysis;
         finalResult = true;
         reviewStage = 'complete';
@@ -1103,13 +928,15 @@ export function startReviewUI() {
         for (const [path, file] of fileStates) {
           if (!['skipped', 'excluded'].includes(file.state)) fileStates.set(path, { ...file, state: 'complete', message: '' });
         }
-        reviewGroups = buildReviewGroups();
         error = '';
         status = '';
-        folding = createNativeFolding(document, reviewedSnapshot(), analysis, () => updateFoldingStatus(), revealed, reviewPreferences?.alwaysShow, reviewPreferences?.protectedPaths);
+        selectedTopicId = analysis.topics.some(topic => topic.id === selectedTopicId) ? selectedTopicId : analysis.topics[0]?.id;
+        selectedFile = undefined;
+        expanded.clear();
+        void loadBlockProgress();
         renderAnalysis();
         renderFileProgress();
-        applyFolding();
+        updateSurface();
         renderControls();
       }
     });
@@ -1165,156 +992,493 @@ export function startReviewUI() {
       && identity.headSha === snapshot.headSha && (!identity.baseSha || identity.baseSha === snapshot.baseSha);
   }
 
-  function updateFoldingStatus() {
-    if (!analysis || busy || !finalResult) return;
-    const total = reviewedSnapshot().files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
-    if (mode === 'full') {
-      status = 'Full diff restored. GitHub’s review controls and viewed state are unchanged.';
-    } else if (mode === 'explained') {
-      status = 'All code is visible, with PRiorities explanations beside each file.';
-    } else if (!verifiedPage()) {
-      status = 'Assessment ready. GitHub’s visible revision could not be verified, so the native diff stays expanded.';
-    } else {
-      const counts = folding.counts();
-      status = counts.matched
-        ? `${counts.hiddenChanges} of ${total} changed lines collapsed in the loaded GitHub diff. ${counts.unmatched ? `${counts.unmatched} unrecognized rows stay visible.` : 'Expand any section to inspect its evidence.'}`
-        : 'Assessment ready. Open Files changed to focus the diff. Unrecognized layouts stay expanded.';
-    }
-    const excluded = generatedCount();
-    if (excluded) status += ` ${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} skipped by AI.`;
-    renderControls();
+  function fileEdits(path) {
+    return snapshot?.files.find(file => file.path === path)?.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit')) ?? [];
   }
 
-  function applyFolding() {
-    applyFileOrder();
-    if (!folding) return;
-    if (mode === 'focused' && finalResult && verifiedPage()) folding.apply();
-    else folding.restore();
-    updateFoldingStatus();
+  function progressFor(path) {
+    const file = blockProgress?.files.find(file => file.path === path);
+    const checked = new Set(file?.checkedIds ?? []);
+    if (unsavedBlock?.type === 'set-block-reviewed' && unsavedBlock.path === path) {
+      if (unsavedBlock.checked) checked.add(unsavedBlock.editId);
+      else checked.delete(unsavedBlock.editId);
+    }
+    const edits = fileEdits(path);
+    return { file, checked, total: edits.length, count: edits.filter(edit => checked.has(edit.id)).length };
+  }
+
+  function acceptBlockProgress(progress) {
+    if (!progress || blockProgress && progress.key === blockProgress.key && progress.version < blockProgress.version) return;
+    blockProgress = progress;
+    refreshBlockControls();
+  }
+
+  async function loadBlockProgress() {
+    if (!snapshot || !verifiedPage() || blockLoading) return;
+    const request = ++blockRequest;
+    blockLoading = true;
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'get-block-progress', baseSha: snapshot.baseSha, headSha: snapshot.headSha });
+      if (request !== blockRequest || !isActive()) return;
+      if (response?.error) throw new Error(response.error);
+      acceptBlockProgress(response.progress);
+      blockError = '';
+      syncBlockProgress();
+    } catch (failure) {
+      if (request !== blockRequest || !isActive()) return;
+      blockError = `Block progress could not load. ${failure.message}`;
+    } finally {
+      if (request === blockRequest) {
+        blockLoading = false;
+        refreshBlockControls();
+      }
+    }
+  }
+
+  async function saveBlockChange(change) {
+    if (!blockProgress || !verifiedPage()) return;
+    const request = blockRequest;
+    blockSaving++;
+    refreshBlockControls();
+    try {
+      const response = await chrome.runtime.sendMessage({ ...change, key: blockProgress.key, baseSha: snapshot.baseSha, headSha: snapshot.headSha });
+      if (request !== blockRequest || !isActive()) return;
+      if (response?.error) throw new Error(response.error);
+      if (unsavedBlock === change) unsavedBlock = undefined;
+      if (!unsavedBlock) blockError = '';
+      acceptBlockProgress(response.progress);
+    } catch (failure) {
+      if (request !== blockRequest || !isActive()) return;
+      unsavedBlock ??= change;
+      blockError = `Block progress is not saved. ${failure.message}`;
+    } finally {
+      if (request === blockRequest) {
+        blockSaving--;
+        refreshBlockControls();
+        if (!blockSaving && !unsavedBlock) syncBlockProgress();
+      }
+    }
+  }
+
+  function setBlockReviewed(path, editId, checked) {
+    if (!isActive() || !verifiedPage() || !blockProgress || blockSaving || unsavedBlock) {
+      refreshBlockControls();
+      return;
+    }
+    unsavedBlock = { type: 'set-block-reviewed', path, editId, checked };
+    void saveBlockChange(unsavedBlock);
+  }
+
+  function syncBlockProgress() {
+    if (!blockProgress || blockSaving || unsavedBlock || !finalResult || !verifiedPage()) return;
+    const natives = new Map(findNativeFiles(document).map(file => [file.path, file]));
+    for (const file of blockProgress.files) {
+      const native = natives.get(file.path);
+      const control = nativeReviewControl(native);
+      if (!control || control.disabled || control.getAttribute('aria-disabled') === 'true') continue;
+      const viewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
+      if (manualViewed.has(file.path)) {
+        manualViewed.delete(file.path);
+        syncingViewed.delete(file.path);
+        nativeObservations.set(file.path, viewed);
+        void saveBlockChange({ type: 'observe-file-viewed', path: file.path, viewed, manual: true });
+        continue;
+      }
+      if (file.pendingViewed !== null) {
+        const syncing = syncingViewed.get(file.path);
+        if (viewed === file.pendingViewed) {
+          if (syncing?.generation === file.generation && syncing.confirming) continue;
+          syncingViewed.set(file.path, { generation: file.generation, expected: file.pendingViewed, confirming: true });
+          nativeObservations.set(file.path, viewed);
+          void saveBlockChange({ type: 'confirm-file-viewed', path: file.path, viewed, generation: file.generation });
+        } else if (syncing?.generation === file.generation) {
+          syncing.failed = true;
+        } else {
+          syncingViewed.set(file.path, { generation: file.generation, expected: file.pendingViewed });
+          control.click();
+          scheduleCheck();
+        }
+        continue;
+      }
+      const syncing = syncingViewed.get(file.path);
+      if (syncing && viewed === syncing.expected) {
+        // Another tab can change the checklist before our native click finishes.
+        nativeObservations.set(file.path, viewed);
+      } else if (syncing?.generation === file.generation && syncing.expected === file.nativeViewed) {
+        syncing.failed = true;
+        continue;
+      }
+      syncingViewed.delete(file.path);
+      if (nativeObservations.get(file.path) === viewed) continue;
+      const manual = nativeObservations.has(file.path);
+      nativeObservations.set(file.path, viewed);
+      void saveBlockChange({ type: 'observe-file-viewed', path: file.path, viewed, manual });
+    }
+    refreshBlockControls();
+  }
+
+  function refreshBlockControls() {
+    for (const input of shadow.querySelectorAll('.rf-block-review input')) {
+      const path = input.closest('.rf-guide-file').dataset.path;
+      input.checked = progressFor(path).checked.has(input.dataset.editId);
+      input.disabled = !blockProgress || !finalResult;
+      input.setAttribute('aria-disabled', String(input.disabled || Boolean(blockSaving || unsavedBlock)));
+    }
+    for (const node of shadow.querySelectorAll('.rf-block-progress')) {
+      const { file, count, total } = progressFor(node.dataset.path);
+      node.textContent = !total ? 'No captured blocks to review' : !blockProgress ? 'Loading block progress…' : `${count} of ${total} blocks inspected`;
+      if (file?.pendingViewed !== null && file?.pendingViewed !== undefined) node.textContent += ` · Viewed ${file.pendingViewed ? 'check' : 'uncheck'} pending`;
+      if (syncingViewed.get(node.dataset.path)?.failed) node.textContent += ' · GitHub has not confirmed the Viewed update';
+      if (unsavedBlock?.path === node.dataset.path) node.textContent += ' · Not saved';
+      node.dataset.complete = String(total > 0 && count === total);
+    }
+    for (const node of shadow.querySelectorAll('.rf-guide-file .rf-reviewed-toggle')) updateReviewToggle(node, node.closest('.rf-guide-file').dataset.path);
+    for (const node of shadow.querySelectorAll('.rf-viewed-retry')) node.hidden = !syncingViewed.get(node.dataset.path)?.failed;
+    const notice = result.querySelector('.rf-block-error');
+    if (notice) {
+      notice.hidden = !blockError;
+      notice.querySelector('span').textContent = blockError;
+    }
+  }
+
+  function restoreNativeSurface() {
+    for (const node of new Set([...hiddenSurfaces, ...document.querySelectorAll(`.${surfaceHiddenClass}`)])) node.classList.remove(surfaceHiddenClass);
+    hiddenSurfaces.clear();
+  }
+
+  function updateSurface() {
+    if (mode !== 'guide' || !finalResult || !analysis || !verifiedPage()) {
+      restoreNativeSurface();
+      return;
+    }
+    const lists = [...document.querySelectorAll('[data-testid="progressive-diffs-list"], .js-diff-progressive-container')];
+    const surfaces = lists.length ? lists : findNativeFiles(document).map(file => file.element);
+    for (const surface of surfaces) {
+      if (surface.contains(host)) continue;
+      surface.classList.add(surfaceHiddenClass);
+      hiddenSurfaces.add(surface);
+    }
   }
 
   function setMode(next) {
     if (!isActive()) return;
-    keepReadingPosition(() => {
-      mode = next;
-      applyFolding();
-      renderFileProgress();
-      renderControls();
-    });
+    mode = next;
+    nativeNotice.hidden = next !== 'full' || !navigationNotice;
+    updateSurface();
+    renderFileProgress();
+    renderControls();
   }
 
-  function jumpToSource(excerpt) {
-    if (!isActive()) return;
-    const file = findNativeFiles(document).find(entry => entry.path === excerpt.path);
-    const row = file?.rows.find(entry => {
-      const line = excerpt.side === 'before' ? entry.oldLine : entry.newLine;
-      return line !== null && line >= excerpt.startLine && line <= excerpt.endLine
-        && excerpt.rows.some(source => source.text === entry.text && (excerpt.side === 'before' ? source.oldLine === entry.oldLine : source.newLine === entry.newLine));
-    });
-    if (row && verifiedPage()) {
-      folding?.revealRow(row.element);
-      row.element.scrollIntoView({ block: 'center', behavior: 'auto' });
-      row.element.classList.add('review-focus-native-target');
-      setTimeout(() => row.element.classList.remove('review-focus-native-target'), 2200);
+  function selectTopic(id, path) {
+    if (!finalResult || !analysis.topics.some(topic => topic.id === id)) return;
+    selectedTopicId = id;
+    selectedFile = undefined;
+    mode = 'guide';
+    nativeNotice.hidden = true;
+    renderAnalysis();
+    updateSurface();
+    renderControls();
+    const target = path ? [...result.querySelectorAll('.rf-guide-file')].find(file => file.dataset.path === path) : result.querySelector('.rf-section-title');
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ block: 'start', behavior: 'auto' });
+  }
+
+  function selectFile(path) {
+    const topics = fileTopics(path);
+    const topic = topics.find(topic => topic.id === selectedTopicId) ?? topics[0] ?? analysis.topics.find(topic => topic.excerpts.some(excerpt => excerpt.path === path));
+    if (topic) {
+      selectTopic(topic.id, path);
       return;
     }
-    window.open(sourceLink(snapshot, excerpt), '_blank', 'noopener,noreferrer');
+    selectedFile = path;
+    mode = 'guide';
+    nativeNotice.hidden = true;
+    renderAnalysis();
+    updateSurface();
+    renderControls();
+    result.querySelector('.rf-guide-file')?.focus();
   }
 
-  function renderExcerpt(excerpt) {
-    const block = element('div', 'rf-excerpt');
-    const heading = element('div', 'rf-excerpt-heading');
-    const link = element('a', 'rf-source-link', `${excerpt.path}:${excerpt.startLine}–${excerpt.endLine} (${excerpt.side})`);
-    link.href = sourceLink(snapshot, excerpt);
+  async function showNativeFile(path, excerpt) {
+    if (!isActive() || !verifiedPage()) return;
+    const captured = snapshot;
+    setMode('full');
+    navigationNotice = '';
+    nativeNotice.hidden = true;
+    const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(path)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    if (snapshot !== captured || !verifiedPage()) return;
+    let file = findNativeFiles(document).find(entry => entry.path === path);
+    if (!file) {
+      const anchor = document.getElementById(`diff-${digest}`);
+      if (anchor) anchor.scrollIntoView({ block: 'start', behavior: 'auto' });
+      else {
+        const link = [...document.querySelectorAll(`a[href$="#diff-${digest}"]`)].find(link => {
+          const url = new URL(link.href);
+          return url.origin === location.origin && url.pathname.startsWith(new URL(captured.url).pathname + '/');
+        });
+        link?.click();
+      }
+      for (let attempt = 0; attempt < 6 && !file; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        if (snapshot !== captured || !verifiedPage()) return;
+        file = findNativeFiles(document).find(entry => entry.path === path);
+      }
+    }
+    const row = excerpt && file?.rows.find(entry => excerpt.rows.some(source => source.text === entry.text && (excerpt.side === 'before' ? source.oldLine !== null && source.oldLine === entry.oldLine : source.newLine !== null && source.newLine === entry.newLine)));
+    const target = row?.element ?? file?.element;
+    if (target) {
+      target.scrollIntoView({ block: row ? 'center' : 'start', behavior: 'auto' });
+      target.classList.add('review-focus-native-target');
+      setTimeout(() => target.classList.remove('review-focus-native-target'), 2200);
+      navigationNotice = row ? '' : `Opened ${path} in Full diff. Use GitHub’s file controls to expand code and read discussions.`;
+    } else navigationNotice = `GitHub has not loaded ${path}. Use its file list to load the diff and discussions, or open the captured commit source below.`;
+    nativeNotice.replaceChildren();
+    if (navigationNotice) {
+      nativeNotice.append(document.createTextNode(navigationNotice + ' '));
+      const file = captured.files.find(file => file.path === path);
+      const hasAfter = file.hunks.some(hunk => hunk.items.some(item => (item.type === 'edit' ? item.rows : [item]).some(row => row.newLine !== null)));
+      nativeNotice.append(sourceAnchor(path, hasAfter ? 'after' : 'before', 1, 'Open source at this commit'));
+    }
+    nativeNotice.hidden = !navigationNotice;
+  }
+
+  function sourceAnchor(path, side, line, label) {
+    const link = element('a', 'rf-source-link', label);
+    link.href = sourceLink(snapshot, { path, side, startLine: line, endLine: line });
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
-    heading.append(link, button('Show in diff', () => jumpToSource(excerpt), 'rf-link-button'));
-    block.append(heading, renderRows(excerpt.rows));
-    return block;
+    return link;
   }
 
-  function renderTopic(topic, editLocations, collapsed = false) {
-    const supporting = topic.priority === 'supporting';
-    const card = supporting || collapsed
-      ? disclosure(topic.title, `rf-topic ${supporting ? 'rf-supporting' : 'rf-review'}`)
-      : element('article', 'rf-topic rf-review');
-    card.dataset.topicId = topic.id;
-    const body = element('div', 'rf-topic-body');
-    const change = element('p', 'rf-change-explanation', topic.after);
-    const reason = element('p', 'rf-reason', topic.reason);
-    reason.title = supporting ? 'Why supporting' : 'Why shown';
-    body.append(change, reason);
-    if (topic.uncertainty) {
-      const uncertainty = element('p', 'rf-uncertainty');
-      uncertainty.append(element('strong', '', 'Evidence limits: '), document.createTextNode(topic.uncertainty));
-      body.append(uncertainty);
+  function blockContent(path, rows, topic, locations) {
+    const content = element('div', 'rf-code-run');
+    const id = rows[0].editId;
+    const owner = id && analysis.topics.find(entry => entry.editIds.includes(id));
+    const classification = id && locations.get(id)?.classification;
+    const protectedFile = isProtectedPath(path, reviewPreferences?.protectedPaths ?? []);
+    const reasons = [];
+    if (classification?.kinds.includes('unknown')) reasons.push('unresolved evidence');
+    const kinds = classification?.kinds.filter(kind => reviewPreferences?.alwaysShow.includes(kind)) ?? [];
+    if (kinds.length) reasons.push(`your always-visible types: ${kinds.join(', ')}`);
+    if (protectedFile) reasons.push('protected file');
+    if (owner && owner !== topic) {
+      if (rows.some(row => rowSelected(row, topic?.excerpts.filter(excerpt => excerpt.path === path) ?? []))) reasons.push('selected evidence');
+      if (!reasons.length) reasons.push(foldOtherCode ? 'expanded by you' : 'folding is off');
+      const label = element('div', 'rf-foreign-edit');
+      label.append(button(owner.title, () => selectTopic(owner.id, path), 'rf-link-button'), document.createTextNode(` — ${reasons.join('; ')}`));
+      content.append(label);
+    } else if (!id && protectedFile) content.append(element('div', 'rf-context-label', 'Protected context'));
+    if (rows[0].outsideDiff) content.append(element('div', 'rf-context-label', 'Captured source outside the diff'));
+    if (id) {
+      const header = element('div', 'rf-block-heading');
+      const edits = fileEdits(path);
+      header.append(element('span', '', `Block ${edits.findIndex(edit => edit.id === id) + 1} of ${edits.length}`));
+      const label = element('label', 'rf-block-review');
+      const input = element('input');
+      input.type = 'checkbox';
+      input.dataset.editId = id;
+      input.setAttribute('aria-label', `Inspected block ${edits.findIndex(edit => edit.id === id) + 1} in ${path}`);
+      input.addEventListener('click', event => {
+        if (blockSaving || unsavedBlock) event.preventDefault();
+      });
+      input.addEventListener('change', () => setBlockReviewed(path, id, input.checked));
+      label.append(input, element('span', '', 'Inspected'));
+      header.append(label);
+      content.append(header);
+      if (classification?.uncertainty) content.append(element('p', 'rf-uncertainty', classification.uncertainty));
     }
-    const evidence = disclosure('Details', 'rf-evidence');
-    let rendered = false;
-    evidence.addEventListener('toggle', () => {
-      if (!evidence.open || rendered) return;
-      rendered = true;
-      if (!supporting && !collapsed) evidence.append(element('h3', 'rf-topic-title', topic.title));
-      if (topic.question) {
-        const question = element('p', 'rf-question');
-        question.append(element('strong', '', 'Check: '), document.createTextNode(topic.question));
-        evidence.append(question);
+    content.append(renderRows(rows, path));
+    return content;
+  }
+
+  function renderGuideFile(file, topic, locations) {
+    const card = element('article', 'rf-guide-file');
+    card.dataset.path = file.path;
+    card.tabIndex = -1;
+    const heading = element('div', 'rf-guide-file-heading');
+    const progress = element('span', 'rf-block-progress');
+    progress.dataset.path = file.path;
+    const remaining = button('Find remaining blocks', () => {
+      const { checked } = progressFor(file.path);
+      const edit = fileEdits(file.path).find(edit => !checked.has(edit.id));
+      if (!edit) return;
+      const owner = analysis.topics.find(entry => entry.editIds.includes(edit.id));
+      if (owner) selectTopic(owner.id, file.path);
+      else selectFile(file.path);
+      const input = [...result.querySelectorAll('.rf-block-review input')].find(input => input.dataset.editId === edit.id);
+      const fold = input?.closest('details');
+      if (fold) fold.open = true;
+      input?.focus();
+    }, 'rf-link-button');
+    heading.append(element('strong', '', file.path), progress, reviewToggle(file.path), remaining);
+    const retryViewed = button('Retry Viewed update', () => {
+      const syncing = syncingViewed.get(file.path);
+      const progress = progressFor(file.path).file;
+      const native = findNativeFiles(document).find(entry => entry.path === file.path);
+      const control = nativeReviewControl(native);
+      if (progress?.pendingViewed === null && syncing && control && !control.disabled && control.getAttribute('aria-disabled') !== 'true') {
+        const viewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
+        if (viewed !== syncing.expected) control.click();
+        syncing.failed = false;
+        scheduleCheck();
+      } else { syncingViewed.delete(file.path); syncBlockProgress(); }
+    }, 'rf-link-button rf-viewed-retry');
+    retryViewed.dataset.path = file.path;
+    retryViewed.hidden = true;
+    heading.append(retryViewed);
+    const links = element('div', 'rf-file-links');
+    const excerpts = topic?.excerpts.filter(excerpt => excerpt.path === file.path) ?? [];
+    links.append(button('Show in diff', () => void showNativeFile(file.path, excerpts[0]), 'rf-link-button'));
+    const edits = fileEdits(file.path);
+    const capturedRows = file.hunks.flatMap(hunk => hunk.items.flatMap(item => item.type === 'edit' ? item.rows : [item]));
+    for (const [side, key] of [['before', 'oldLine'], ['after', 'newLine']]) {
+      const first = capturedRows.find(row => row[key] !== null);
+      if (first) links.append(sourceAnchor(file.path, side, first[key], `Open ${side} source at this commit`));
+    }
+    card.append(heading, links);
+    let rows;
+    try { rows = guideFileRows(snapshot, file); }
+    catch (failure) {
+      card.append(element('p', 'rf-error', failure.message));
+      return card;
+    }
+    if (!rows.length) card.append(element('p', 'rf-caption', 'No text rows were captured for this file. Use Full diff to inspect it.'));
+    const protectedFile = isProtectedPath(file.path, reviewPreferences?.protectedPaths ?? []);
+    const visibleEdits = new Set(edits.filter(edit => !topic || topic.editIds.includes(edit.id) || edit.rows.some(row => rowSelected(row, excerpts)) || locations.get(edit.id)?.classification?.kinds.some(kind => kind === 'unknown' || reviewPreferences?.alwaysShow.includes(kind))).map(edit => edit.id));
+    const kept = row => !topic || !foldOtherCode || protectedFile || (row.editId ? visibleEdits.has(row.editId) : rowSelected(row, excerpts));
+    let hidden = [];
+    function appendRuns(parent, source) {
+      for (let index = 0; index < source.length;) {
+        const first = source[index];
+        const run = [first];
+        index++;
+        while (index < source.length && source[index].editId === first.editId && source[index].outsideDiff === first.outsideDiff) run.push(source[index++]);
+        parent.append(blockContent(file.path, run, topic, locations));
       }
-      const before = element('p', 'rf-before');
-      before.append(element('strong', '', 'Before: '), document.createTextNode(topic.before));
-      evidence.append(before, element('p', 'rf-evidence-summary', topic.evidenceSummary));
-      for (const excerpt of topic.excerpts) evidence.append(renderExcerpt(excerpt));
-      for (const id of topic.editIds) {
-        const { file, edit, classification } = editLocations.get(id);
-        const detail = element('div', 'rf-edit');
-        detail.dataset.editId = id;
-        detail.append(element('strong', '', `${file.path} · ${edit.rows.filter(row => row.type !== 'marker').length} changed lines`));
-        detail.append(element('p', 'rf-change-kind', `Change type: ${classification.kinds.join(', ')}`));
-        detail.append(element('p', 'rf-change-reason', classification.reason));
-        if (classification.uncertainty) detail.append(element('p', 'rf-uncertainty', classification.uncertainty));
-        evidence.append(detail);
+    }
+    function flushHidden() {
+      if (!hidden.length) return;
+      const key = JSON.stringify([topic?.id, file.path, rowKey(hidden[0]), rowKey(hidden.at(-1))]);
+      const fold = disclosure(`${hidden.length} other lines`, 'rf-fold');
+      const owners = analysis.topics.filter(entry => hidden.some(row => row.editId && entry.editIds.includes(row.editId)));
+      const references = element('div', 'rf-fold-sections');
+      for (const owner of owners) references.append(button(owner.title, () => selectTopic(owner.id, file.path), 'rf-link-button'));
+      fold.querySelector('summary').append(document.createTextNode(owners.length ? ` · ${owners.map(owner => owner.title).join('; ')}` : ' · surrounding context'));
+      appendRuns(fold, hidden);
+      fold.open = expanded.has(key);
+      fold.addEventListener('toggle', () => { if (fold.open) expanded.add(key); else expanded.delete(key); });
+      card.append(references, fold);
+      hidden = [];
+    }
+    for (let index = 0; index < rows.length;) {
+      const row = rows[index];
+      if (row.type === 'marker' && !row.editId) {
+        flushHidden();
+        card.append(element('div', 'rf-hunk-header', row.text));
+        index++;
+      } else if (!kept(row)) {
+        hidden.push(row);
+        index++;
+      } else {
+        flushHidden();
+        const run = [row];
+        index++;
+        while (index < rows.length && (rows[index].type !== 'marker' || rows[index].editId) && kept(rows[index]) && rows[index].editId === row.editId && rows[index].outsideDiff === row.outsideDiff) run.push(rows[index++]);
+        appendRuns(card, run);
       }
-    });
-    body.append(evidence);
-    card.append(body);
+    }
+    flushHidden();
     return card;
   }
 
   function renderAnalysis() {
-    const open = result.querySelector('.rf-review-index')?.open ?? false;
+    if (!analysis || !snapshot) return;
     result.replaceChildren();
     const summary = element('div', 'rf-overview');
-    const reviewTopics = analysis.topics.filter(topic => topic.priority === 'review');
-    const supportingTopics = analysis.topics.filter(topic => topic.priority === 'supporting');
-    summary.append(element('h2', 'rf-overview-title', `${reviewTopics.length} review ${reviewTopics.length === 1 ? 'decision' : 'decisions'}`));
+    const reviews = analysis.topics.filter(topic => topic.priority === 'review').length;
+    summary.append(element('h2', 'rf-overview-title', `${reviews} review ${reviews === 1 ? 'decision' : 'decisions'}`));
     summary.append(element('p', 'rf-summary', analysis.summary));
+    summary.append(element('p', 'rf-caption', 'Inspect each changed block. Checking every block marks the file Viewed. Comments, draft reviews and approval stay in Full diff.'));
+    if (!reviews) summary.append(element('p', 'rf-caption', 'All sections are supporting. You can inspect every captured change.'));
     const excluded = generatedCount();
-    if (excluded) summary.append(element('p', 'rf-generated-notice', `${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} skipped by AI. Use Review anyway beside a file to include it.`));
-    const unresolved = analysis.classifications.filter(entry => entry.kinds.includes('unknown')).length;
-    if (unresolved) summary.append(element('p', 'rf-unresolved', `${unresolved} ${unresolved === 1 ? 'edit could' : 'edits could'} not be classified. Their changed lines stay visible.`));
-    const index = disclosure('Review summary', 'rf-review-index');
-    index.open = open;
-    index.append(summary);
-    index.append(element('p', 'rf-caption', 'Explanations appear beside each loaded file. This index also includes files GitHub has not loaded.'));
-    const locations = editLocations();
-    for (const topic of [...reviewTopics, ...supportingTopics]) {
-      const entry = renderTopic(topic, locations, true);
-      const paths = [...new Set(topic.editIds.map(id => locations.get(id).file.path))];
-      entry.querySelector('summary').append(element('span', 'rf-index-paths', paths.join(', ')));
-      index.append(entry);
+    if (excluded) summary.append(element('p', 'rf-generated-notice', `${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} skipped by AI. Open the file list to read captured code or choose Review anyway.`));
+    const unresolved = analysis.classifications.filter(entry => entry.kinds.includes('unknown'));
+    if (unresolved.length) {
+      const notice = element('div', 'rf-unresolved', `${unresolved.length} ${unresolved.length === 1 ? 'edit has' : 'edits have'} unresolved evidence. `);
+      for (const topic of analysis.topics.filter(topic => unresolved.some(entry => topic.editIds.includes(entry.editId)))) notice.append(button(topic.title, () => selectTopic(topic.id), 'rf-link-button'));
+      summary.append(notice);
     }
-    if (!analysis.topics.length) index.append(element('p', 'rf-caption', 'No review decisions or supporting changes are ready yet.'));
-    const details = element('div', 'rf-review-details');
-    details.append(element('p', 'rf-folding-detail', status));
+    const blockNotice = element('div', 'rf-block-error');
+    blockNotice.setAttribute('role', 'alert');
+    blockNotice.append(element('span'), button('Retry saving progress', () => {
+      if (unsavedBlock) void saveBlockChange(unsavedBlock);
+      else void loadBlockProgress();
+    }));
+    summary.append(blockNotice);
+    const nav = element('nav', 'rf-section-overview');
+    nav.setAttribute('aria-label', 'Guide sections');
+    for (const [index, topic] of analysis.topics.entries()) {
+      const control = button(`${index + 1}. ${topic.title}`, () => selectTopic(topic.id), 'rf-section-link');
+      control.dataset.topicId = topic.id;
+      control.setAttribute('aria-current', String(!selectedFile && topic.id === selectedTopicId));
+      control.append(element('span', 'rf-priority', topic.priority === 'review' ? 'Review' : 'Supporting'));
+      nav.append(control);
+    }
+    const topic = selectedFile ? null : analysis.topics.find(topic => topic.id === selectedTopicId) ?? analysis.topics[0];
+    const section = element('section', 'rf-guide-section');
+    if (topic) section.dataset.topicId = topic.id;
+    const explanation = element('div', 'rf-guide-explanation');
+    const title = element('h2', 'rf-section-title', topic?.title ?? 'Captured changes · not analyzed');
+    title.tabIndex = -1;
+    explanation.append(title);
+    if (topic) {
+      for (const [field, label] of [['before', 'Before'], ['after', 'After'], ['reason', 'Why it matters'], ['question', 'Review question'], ['uncertainty', 'Evidence limits'], ['evidenceSummary', 'Where to look']]) {
+        if (!topic[field]) continue;
+        explanation.append(element('h3', '', label), element('p', `rf-${field === 'after' ? 'change-explanation' : field}`, topic[field]));
+      }
+      const details = disclosure('Change classifications', 'rf-evidence');
+      const locations = editLocations();
+      for (const id of topic.editIds) {
+        const entry = locations.get(id);
+        const detail = element('div', 'rf-edit');
+        detail.dataset.editId = id;
+        detail.append(element('strong', '', entry.file.path), element('p', 'rf-change-kind', `Change type: ${entry.classification.kinds.join(', ')}`), element('p', '', entry.classification.reason));
+        if (entry.classification.uncertainty) detail.append(element('p', 'rf-uncertainty', entry.classification.uncertainty));
+        details.append(detail);
+      }
+      explanation.append(details);
+    }
+    const code = element('div', 'rf-guide-code');
+    const foldLabel = element('label', 'rf-fold-other');
+    const foldInput = element('input');
+    foldInput.type = 'checkbox';
+    foldInput.checked = foldOtherCode;
+    foldInput.addEventListener('change', () => {
+      foldOtherCode = foldInput.checked;
+      renderAnalysis();
+      result.querySelector('.rf-fold-other input')?.focus({ preventScroll: true });
+    });
+    foldLabel.append(foldInput, document.createTextNode('Fold other code'));
+    code.append(foldLabel);
+    const locations = editLocations();
+    const paths = selectedFile ? [selectedFile] : topic ? [...new Set([...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)])] : [];
+    for (const path of paths) code.append(renderGuideFile(snapshot.files.find(file => file.path === path), topic, locations));
+    section.append(explanation, code);
+    const sequence = element('div', 'rf-section-sequence');
+    const index = analysis.topics.indexOf(topic);
+    const previous = button('Previous section', () => selectTopic(analysis.topics[index - 1].id));
+    const next = button('Next section', () => selectTopic(analysis.topics[index + 1].id));
+    previous.disabled = index <= 0;
+    next.disabled = index < 0 || index === analysis.topics.length - 1;
+    sequence.append(previous, element('span', 'rf-caption', index < 0 ? 'Not analyzed' : `Section ${index + 1} of ${analysis.topics.length}`), next);
+    const details = disclosure('Analysis details', 'rf-review-details');
     if (cacheMessage) details.append(element('p', 'rf-cache-detail', cacheMessage));
     details.append(element('p', 'rf-provenance', `Analyzed ${snapshot.baseSha.slice(0, 8)}…${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}, effort: ${reviewEffort || 'model default'}.`));
-    if (snapshot.warnings?.length) {
-      details.append(element('strong', '', 'Capture limitations'));
-      for (const warning of snapshot.warnings) details.append(element('p', '', warning));
-    }
-    index.append(details);
-    result.append(index);
+    for (const warning of snapshot.warnings ?? []) details.append(element('p', '', warning));
+    result.append(summary, nav, section, sequence, details);
+    refreshBlockControls();
   }
+
 
   function mount() {
     if (!isDiffPage()) return;
@@ -1371,8 +1535,7 @@ export function startReviewUI() {
     identityKey = nextIdentity;
     pathKey = nextPath;
     if (!isDiffPage()) {
-      applyFileOrder(true);
-      folding?.restore();
+      restoreNativeSurface();
       removeFilePanels();
       host.remove();
       return;
@@ -1381,7 +1544,8 @@ export function startReviewUI() {
     resumeAnalysis(identity);
     if (readReviewControls()) renderFileProgress();
     else renderFilePanels();
-    applyFolding();
+    syncBlockProgress();
+    updateSurface();
     renderControls();
     void refreshSavedReview();
   }
@@ -1419,6 +1583,12 @@ export function startReviewUI() {
     if (relevant) scheduleCheck();
   });
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-pressed', 'aria-label', 'aria-disabled', 'checked', 'disabled'] });
+  document.addEventListener('click', event => {
+    const control = event.target.closest('input.js-reviewed-checkbox, button[aria-pressed][aria-label="Viewed"], button[aria-pressed][aria-label="Not Viewed"]');
+    if (!event.isTrusted || !control) return;
+    const file = findNativeFiles(document).find(file => nativeReviewControl(file) === control);
+    if (file) manualViewed.add(file.path);
+  }, eventOptions);
   document.addEventListener('change', event => {
     if (event.target.matches('input.js-reviewed-checkbox')) scheduleCheck();
   }, eventOptions);

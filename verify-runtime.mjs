@@ -716,6 +716,145 @@ try {
     { type: 'add', text: 'return null;', oldLine: null, newLine: 3 }
   ] });
   const twoClassifications = { edits: [classifications.edits[0], { ...classifications.edits[0], editId: '1-1-2' }] };
+  const blockSnapshot = { ...twoEdits, files: [...twoEdits.files, { path: 'logo.png', hunks: [] }] };
+  const blockAssessment = { ...assessment, topics: [{ ...assessment.topics[0], editIds: ['1-1-1', '1-1-2'] }] };
+  nativeHandler = stagedResponses(twoClassifications, blockAssessment);
+  const blockTab = await beginReview(blockSnapshot);
+  const otherBlockTab = await beginReview(blockSnapshot);
+  await Promise.all([waitForSettlement(blockTab), waitForSettlement(otherBlockTab)]);
+  const blockMessage = (reviewPort, type, fields = {}) => sendMessage({ type, baseSha: blockSnapshot.baseSha, headSha: blockSnapshot.headSha, ...fields }, reviewPort.sender);
+  const initialBlocks = await blockMessage(blockTab, 'get-block-progress');
+  assert.equal(initialBlocks.error, undefined);
+  const blockKey = initialBlocks.progress.key;
+  const blockFile = response => response.progress.files.find(file => file.path === 'account.js');
+  const changeBlock = (reviewPort, type, fields = {}) => blockMessage(reviewPort, type, { key: blockKey, path: 'account.js', ...fields });
+  assert.deepEqual(blockFile(initialBlocks), { path: 'account.js', checkedIds: [], nativeViewed: null, pendingViewed: null, generation: 0 });
+  assert.equal((await blockMessage(otherBlockTab, 'get-block-progress')).progress.key, blockKey, 'Tabs share progress for the same captured block inventory.');
+  const beforeBlockRequests = requests.length;
+  await changeBlock(blockTab, 'observe-file-viewed', { viewed: false, manual: false });
+  const partialBlocks = await changeBlock(blockTab, 'set-block-reviewed', { editId: '1-1-1', checked: true });
+  assert.deepEqual(blockFile(partialBlocks).checkedIds, ['1-1-1']);
+  assert.equal(blockFile(partialBlocks).pendingViewed, null, 'Checking one of two blocks cannot request Viewed.');
+  const observedPartial = await changeBlock(otherBlockTab, 'observe-file-viewed', { viewed: false, manual: false });
+  assert.deepEqual(blockFile(observedPartial).checkedIds, ['1-1-1'], 'An initial or unchanged native false observation preserves partial inspection.');
+  assert.deepEqual(otherBlockTab.messages.at(-1).progress, partialBlocks.progress, 'Saved checklist changes reach other connected tabs.');
+  assert.equal(otherBlockTab.messages.at(-1).baseSha, blockSnapshot.baseSha);
+  assert.equal(otherBlockTab.messages.at(-1).headSha, blockSnapshot.headSha);
+
+  await changeBlock(blockTab, 'observe-file-viewed', { viewed: false, manual: true });
+  const concurrentBlocks = await Promise.all([
+    changeBlock(blockTab, 'set-block-reviewed', { editId: '1-1-1', checked: true }),
+    changeBlock(otherBlockTab, 'set-block-reviewed', { editId: '1-1-2', checked: true })
+  ]);
+  const completedBlocks = concurrentBlocks.toSorted((left, right) => left.progress.version - right.progress.version).at(-1);
+  assert.deepEqual(blockFile(completedBlocks).checkedIds, ['1-1-1', '1-1-2'], 'Concurrent tabs must not overwrite each other’s checked blocks.');
+  assert.equal(blockFile(completedBlocks).nativeViewed, false);
+  assert.equal(blockFile(completedBlocks).pendingViewed, true, 'Completing all captured blocks remains pending until GitHub confirms Viewed.');
+  const pendingGeneration = blockFile(completedBlocks).generation;
+  const incompleteAgain = await changeBlock(blockTab, 'set-block-reviewed', { editId: '1-1-1', checked: false });
+  const staleConfirmation = await changeBlock(otherBlockTab, 'confirm-file-viewed', { viewed: true, generation: pendingGeneration });
+  assert.deepEqual(staleConfirmation, incompleteAgain, 'A delayed native save cannot replace a newer incomplete checklist.');
+  const manualViewed = await changeBlock(otherBlockTab, 'observe-file-viewed', { viewed: true, manual: true });
+  assert.deepEqual(blockFile(manualViewed).checkedIds, ['1-1-1', '1-1-2'], 'Manually marking Viewed checks all captured blocks.');
+  assert.equal(blockFile(manualViewed).pendingViewed, null);
+  const uncheckingViewed = await changeBlock(blockTab, 'set-block-reviewed', { editId: '1-1-1', checked: false });
+  assert.equal(blockFile(uncheckingViewed).pendingViewed, false, 'Unchecking a block requests that GitHub reopen the file.');
+  const stillViewed = await changeBlock(otherBlockTab, 'observe-file-viewed', { viewed: true, manual: false });
+  assert.deepEqual(blockFile(stillViewed).checkedIds, ['1-1-2'], 'An observed old native state must not override a pending block action.');
+  const confirmedIncomplete = await changeBlock(otherBlockTab, 'confirm-file-viewed', { viewed: false, generation: blockFile(stillViewed).generation });
+  assert.deepEqual(blockFile(confirmedIncomplete).checkedIds, ['1-1-2'], 'Confirming an automatic native uncheck must preserve partial inspection.');
+  assert.equal(blockFile(confirmedIncomplete).nativeViewed, false);
+  assert.equal(blockFile(confirmedIncomplete).pendingViewed, null);
+  const manualUnviewed = await changeBlock(blockTab, 'observe-file-viewed', { viewed: false, manual: true });
+  assert.deepEqual(blockFile(manualUnviewed).checkedIds, [], 'A manual native uncheck clears the entire checklist even when native was already false.');
+  await changeBlock(blockTab, 'observe-file-viewed', { viewed: true, manual: false });
+  const uncheckedAway = await changeBlock(blockTab, 'observe-file-viewed', { viewed: false, manual: false });
+  assert.deepEqual(blockFile(uncheckedAway).checkedIds, [], 'A changed native state after returning to a tab must follow a manual uncheck elsewhere.');
+  const emptyFile = await changeBlock(blockTab, 'observe-file-viewed', { path: 'logo.png', viewed: false, manual: false });
+  assert.equal(emptyFile.progress.files.find(file => file.path === 'logo.png').pendingViewed, null, 'A file without captured blocks never requests automatic completion.');
+
+  for (const [fields, error] of [
+    [{ path: 'not-captured.js' }, /file outside/],
+    [{ editId: 'not-captured' }, /unknown block/],
+    [{ path: 'logo.png' }, /unknown block/],
+    [{ checked: 'true' }, /unknown block/],
+    [{ key: `${blockKey}-stale` }, /captured blocks/],
+    [{ headSha: 'c'.repeat(40) }, /captured pull request/]
+  ]) {
+    assert.match((await changeBlock(blockTab, 'set-block-reviewed', { editId: '1-1-1', checked: true, ...fields })).error, error);
+  }
+  assert.match((await sendMessage({ type: 'get-block-progress', baseSha: blockSnapshot.baseSha, headSha: blockSnapshot.headSha }, optionsSender)).error, /Only a captured pull request/);
+  assert.match((await sendMessage({ type: 'get-block-progress', baseSha: blockSnapshot.baseSha, headSha: blockSnapshot.headSha }, { ...blockTab.sender, url: 'https://github.com/another/repository/pull/7/files' })).error, /captured pull request/);
+  assert.match((await changeBlock(blockTab, 'observe-file-viewed', { viewed: true })).error, /boolean state and origin/);
+  assert.match((await changeBlock(blockTab, 'confirm-file-viewed', { viewed: true, generation: -1 })).error, /requested state/);
+  assert.equal(requests.length, beforeBlockRequests, 'Reading, checking and synchronizing blocks must not start any model calls.');
+
+  const savedBlockGet = chrome.storage.local.get;
+  const savedBlockSet = chrome.storage.local.set;
+  const beforeFailedBlockWrite = structuredClone(storage[blockKey]);
+  const beforeFailedBroadcast = otherBlockTab.messages.length;
+  try {
+    chrome.storage.local.set = async value => {
+      if (Object.hasOwn(value, blockKey)) throw new Error('Synthetic checklist write failure.');
+      return savedBlockSet(value);
+    };
+    const failedBlock = await changeBlock(blockTab, 'set-block-reviewed', { editId: '1-1-1', checked: true });
+    assert.match(failedBlock.error, /Could not save block-review progress/);
+    assert.deepEqual(storage[blockKey], beforeFailedBlockWrite, 'Failed writes must not claim durability.');
+    assert.equal(otherBlockTab.messages.length, beforeFailedBroadcast, 'Unsaved progress must not be broadcast as saved.');
+    assert.ok(blockTab.messages.some(message => message.type === 'result'), 'A checklist storage error does not discard the analysis.');
+    chrome.storage.local.set = savedBlockSet;
+    const retryBlock = await changeBlock(blockTab, 'set-block-reviewed', { editId: '1-1-1', checked: true });
+    assert.deepEqual(blockFile(retryBlock).checkedIds, ['1-1-1'], 'A storage failure must release the queue so the same action can be retried.');
+    chrome.storage.local.get = async key => {
+      if (key === blockKey) throw new Error('Synthetic checklist read failure.');
+      return savedBlockGet(key);
+    };
+    assert.match((await blockMessage(blockTab, 'get-block-progress')).error, /Could not read block-review progress/);
+  } finally {
+    chrome.storage.local.get = savedBlockGet;
+    chrome.storage.local.set = savedBlockSet;
+  }
+  const savedPartialBlocks = await blockMessage(blockTab, 'get-block-progress');
+  const firstSavedBlock = storage[blockKey].files[0];
+  firstSavedBlock.checkedIds.push('invented-block');
+  assert.match((await blockMessage(blockTab, 'get-block-progress')).error, /Saved block-review progress is invalid/);
+  storage[blockKey] = structuredClone(savedPartialBlocks.progress);
+  await closeTab(blockTab);
+  const reloadedBlockTab = await beginReview(blockSnapshot);
+  await waitForSettlement(reloadedBlockTab);
+  assert.deepEqual((await blockMessage(reloadedBlockTab, 'get-block-progress')).progress, savedPartialBlocks.progress, 'Reloaded sessions restore progress independently of their assessment result.');
+  const revisedBlocks = { ...blockSnapshot, headSha: 'e'.repeat(40) };
+  const revisedBlockTab = await beginReview(revisedBlocks);
+  await waitForSettlement(revisedBlockTab);
+  const resetBlocks = await sendMessage({ type: 'get-block-progress', baseSha: revisedBlocks.baseSha, headSha: revisedBlocks.headSha }, revisedBlockTab.sender);
+  assert.notEqual(resetBlocks.progress.key, blockKey);
+  assert.deepEqual(blockFile(resetBlocks).checkedIds, [], 'A new commit pair starts a separate checklist.');
+  const initiallyViewed = await sendMessage({ type: 'observe-file-viewed', baseSha: revisedBlocks.baseSha, headSha: revisedBlocks.headSha, key: resetBlocks.progress.key, path: 'account.js', viewed: true, manual: false }, revisedBlockTab.sender);
+  assert.deepEqual(blockFile(initiallyViewed).checkedIds, ['1-1-1', '1-1-2'], 'An existing native Viewed file initializes every captured block as inspected.');
+  const recapturedBlocks = structuredClone(blockSnapshot);
+  recapturedBlocks.files[0].hunks[0].items[1].rows[0].text = 'return 0;';
+  const recapturedBlockTab = await beginReview(recapturedBlocks);
+  await waitForSettlement(recapturedBlockTab);
+  const resetInventory = await blockMessage(recapturedBlockTab, 'get-block-progress');
+  assert.notEqual(resetInventory.progress.key, blockKey, 'Reused edit IDs with changed captured source must not reuse prior inspection.');
+  assert.deepEqual(blockFile(resetInventory).checkedIds, []);
+  assert.match((await changeBlock(recapturedBlockTab, 'set-block-reviewed', { editId: '1-1-1', checked: true })).error, /captured blocks/);
+  const beforePendingNative = await blockMessage(recapturedBlockTab, 'get-block-progress');
+  const pendingNativeKey = beforePendingNative.progress.key;
+  for (const editId of ['1-1-1', '1-1-2']) {
+    await changeBlock(recapturedBlockTab, 'set-block-reviewed', { key: pendingNativeKey, editId, checked: true });
+  }
+  const unloadedControl = await blockMessage(recapturedBlockTab, 'get-block-progress');
+  assert.equal(blockFile(unloadedControl).nativeViewed, null);
+  assert.equal(blockFile(unloadedControl).pendingViewed, true, 'Completion with an unloaded native control remains pending.');
+  const loadedControl = await changeBlock(recapturedBlockTab, 'observe-file-viewed', { key: pendingNativeKey, viewed: false, manual: false });
+  assert.deepEqual(blockFile(loadedControl).checkedIds, ['1-1-1', '1-1-2']);
+  assert.equal(blockFile(loadedControl).pendingViewed, true, 'Loading an unchecked native control cannot erase the pending completed checklist.');
+  const savedViewed = await changeBlock(recapturedBlockTab, 'confirm-file-viewed', { key: pendingNativeKey, viewed: true, generation: blockFile(loadedControl).generation });
+  assert.equal(blockFile(savedViewed).pendingViewed, null);
+  assert.equal(blockFile(savedViewed).nativeViewed, true);
+  await Promise.all([otherBlockTab, reloadedBlockTab, revisedBlockTab, recapturedBlockTab].map(closeTab));
   for (const [name, mutate, error] of [
     ['omitted edit', inventory => { inventory.edits.pop(); }, /account for every edit/],
     ['duplicate edit', inventory => { inventory.edits[1] = inventory.edits[0]; }, /each edit exactly once/],
@@ -1531,6 +1670,13 @@ try {
     cacheHook.deregister();
     delete globalThis.runtimeReviewCache;
   }
+
+  nativeHandler = stagedResponses(twoClassifications, blockAssessment);
+  const restartedBlockTab = await beginReview(blockSnapshot);
+  await waitForSettlement(restartedBlockTab);
+  assert.deepEqual((await blockMessage(restartedBlockTab, 'get-block-progress')).progress, savedPartialBlocks.progress, 'A worker restart restores block progress from durable storage independently of the assessment cache.');
+  await closeTab(restartedBlockTab);
+  storedReview = structuredClone(cachedReview);
 
   const originalDigest = crypto.subtle.digest;
   try {

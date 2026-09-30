@@ -1,6 +1,6 @@
 import { defaultReviewPreferences } from './review-preferences.js';
 
-const cacheVersion = 4;
+const cacheVersion = 5;
 const megabyte = 1024 * 1024;
 let database;
 
