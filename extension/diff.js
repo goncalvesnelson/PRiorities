@@ -13,7 +13,7 @@ export function parseDiff(diff) {
       group = undefined;
       continue;
     }
-    if (line.startsWith('+++ b/')) {
+    if (!hunk && line.startsWith('+++ b/')) {
       file.path = line.slice(6);
       continue;
     }

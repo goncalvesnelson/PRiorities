@@ -233,6 +233,7 @@ export function startReviewUI() {
   let effort = '';
   let status = '';
   let error = '';
+  let settingsError = '';
   let timer;
   let destroyed = false;
   const fileStates = new Map();
@@ -365,6 +366,7 @@ export function startReviewUI() {
 
   function renderControls() {
     if (destroyed) return;
+    const currentError = [settingsError, error].filter(Boolean).join(' ');
     const activeModel = reviewProviderName ? reviewModel : model;
     const activeEffort = reviewProviderName ? reviewEffort : effort;
     const settingsChanged = Boolean(reviewProviderName && model &&
@@ -391,8 +393,8 @@ export function startReviewUI() {
     explained.setAttribute('aria-pressed', String(mode === 'explained'));
     full.setAttribute('aria-pressed', String(mode === 'full'));
     for (const control of viewButtons) control.tabIndex = control.getAttribute('aria-pressed') === 'true' ? 0 : -1;
-    errorNode.hidden = !error;
-    if (errorNode.textContent !== error) errorNode.textContent = error;
+    errorNode.hidden = !currentError;
+    if (errorNode.textContent !== currentError) errorNode.textContent = currentError;
     welcome.hidden = busy || Boolean(analysis) || fileStates.size > 0;
     progressPanel.hidden = !busy || fileStates.size > 0;
     const states = [...fileStates.values()];
@@ -407,15 +409,15 @@ export function startReviewUI() {
     cacheNotice.hidden = Boolean(analysis) && !cacheWarning || !cacheMessage && !savedReview;
     cacheNotice.textContent = cacheMessage || (savedReview ? `Saved ${new Date(savedReview.savedAt).toLocaleString()}. Opening checks the current context without a new model call.` : '');
     let nextStatus = pendingAction?.message ?? status;
-    if (busy && snapshot && !error && !pendingAction) nextStatus = `${phase.textContent}. ${progressDetail.textContent}.`;
+    if (busy && snapshot && !currentError && !pendingAction) nextStatus = `${phase.textContent}. ${progressDetail.textContent}.`;
     if (!busy && !status) nextStatus = !configured
       ? `Connect your local ${providerName} helper in Settings, then analyze this PR.`
       : `Ready to analyze ${rangeSelected ? 'these commits' : 'this PR'} with ${providerName}${model ? ` (${model})` : ''}. Analysis starts only when you click ${analyzeLabel}.`;
-    if (settingsChanged && !busy && !pendingAction && !error) nextStatus = `Settings changed. ${analyzeLabel} will use ${providerName} (${model}), effort: ${effort || 'model default'}.`;
+    if (settingsChanged && !busy && !pendingAction && !currentError) nextStatus = `Settings changed. ${analyzeLabel} will use ${providerName} (${model}), effort: ${effort || 'model default'}.`;
     const split = [...document.querySelectorAll('table[data-diff-anchor] tr.diff-line-row')].some(row => row.querySelectorAll('.diff-text').length > 1);
     if (analysis && mode === 'focused' && split) nextStatus += ' GitHub is in split view. Choose Unified in its diff view settings to collapse lines.';
     if (statusNode.textContent !== nextStatus) statusNode.textContent = nextStatus;
-    const ordinaryStatus = (busy && snapshot || finalResult && verifiedPage() || !attempted && configured && !status) && !error && !pendingAction && !split && !(settingsChanged && !busy);
+    const ordinaryStatus = (busy && snapshot || finalResult && verifiedPage() || !attempted && configured && !status) && !currentError && !pendingAction && !split && !(settingsChanged && !busy);
     statusNode.classList.toggle('rf-visually-hidden', Boolean(ordinaryStatus));
     const foldingDetail = result.querySelector('.rf-folding-detail');
     if (foldingDetail) foldingDetail.textContent = status;
@@ -436,13 +438,14 @@ export function startReviewUI() {
       configured = Boolean(settings?.configured);
       model = settings?.model ?? '';
       effort = settings?.effort ?? '';
+      settingsError = '';
       void refreshSavedReview(true);
       renderControls();
     } catch (failure) {
       if (request !== settingsRequest || !isActive()) return;
       configured = false;
       model = '';
-      error = `The extension could not read its settings. Reload this page after reloading the extension. ${failure.message}`;
+      settingsError = `The extension could not read its settings. Reload this page after reloading the extension. ${failure.message}`;
       renderControls();
     }
   }

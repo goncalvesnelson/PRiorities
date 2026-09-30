@@ -132,7 +132,12 @@ function cliFailure(output) {
   return null;
 }
 
-function codexFailure(output) {
+function codexFailure({ code, output, errorOutput }, args) {
+  if (code !== 0 && !output.trim()) {
+    const startupError = errorOutput.replace(/^WARNING: proceeding, even though we could not create PATH aliases: Operation not permitted \(os error 1\)\r?\n/, '');
+    const rejectedOption = /^error: unexpected argument '(-{1,2}[a-z][a-z-]*)' found(?:\r?\n|$)/.exec(startupError)?.[1];
+    if (rejectedOption && args.includes(rejectedOption)) return 'Codex does not support a required CLI option. Update Codex, reinstall the helper, and try again.';
+  }
   let failure = null;
   for (const line of output.split(/\r?\n/).filter(line => line.trim())) {
     let event;
@@ -312,19 +317,29 @@ async function handle(request) {
       throw new HelperError('The local helper could not prepare its analysis files. Check local disk space and temporary-folder permissions.');
     }
     const { args, outputPath } = analysis;
-    const { code, output: analysisOutput, errorOutput } = await runCli(args, request.prompt.user, 4 * 1024 * 1024);
+    const cliResult = await runCli(args, request.prompt.user, 4 * 1024 * 1024);
     if (finished) return;
-    const failure = provider === 'codex' ? codexFailure(analysisOutput) : cliFailure(`${errorOutput}\n${analysisOutput}`);
+    const { code, output: analysisOutput, errorOutput } = cliResult;
+    const failure = provider === 'codex' ? codexFailure(cliResult, args) : cliFailure(`${errorOutput}\n${analysisOutput}`);
     if (code !== 0 || provider === 'codex' && failure) {
       complete({ type: 'error', message: failure ?? `${providerName} stopped before completing this analysis. Run the CLI in Terminal to inspect the failure, then retry. No review changes were applied.` });
       return;
     }
-    if (outputPath && statSync(outputPath).size > maxOutputBytes - 128) {
-      complete({ type: 'error', message: `${providerName} returned a result too large for Chrome. Try a smaller pull request.` });
-      return;
+    let resultText = analysisOutput;
+    if (outputPath) {
+      try {
+        if (statSync(outputPath).size > maxOutputBytes - 128) {
+          complete({ type: 'error', message: `${providerName} returned a result too large for Chrome. Try a smaller pull request.` });
+          return;
+        }
+        resultText = readFileSync(outputPath, 'utf8');
+      } catch (error) {
+        if (typeof error.code !== 'string') throw error;
+        throw new HelperError('The local helper could not read the Codex analysis file. Check local disk space and temporary-folder permissions, then retry. No review changes were applied.');
+      }
     }
     let result;
-    try { result = JSON.parse(outputPath ? readFileSync(outputPath, 'utf8') : analysisOutput); } catch {
+    try { result = JSON.parse(resultText); } catch {
       complete({ type: 'error', message: `${providerName} did not return valid JSON. No review changes were applied.` });
       return;
     }

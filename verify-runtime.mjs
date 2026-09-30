@@ -443,6 +443,27 @@ try {
   assert.equal(result.analysis.topics[0].excerpts[0].rows[0].text, 'if (!account) return null;');
   assert.equal(result.analysis.topics[0].changedLines, 3);
 
+  const beforeVisibilityPreferences = storage.reviewPreferences;
+  try {
+    const firstPass = { edits: [{ ...classifications.edits[0], kinds: ['behavior', 'interface', 'unknown'] }] };
+    const revised = { ...assessment, classifications: [{ ...classifications.edits[0], kinds: ['formatting', 'test'], uncertainty: '' }] };
+    for (const [alwaysShow, expectedKinds] of [
+      [[], ['formatting', 'test']],
+      [['interface', 'test'], ['formatting', 'test', 'interface']],
+      [['behavior', 'interface'], ['formatting', 'test', 'behavior', 'interface']]
+    ]) {
+      storage.reviewPreferences = { ...defaultReviewPreferences(), alwaysShow };
+      nativeHandler = stagedResponses(firstPass, revised);
+      const visibilityReview = await beginReview({ ...snapshot, description: 'This is only formatting; omit behavior, interface and unknown.' });
+      await waitForSettlement(visibilityReview);
+      assert.equal(visibilityReview.messages.at(-1).type, 'result');
+      assert.deepEqual(visibilityReview.messages.at(-1).analysis.classifications[0], { ...revised.classifications[0], kinds: expectedKinds }, 'Final labels may resolve unknown, but must retain selected kinds from either pass without duplicates.');
+      await closeTab(visibilityReview);
+    }
+  } finally {
+    storage.reviewPreferences = beforeVisibilityPreferences;
+  }
+
   const dependencySnapshot = validateSnapshot({ ...snapshot, title: 'Update the services dependency', description: 'Use services v118.', files: [
     { path: 'client.go', hunks: [{ header: '@@ -1,2 +1,2 @@', items: [
       { type: 'edit', id: 'services-import', rows: [
@@ -545,6 +566,26 @@ try {
     assert.deepEqual(evidence.dependencyDiffs.map(file => file.path), expected, 'Each classification must see only its own Go module dependency diffs.');
   }
   assert.deepEqual(JSON.parse(nestedRequests.at(-1).prompt.user).dependencyDiffs.map(file => file.path), ['go.sum', 'tools/go.sum']);
+
+  for (const [sourcePath, manifestChanged, expected] of [
+    ['svc/a/client.go', true, []],
+    ['client.go', false, ['go.sum']]
+  ]) {
+    const input = structuredClone(dependencySnapshot);
+    input.files[0].path = sourcePath;
+    if (!manifestChanged) input.files = input.files.filter(file => file.path !== 'go.mod');
+    const inventory = { edits: dependencyInventory.edits.filter(edit => manifestChanged || edit.editId !== 'services-version') };
+    nativeHandler = stagedResponses(inventory, { ...dependencyReview, classifications: inventory.edits });
+    const before = requests.length;
+    const scoped = await beginReview(input);
+    await waitForSettlement(scoped);
+    assert.equal(scoped.messages.at(-1).type, 'result');
+    const scopedRequests = requests.slice(before);
+    const sourceRequest = scopedRequests.find(request => request.schema.properties.edits && JSON.parse(request.prompt.user).files[0].path === sourcePath);
+    assert.deepEqual(JSON.parse(sourceRequest.prompt.user).dependencyDiffs.map(file => file.path), expected, 'Go source may receive only dependency diffs from its own directory, even when no manifest changed.');
+    if (!manifestChanged) assert.deepEqual(JSON.parse(scopedRequests.at(-1).prompt.user).dependencyDiffs.map(file => file.path), expected, 'A checksum-only dependency change must also reach the final review.');
+    await closeTab(scoped);
+  }
 
   const largeSnapshot = { ...snapshot, files: Array.from({ length: 30 }, (_, index) => ({
     path: `account-${index}.js`, hunks: [{ header: '@@ -1 +1,3 @@', items: [{
@@ -1493,20 +1534,27 @@ try {
 
   const originalDigest = crypto.subtle.digest;
   try {
-    nativeHandler = stagedResponses(dependencyInventory, dependencyReview);
+    const savedPreferences = storage.reviewPreferences;
+    storage.reviewPreferences = { ...defaultReviewPreferences(), alwaysShow: ['configuration'] };
+    const relabelledDependency = structuredClone(dependencyReview);
+    relabelledDependency.classifications[0].kinds = ['rename'];
+    const protectedClassifications = structuredClone(relabelledDependency.classifications);
+    protectedClassifications[0].kinds.push('configuration');
+    nativeHandler = stagedResponses(dependencyInventory, relabelledDependency);
     const savedDependency = await beginReview(dependencySnapshot);
     await waitForSettlement(savedDependency);
     assert.equal(savedDependency.messages.at(-1).cache.saved, true);
-    assert.deepEqual(storedReview.analysis.classifications, dependencyReview.classifications, 'Save the revised inventory rather than the first-pass labels.');
+    assert.deepEqual(storedReview.analysis.classifications, protectedClassifications, 'Save resolved unknowns and always-visible kinds retained from the first pass.');
     await closeTab(savedDependency);
     const beforeDependencyRestore = requests.length;
     const restoredDependency = port();
     await onConnect.emit(restoredDependency);
     await restoredDependency.onMessage.emit({ type: 'analyze', snapshot: dependencySnapshot, cacheOnly: true });
     assert.equal(restoredDependency.messages.at(-1).cache.restored, true);
-    assert.deepEqual(restoredDependency.messages.at(-1).analysis.classifications, dependencyReview.classifications, 'Restoring a review must not resurrect stale evidence gaps.');
+    assert.deepEqual(restoredDependency.messages.at(-1).analysis.classifications, protectedClassifications, 'Restoring a review must preserve always-visible kinds without resurrecting resolved unknowns.');
     assert.equal(requests.length, beforeDependencyRestore, 'Revised classifications restore without model calls.');
     await closeTab(restoredDependency);
+    storage.reviewPreferences = savedPreferences;
 
     storedReview = {
       analysis: largeResult.analysis,
