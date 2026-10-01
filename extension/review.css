@@ -172,6 +172,11 @@
 .rf-rich ul, .rf-questions { padding-left: 20px; }
 .rf-rich code { padding: 1px 4px; border-radius: 4px; background: var(--rf-muted-background); font: .9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .rf-unresolved .rf-link-button { white-space: normal; text-align: left; }
+.rf-deleted-files { margin: 0 0 8px; color: var(--rf-muted); font-size: 12px; }
+.rf-deleted-files summary { cursor: pointer; }
+.rf-deleted-files ul { list-style: none; max-width: 90ch; max-height: 240px; overflow-y: auto; margin: 6px 0 0; padding: 0; }
+.rf-deleted-files li { display: flex; align-items: center; gap: 8px; }
+.rf-deleted-files .rf-link-button { flex: 1 1 auto; min-width: 0; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .rf-section-overview { padding: 8px 0 16px; border-top: 1px solid var(--rf-border); }
 .rf-section-list { list-style: none; margin: 0; padding: 0; max-width: 90ch; }
 .rf-button.rf-section-link { display: flex; align-items: baseline; gap: 12px; width: 100%; padding: 3px 8px; border-color: transparent; background: transparent; font-weight: 400; white-space: normal; text-align: left; }

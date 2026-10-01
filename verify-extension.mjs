@@ -86,7 +86,7 @@ if (mode === 'generated-final-failed' && !schema.required.includes('edits')) pro
 const evidence = JSON.parse(input);
 let labels = ${JSON.stringify(classifications)};
 let review = ${JSON.stringify(assessment)};
-if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-final-failed' || mode === 'many-decisions' || mode === 'guide-sections') {
+if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-final-failed' || mode === 'many-decisions' || mode === 'guide-sections' || mode === 'deleted-files') {
   labels = evidence.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => ({editId:item.id,kinds:['behavior'],reason:'Synthetic change.',uncertainty:''}))));
   review = { summary:'Synthetic parallel review.', topics:[{...review.topics[0],id:'parallel-change',priority:'supporting',title:'Synthetic supporting changes',editIds:labels.map(entry=>entry.editId),excerpts:[]}] };
 }
@@ -298,6 +298,10 @@ async function handleEvent(message) {
         route.diffContents = route.diffContents.slice(0,3);
       }
       if (changesMode === 'many-decisions') route.diffSummaries = route.diffSummaries.slice(0,5);
+      if (changesMode === 'deleted-files') {
+        route.diffSummaries = [...route.diffSummaries.slice(0,3), ...changes.removed.map(({ path, pathDigest, linesAdded, linesDeleted, linesChanged }) => ({ path, pathDigest, linesAdded, linesDeleted, linesChanged, changeType: 'REMOVED' }))];
+        route.diffContents = [...route.diffContents.slice(0,3), structuredClone(changes.removed[0])];
+      }
       if (changesMode === 'guide-sections') {
         route.diffSummaries = route.diffSummaries.slice(0,6);
         const file = route.diffContents[2];
@@ -333,7 +337,7 @@ async function handleEvent(message) {
         route.diffContents[0].newTreeEntry = { isGenerated: true };
         route.diffContents[0].diffLines = [];
       }
-      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range', 'collapsed-first', 'guide-sections'].includes(changesMode));
+      body = changes.page(route, ['parallel', 'generated-review', 'all-generated', 'many-decisions', 'commit-range', 'collapsed-first', 'guide-sections', 'deleted-files'].includes(changesMode), changesMode === 'deleted-files');
       if (changesMode === 'collapsed-first') {
         let index = 0;
         body = body.replace(/<table\b[^>]*>.*?<\/table>/gs, table => index++ < 2 ? '' : table);
@@ -341,7 +345,7 @@ async function handleEvent(message) {
     } else if (changesMode && url.pathname === changes.root + '/page_data/diff_entries') {
       const paths = url.searchParams.get('paths').split(',').map(decodeURIComponent);
       const isRange = url.searchParams.get('range') === selectedRange;
-      const entries = structuredClone((isRange ? rangeEntries : changes.entries).filter(entry => paths.includes(entry.path)));
+      const entries = structuredClone((isRange ? rangeEntries : [...changes.entries, ...changes.removed]).filter(entry => paths.includes(entry.path)));
       if (changesMode === 'guide-sections') for (const entry of entries) {
         if (entry.path === changes.paths[5]) entry.newTreeEntry = { isGenerated: true };
         if (entry.path !== changes.paths[4]) continue;
@@ -556,6 +560,8 @@ try {
   await waitFor(() => evaluate('document.querySelector("#connection-status")?.textContent.includes("Connected to Codex") && !document.querySelector("#model").disabled'), 'native Codex connection');
   assert.equal(await evaluate('document.querySelector("#api-key")'), null);
   assert.equal(await evaluate('document.querySelector("#concurrency").value'), '6', 'Six files are classified at once by default.');
+  assert.equal(await evaluate('document.querySelector("#file-limit").value'), '100', 'PRs of up to 100 changed files are analyzed by default.');
+  assert.equal(await evaluate('document.querySelector("#list-deleted-files").checked'), false, 'Deleted files are analyzed like other files by default.');
   await evaluate('document.querySelector("#model").value="fixture-model"; document.querySelector("#settings-form").requestSubmit()');
   await waitFor(() => evaluate('document.querySelector("#status")?.textContent.includes("Settings saved")'), 'saving the model');
   assert.equal(await evaluate('document.querySelector("#model").tagName'), 'SELECT');
@@ -1246,11 +1252,11 @@ try {
   await page('Page.reload');
   await waitFor(() => evaluate(`import(${JSON.stringify(moduleUrl)}).then(module => module.readPageIdentity()?.headSha === ${JSON.stringify(headSha)})`), 'classic capture revision restored');
 
-  const captureFixture = () => evaluate(`(async()=>{
+  const captureFixture = (options = {}) => evaluate(`(async()=>{
     const module=await import(${JSON.stringify(moduleUrl)});
     const progress=[];
     try {
-      const {snapshot,highlights}=await module.capturePullRequest({onProgress:message=>progress.push(message)});
+      const {snapshot,highlights}=await module.capturePullRequest({...${JSON.stringify(options)},onProgress:message=>progress.push(message)});
       return {snapshot,highlights,progress};
     } catch(error) { return {error:error.message,progress}; }
   })()`);
@@ -1282,6 +1288,29 @@ try {
   assert.ok(!lifecycleCapture.requests.some(url => url.includes('/' + baseSha + '/added.js') || url.includes('/' + headSha + '/deleted.js')), 'Nonexistent sides of added/deleted files must not be fetched.');
   assert.deepEqual(lifecycleCapture.snapshot.context.filter(source => source.text === ''), [{path:'added.js',side:'before',text:''},{path:'deleted.js',side:'after',text:''}]);
   assert.deepEqual(lifecycleCapture.snapshot.warnings, ['Could not read after context for modified.js; only its diff was analyzed.'], 'Actual source fetch failures still report missing evidence.');
+  const reactEntries = [
+    { path: 'modified.js', linesAdded: 1, linesDeleted: 1, diffLines: [{ type: 'HUNK', text: '@@ -1 +1 @@' }, { type: 'DELETION', text: '-export const value = false;' }, { type: 'ADDITION', text: '+export const value = true;' }] },
+    { path: 'deleted.js', linesAdded: 0, linesDeleted: 2, diffLines: [{ type: 'HUNK', text: '@@ -1,2 +0,0 @@ export' }, { type: 'DELETION', text: '-DELETED_REACT_CONTENT', html: '-<span class="pl-k">DELETED_REACT_CONTENT</span>' }, { type: 'DELETION', text: '-export const deleted = true;' }] }
+  ].map(entry => ({ ...entry, oldOid: baseSha, newOid: headSha }));
+  const reactDeletion = await evaluate(`(async () => {
+    const {capturePullRequest} = await import(${JSON.stringify(moduleUrl)});
+    const originalFetch = window.fetch;
+    window.fetch = async url => {
+      if (url.includes('/files?')) return new Response(${JSON.stringify(`<script type="application/json" data-target="react-app.embeddedData">${JSON.stringify({ payload: { diffEntryData: reactEntries } })}</script>`)});
+      if (url.includes('/blob/')) return new Response('<script type="application/json" data-target="react-app.embeddedData">{"rawLines":["export const value = true;"]}</script>');
+      return new Response('<div data-testid="issue-body-viewer">Update one file and delete another.</div>');
+    };
+    const capture = options => capturePullRequest(options).then(({snapshot,highlights}) => ({snapshot,highlightedPaths:Object.keys(highlights)}), error => ({error:error.message}));
+    try { return {listed:await capture({fileLimit:1,listDeletedFiles:true}),analyzed:await capture({fileLimit:1})}; }
+    finally { window.fetch = originalFetch; }
+  })()`);
+  assert.equal(reactDeletion.listed.error, undefined, 'A deleted file recognized by its diff does not count toward the file limit.');
+  assert.deepEqual(reactDeletion.listed.snapshot.files.map(file => file.path), ['modified.js']);
+  assert.deepEqual(reactDeletion.listed.snapshot.deletedFiles, [{ path: 'deleted.js', deletions: 2 }]);
+  assert.ok(!JSON.stringify(reactDeletion.listed).includes('DELETED_REACT_CONTENT'), 'Listed deleted files keep their rows and highlighting out of the capture.');
+  assert.ok(!reactDeletion.listed.highlightedPaths.includes('deleted.js'));
+  assert.equal(reactDeletion.analyzed.error, 'This PR changes 2 files; PRiorities analyzes up to 1 (change this in Settings). Use Full diff to review it. No analysis was sent.');
+
   const beforeHighlightingCapture = (await modelRequests()).length;
   const batchedHighlighting = await evaluate(`(async () => {
     const {capturePullRequest} = await import(${JSON.stringify(moduleUrl)});
@@ -1384,6 +1413,10 @@ try {
   assert.equal(missingDeferred.progress.some(message => message.includes('context for 4 changed files')), false);
 
   deferredMode = 'initial';
+  deferredRequests.length = 0;
+  const overLimitDeferred = await captureFixture({ fileLimit: 50 });
+  assert.equal(overLimitDeferred.error, 'This PR changes 53 files; PRiorities analyzes up to 50 (change this in Settings). Use Full diff to review it. No analysis was sent.');
+  assert.equal(deferredRequests.some(url => url.includes('/deferred-')), false, 'The classic file count stops an over-limit PR before its diffs are fetched.');
   deferredRequests.length = 0;
   const completeDeferred = await captureFixture();
   assert.equal(completeDeferred.error, undefined, 'Every deferred file must load before snapshot validation.');
@@ -1582,6 +1615,78 @@ try {
   assert.ok(await evaluate(`!${shadow}.querySelector('.rf-section-title').textContent.includes('not analyzed')`), 'A successful replacement clears the previously excluded-file selection.');
   await click('Full diff');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0);
+  await writeFile(modeFile,'normal');
+
+  const saveChangedFileSettings = async (fileLimit, listDeletedFiles) => {
+    await page('Page.navigate', { url: `chrome-extension://${extensionId}/options.html` });
+    await waitFor(() => evaluate('document.querySelector("#connection-status")?.textContent.includes("Connected to Codex") && !document.querySelector("#file-limit").disabled'), 'changed-file settings');
+    await evaluate(`document.querySelector("#file-limit").value = "${fileLimit}"; document.querySelector("#list-deleted-files").checked = ${listDeletedFiles}; document.querySelector("#settings-form").requestSubmit()`);
+    await waitFor(() => evaluate('document.querySelector("#status")?.textContent.includes("Settings saved")'), 'saving changed-file settings');
+  };
+  const openDeletedFilesPR = async () => {
+    await page('Page.navigate', { url: prUrl + '/changes' });
+    await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('Ready to analyze')`), 'PR with deleted files');
+  };
+  const removedPaths = changes.removed.map(entry => entry.path);
+  await saveChangedFileSettings(3, false);
+  changesMode = 'deleted-files';
+  await writeFile(modeFile, 'deleted-files');
+  await openDeletedFilesPR();
+  const beforeOverLimit = (await modelRequests()).length;
+  changesRequests.length = 0;
+  await click('Analyze PR');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-error')?.textContent.includes('This PR changes 5 files; PRiorities analyzes up to 3 (change this in Settings). Use Full diff to review it. No analysis was sent.') && !${shadow}.querySelector('.rf-analyze').disabled`), 'over-limit PR stopped during capture');
+  assert.equal(changesRequests.some(request => new URL(request.url).pathname.includes('/page_data/')), false, 'An over-limit PR fails before fetching any lazy diffs.');
+  assert.equal((await modelRequests()).length, beforeOverLimit);
+
+  await saveChangedFileSettings(5, false);
+  await openDeletedFilesPR();
+  await click('Analyze PR');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && ${shadow}.querySelector('.rf-cache-detail')?.textContent.includes('Review saved') && !${shadow}.querySelector('.rf-analyze').disabled`), 'raised limit analyzes deleted files as before');
+  const unlistedRequests = (await modelRequests()).slice(beforeOverLimit);
+  assert.equal(unlistedRequests.length, 6, 'With the option off, deleted files are classified like any other file.');
+  assert.ok(unlistedRequests.at(-1).evidence.files.some(file => file.path === removedPaths[1]) && JSON.stringify(unlistedRequests).includes('DELETED_CONTENT'));
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-deleted-files')`), null);
+
+  await saveChangedFileSettings(3, true);
+  await page('Page.reload');
+  await waitFor(() => evaluate('!document.querySelector("#file-limit").disabled'), 'reloaded changed-file settings');
+  assert.deepEqual(await evaluate('[document.querySelector("#file-limit").value, document.querySelector("#list-deleted-files").checked]'), ['3', true], 'Both changed-file settings survive reopening Settings.');
+  await openDeletedFilesPR();
+  changesRequests.length = 0;
+  await click('Analyze PR');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && ${shadow}.querySelector('.rf-cache-detail')?.textContent.includes('Review saved') && !${shadow}.querySelector('.rf-analyze').disabled`), 'PR analyzed with deleted files listed');
+  assert.deepEqual(changesRequests.filter(request => new URL(request.url).pathname.includes('/page_data/')), [], 'Listed deleted files are neither batch-loaded nor deferred-loaded.');
+  const listedRequests = (await modelRequests()).slice(beforeOverLimit + unlistedRequests.length);
+  assert.equal(listedRequests.length, 4, 'Only the three changed files are classified before the PR review.');
+  assert.ok(!JSON.stringify(listedRequests).includes('DELETED_CONTENT'), 'Deleted contents never reach the model.');
+  assert.ok(listedRequests.slice(0, -1).every(request => !JSON.stringify(request.evidence).includes('removed/')), 'Classification receives no deleted-file information.');
+  assert.ok(listedRequests.at(-1).evidence.evidenceLimits.some(limit => removedPaths.every(path => limit.includes(`${path} (2 lines)`))), 'The PR review receives deleted paths and line counts.');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-coverage').textContent`), 'Guide covers 3 of 3 files. 2 deleted files listed, not analyzed (shown in Full diff).');
+  assert.deepEqual(await evaluate(`(() => {
+    const group = ${shadow}.querySelector('.rf-deleted-files');
+    return { open: group.open, summary: group.querySelector('summary').textContent, items: [...group.querySelectorAll('li')].map(item => item.textContent) };
+  })()`), { open: false, summary: '2 deleted files listed, not analyzed · −4 lines', items: removedPaths.map(path => `${path}−2`) }, 'Guide lists deleted files in one collapsed group.');
+  assert.deepEqual(await evaluate(`[...document.querySelectorAll('.review-focus-file-status[data-state=deleted]')].map(badge => [badge.dataset.path, badge.shadowRoot.querySelector('.rf-file-state').textContent])`), removedPaths.map(path => [path, 'AI skipped · deleted']));
+  assert.ok((await evaluate(`${shadow}.querySelector('.rf-analysis-count').textContent`)).includes('2 deleted files listed, not analyzed'));
+  const listedCapture = await captureFixture({ fileLimit: 3, listDeletedFiles: true });
+  assert.deepEqual(listedCapture.snapshot.files.map(file => file.path), changes.paths.slice(0, 3));
+  assert.deepEqual(listedCapture.snapshot.deletedFiles, removedPaths.map(path => ({ path, deletions: 2 })));
+  assert.ok(!JSON.stringify(listedCapture).includes('DELETED_CONTENT'), 'Deleted rows and highlighting stay out of the capture.');
+
+  const beforeSavedDeleted = (await modelRequests()).length;
+  await page('Page.reload');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved review made with deleted files listed');
+  await click('Open saved review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review') && ${shadow}.querySelector('.rf-deleted-files')`), 'restored review with deleted files listed');
+  await saveChangedFileSettings(5, false);
+  await openDeletedFilesPR();
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'the earlier review made without listing deleted files');
+  await click('Open saved review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'review saved without listing deleted files survives the other mode');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-coverage').textContent`), 'Guide covers 5 of 5 files.');
+  assert.equal((await modelRequests()).length, beforeSavedDeleted, 'Reviews saved with and without listing deleted files reopen separately without model calls.');
+  await saveChangedFileSettings(100, false);
   await writeFile(modeFile,'normal');
   changesMode = '';
   const beforeProviderSettings = (await modelRequests()).length;
@@ -2564,7 +2669,7 @@ try {
   assert.ok(workers.length > 0);
   assert.deepEqual(eventErrors, []);
   assert.deepEqual(exceptions, []);
-  console.log('Installed extension passed: Codex connection/model settings, complete GitHub capture, 53 deferred files and deferred total count, 53-file Changes route with four split-view entries and validated lazy loading, bounded linked issue intent and local failures, classic/React source fixtures, per-file Codex classification + PR review → paired Guide → native Full diff, Full diff by default with one-click Guide, section folding and unresolved labels, file-level Reviewed mirroring GitHub Viewed, incomplete diff rejection. A fake Codex process supplied results through the real native host; no live model calls.');
+  console.log('Installed extension passed: Codex connection/model settings, complete GitHub capture, 53 deferred files and deferred total count, 53-file Changes route with four split-view entries and validated lazy loading, bounded linked issue intent and local failures, classic/React source fixtures, per-file Codex classification + PR review → paired Guide → native Full diff, Full diff by default with one-click Guide, section folding and unresolved labels, file-level Reviewed mirroring GitHub Viewed, incomplete diff rejection, changed-file limit before lazy loading, deleted files listed without fetching or sending their contents and saved separately. A fake Codex process supplied results through the real native host; no live model calls.');
 } finally {
   for (const request of pending.values()) clearTimeout(request.timer);
   chrome.kill('SIGTERM');

@@ -1,6 +1,10 @@
 import { changeKinds, classificationPrompt, prioritizationPrompt, defaultReviewPreferences, evidenceRules, focusInstructions } from './review-preferences.js';
 
 const textField = { type: 'string' };
+export const defaultFileLimit = 100;
+export const maxFileLimit = 300;
+// GitHub's own Changes page stops at 3,000 files (pageLimits.filesLimit).
+export const maxChangedFiles = 3000;
 const lockfileNames = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'composer.lock', 'Gemfile.lock', 'Pipfile.lock', 'poetry.lock', 'uv.lock', 'go.sum', 'packages.lock.json', 'Package.resolved', 'flake.lock', 'mix.lock']);
 
 export function isGeneratedFile(file) {
@@ -71,7 +75,8 @@ export function validateSnapshot(input) {
   if (!record(input) || JSON.stringify(input).length > 1_800_000) throw new Error('This PR is too large for this prototype. Analyze a smaller change.');
   if (typeof input.url !== 'string' || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(input.url)) throw new Error('Open a GitHub pull request before analyzing.');
   if (!/^[a-f0-9]{40}$/.test(input.baseSha) || !/^[a-f0-9]{40}$/.test(input.headSha)) throw new Error('Could not identify the commits in this diff. Refresh the Files changed page.');
-  if (typeof input.title !== 'string' || typeof input.description !== 'string' || !Array.isArray(input.files) || !input.files.length || input.files.length > 100) throw new Error('Expected a pull request with 1–100 changed files.');
+  if (typeof input.title !== 'string' || typeof input.description !== 'string' || !Array.isArray(input.files) || !input.files.length || input.files.length > maxFileLimit) throw new Error(`Expected a pull request with 1–${maxFileLimit} changed files.`);
+  if (input.deletedFiles !== undefined && (!Array.isArray(input.deletedFiles) || input.files.length + input.deletedFiles.length > maxChangedFiles)) throw new Error('Invalid deleted-file list.');
   if (!Array.isArray(input.context) || !Array.isArray(input.warnings) || input.warnings.some(warning => typeof warning !== 'string')) throw new Error('Invalid source context.');
   const paths = new Set();
   const ids = new Set();
@@ -96,6 +101,10 @@ export function validateSnapshot(input) {
   }
   for (const source of input.context) {
     if (!record(source) || !paths.has(source.path) || !['before', 'after'].includes(source.side) || typeof source.text !== 'string') throw new Error('Invalid source context.');
+  }
+  for (const file of input.deletedFiles ?? []) {
+    if (!record(file) || !validPath(file.path) || paths.has(file.path) || !Number.isSafeInteger(file.deletions) || file.deletions < 0) throw new Error('Invalid or duplicate deleted file.');
+    paths.add(file.path);
   }
   if (!ids.size) throw new Error('No text changes were available to analyze.');
   return input;

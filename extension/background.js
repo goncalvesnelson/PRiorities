@@ -1,5 +1,5 @@
 import { analyzeWithCLI, getCLIModels, getCLIStatus } from './cli-client.js';
-import { allEdits, analysisSchema, classificationSchema, isGeneratedFile, makeClassificationPrompt, makePrompt, validateAnalysis, validateClassifications, validateSnapshot } from './review-data.js';
+import { allEdits, analysisSchema, classificationSchema, defaultFileLimit, isGeneratedFile, makeClassificationPrompt, makePrompt, maxFileLimit, validateAnalysis, validateClassifications, validateSnapshot } from './review-data.js';
 import { cacheInfo, clearCache, peekReview, readReview, reviewCacheKey, reviewLookup, saveReview, setCacheLimit } from './review-cache.js';
 import { changeKinds, defaultReviewPreferences, validateReviewPreferences } from './review-preferences.js';
 
@@ -35,10 +35,12 @@ async function readSettings(provider) {
   }
   const key = `${provider}Settings`;
   const stored = await chrome.storage.local.get(key);
-  const { classificationConcurrency } = await chrome.storage.local.get('classificationConcurrency');
+  const { classificationConcurrency, changedFileLimit, listDeletedFiles } = await chrome.storage.local.get(['classificationConcurrency', 'changedFileLimit', 'listDeletedFiles']);
   return {
     provider, model: validModel(stored[key]?.model) ? stored[key].model : '', effort: validEffort(stored[key]?.effort) ? stored[key].effort : '',
-    concurrency: validConcurrency(classificationConcurrency) ? classificationConcurrency : 6
+    concurrency: validConcurrency(classificationConcurrency) ? classificationConcurrency : 6,
+    fileLimit: validFileLimit(changedFileLimit) ? changedFileLimit : defaultFileLimit,
+    listDeletedFiles: listDeletedFiles === true
   };
 }
 
@@ -52,6 +54,10 @@ function validEffort(effort) {
 
 function validConcurrency(concurrency) {
   return Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 10;
+}
+
+function validFileLimit(fileLimit) {
+  return Number.isInteger(fileLimit) && fileLimit >= 1 && fileLimit <= maxFileLimit;
 }
 
 async function readDurations() {
@@ -161,8 +167,8 @@ async function handleMessage(message, sender) {
   if (message?.type === 'clear-cache') return clearCache();
   if (message?.type === 'set-cache-limit') return setCacheLimit(message.limitMB);
   if (message?.type === 'save-settings') {
-    if (Object.keys(message).some(key => !['type', 'provider', 'model', 'effort', 'concurrency'].includes(key))) {
-      throw new Error('Only provider, model, effort and concurrency preferences can be saved. Sign in through the selected CLI.');
+    if (Object.keys(message).some(key => !['type', 'provider', 'model', 'effort', 'concurrency', 'fileLimit', 'listDeletedFiles'].includes(key))) {
+      throw new Error('Only provider, model, effort, concurrency and changed-file preferences can be saved. Sign in through the selected CLI.');
     }
     if (!['codex', 'claude'].includes(message.provider)) throw new Error('Choose Codex or Claude Code.');
     if (!validModel(message.model)) {
@@ -170,11 +176,13 @@ async function handleMessage(message, sender) {
     }
     if (!validEffort(message.effort)) throw new Error('Choose a valid reasoning effort.');
     if (!validConcurrency(message.concurrency)) throw new Error('Choose a whole number from 1 to 10 files to classify at once.');
+    if (!validFileLimit(message.fileLimit)) throw new Error(`Choose a whole number from 1 to ${maxFileLimit} changed files to analyze.`);
+    if (typeof message.listDeletedFiles !== 'boolean') throw new Error('Choose whether to list deleted files without analyzing them.');
     await storageReady;
-    const settings = { provider: message.provider, model: message.model, effort: message.effort, concurrency: message.concurrency };
+    const settings = { provider: message.provider, model: message.model, effort: message.effort, concurrency: message.concurrency, fileLimit: message.fileLimit, listDeletedFiles: message.listDeletedFiles };
     await chrome.storage.local.set({
       reviewProvider: settings.provider, [`${settings.provider}Settings`]: { model: settings.model, effort: settings.effort },
-      classificationConcurrency: settings.concurrency
+      classificationConcurrency: settings.concurrency, changedFileLimit: settings.fileLimit, listDeletedFiles: settings.listDeletedFiles
     });
     return publicSettings(settings, true);
   }
@@ -350,11 +358,16 @@ function createSession(tabId, url, port) {
       const classified = [...session.files.values()].filter(entry => entry.state === 'classified');
       const includedPaths = new Set([...session.files].filter(([, entry]) => entry.included).map(([path]) => path));
       const excludedPaths = session.snapshot.files.filter(file => !includedPaths.has(file.path)).map(file => file.path);
+      const deletedFiles = session.snapshot.deletedFiles ?? [];
       const snapshot = {
         ...session.snapshot,
         files: session.snapshot.files.filter(file => includedPaths.has(file.path)),
         context: session.snapshot.context.filter(source => includedPaths.has(source.path)),
-        warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated or machine-maintained files excluded from standalone analysis: ${excludedPaths.join(', ')}.`] : [])]
+        warnings: [
+          ...session.snapshot.warnings,
+          ...(excludedPaths.length ? [`Generated or machine-maintained files excluded from standalone analysis: ${excludedPaths.join(', ')}.`] : []),
+          ...(deletedFiles.length ? [`Files deleted outright by this PR, listed by path and deleted-line count; their contents were not supplied or analyzed: ${deletedFiles.map(file => `${file.path} (${file.deletions} ${file.deletions === 1 ? 'line' : 'lines'})`).join(', ')}.`] : [])
+        ]
       };
       const classifications = validateClassifications({ edits: classified.flatMap(entry => entry.classifications) }, snapshot);
       const lines = allEdits(snapshot).flatMap(edit => edit.rows).filter(row => ['add', 'delete'].includes(row.type)).length;
@@ -519,6 +532,8 @@ function createSession(tabId, url, port) {
       }
       job.settings = { ...await readSettings(), review: await readReviewPreferences() };
       if (job.disposed) return;
+      if (snapshot.files.length > job.settings.fileLimit) throw new Error(`This PR has ${snapshot.files.length} files to analyze; PRiorities analyzes up to ${job.settings.fileLimit} (change this in Settings). Use Full diff to review it. No analysis was sent.`);
+      if (Boolean(snapshot.deletedFiles) !== job.settings.listDeletedFiles) throw new Error('The deleted-files setting changed while this PR was read. Analyze again.');
       send(sessionMessage());
       const session = job;
       let cacheError;

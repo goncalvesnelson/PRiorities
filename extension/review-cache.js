@@ -55,8 +55,9 @@ async function transaction(mode, operation, signal) {
   }
 }
 
+// The marker is appended only when deleted files are listed, so reviews saved without that option keep their keys.
 export function reviewLookup(snapshot, settings) {
-  return JSON.stringify([cacheVersion, snapshot.url, snapshot.baseSha, snapshot.headSha, settings.provider, settings.model, settings.effort ?? '', settings.review ?? defaultReviewPreferences()]);
+  return JSON.stringify([cacheVersion, snapshot.url, snapshot.baseSha, snapshot.headSha, settings.provider, settings.model, settings.effort ?? '', settings.review ?? defaultReviewPreferences(), ...(settings.listDeletedFiles ? ['deleted-files-listed'] : [])]);
 }
 
 export async function reviewCacheKey(snapshot, settings) {

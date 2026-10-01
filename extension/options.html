@@ -36,6 +36,11 @@
       <label for="concurrency">Files classified at once</label>
       <input id="concurrency" name="concurrency" type="number" min="1" max="10" step="1" value="6" required disabled aria-describedby="concurrency-help">
       <p id="concurrency-help" class="hint">Default: 6. Each file runs its own CLI process. Choose fewer if the CLI reports rate limits. You can choose 1–10.</p>
+      <label for="file-limit">Maximum changed files to analyze</label>
+      <input id="file-limit" name="fileLimit" type="number" min="1" max="300" step="1" value="100" required disabled aria-describedby="file-limit-help">
+      <p id="file-limit-help" class="hint">Default: 100. A larger PR stops before any code is sent; review it in Full diff. You can choose 1–300.</p>
+      <label class="checkbox-label"><input id="list-deleted-files" name="listDeletedFiles" type="checkbox" disabled aria-describedby="list-deleted-files-help">List deleted files without sending their contents to the AI</label>
+      <p id="list-deleted-files-help" class="hint">Off by default. When on, files deleted outright appear in the review with their deleted-line counts, but their contents are not read or analyzed and they don't count toward the file limit. Full diff still shows them. To analyze deleted files, turn this off and analyze again.</p>
 
       <div class="privacy">
         <strong>Code is sent only when you start analysis.</strong>
