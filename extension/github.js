@@ -213,6 +213,28 @@ async function fetchText(url, signal, redirect = 'follow', headers = { Accept: '
   return text;
 }
 
+// Reading pages one at a time made each capture, including opening a saved review, take over 12 seconds. The cap keeps bursts to GitHub bounded.
+const PARALLEL_REQUESTS = 6;
+
+async function mapLimited(items, task) {
+  const results = new Array(items.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await task(items[index]);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PARALLEL_REQUESTS, items.length) }, worker));
+  return results;
+}
+
 async function fetchDocument(url, signal, redirect = 'follow') {
   return new DOMParser().parseFromString(await fetchText(url, signal, redirect), 'text/html');
 }
@@ -347,24 +369,25 @@ async function loadChanges(doc, route, identity, signal, onProgress, batch) {
   addEntries(diffContents);
   const missing = [...summaries.keys()].filter(path => !entries.has(path));
   onProgress(`Reading all ${summaries.size} changed files…`);
-  for (let offset = 0; offset < missing.length; offset += 4) {
-    const paths = missing.slice(offset, offset + 4);
+  const batches = [];
+  for (let offset = 0; offset < missing.length; offset += 4) batches.push(missing.slice(offset, offset + 4));
+  await mapLimited(batches, async paths => {
     addEntries(await fetchChangeEntries(doc, identity, range, paths, signal), paths);
     onProgress(`Reading changed files: ${entries.size} of ${summaries.size}…`);
-  }
-  for (const entry of [...entries.values()].filter(needsDiffText)) {
+  });
+  await mapLimited([...entries.values()].filter(needsDiffText), async entry => {
     onProgress(`Loading deferred diff for ${entry.path}…`);
     const paths = [entry.path];
     const batch = await fetchChangeEntries(doc, identity, range, paths, signal);
     entries.delete(entry.path);
     addEntries(batch, paths);
     const loaded = entries.get(entry.path);
-    if (!needsDiffText(loaded)) continue;
+    if (!needsDiffText(loaded)) return;
     const params = new URLSearchParams({ path: entry.path, w: '0', range });
     const data = await fetchChangeData(doc, identity, 'diff_entry_lines', params, signal);
     if (!Array.isArray(data?.diffEntryLines) || !data.diffEntryLines.length) throw new Error(`GitHub has not supplied the full text diff for ${entry.path}. Load it and retry.`);
     entries.set(entry.path, { ...loaded, diffLines: data.diffEntryLines, isTooBig: false, truncatedReason: null });
-  }
+  });
   if (entries.size !== summaries.size) throw new Error(`GitHub supplied ${entries.size} of ${summaries.size} files. No analysis was sent.`);
   return parseEntries([...summaries.keys()].map(path => entries.get(path)), batch);
 }
@@ -432,9 +455,7 @@ async function linkedIssueContext(body, identity, warnings, signal) {
     urls.add(`https://github.com/${identity.owner}/${identity.repo}/issues/${match[1]}`);
   }
   if (urls.size > 3) warnings.push(`Linked issue context is limited to 3 of ${urls.size} references in the PR description.`);
-  let result = '';
-  for (const url of [...urls].slice(0, 3)) {
-    if (signal?.aborted) throw new DOMException('Analysis canceled.', 'AbortError');
+  const issues = await mapLimited([...urls].slice(0, 3), async url => {
     const number = url.split('/').at(-1);
     try {
       const issue = await fetchDocument(url, signal, 'error');
@@ -442,14 +463,25 @@ async function linkedIssueContext(body, identity, warnings, signal) {
       const description = originalBody(issue)?.textContent.trim();
       if (!title || !description) throw new Error('The issue title or original description was unavailable.');
       const context = `\n\nLinked issue #${number}: ${url}\nTitle: ${title}\nDescription:\n${description}`;
-      result += context.slice(0, 4000);
-      if (context.length > 4000) warnings.push(`Linked issue #${number} exceeded its context budget; its description was truncated.`);
+      return { context: context.slice(0, 4000), warning: context.length > 4000 ? `Linked issue #${number} exceeded its context budget; its description was truncated.` : '' };
     } catch (error) {
       if (signal?.aborted) throw error;
-      warnings.push(`Could not read linked issue #${number}; its context was not included.`);
+      return { context: '', warning: `Could not read linked issue #${number}; its context was not included.` };
     }
+  });
+  let result = '';
+  for (const { context, warning } of issues) {
+    result += context;
+    if (warning) warnings.push(warning);
   }
   return result;
+}
+
+async function readDescription(url, identity, warnings, signal) {
+  const body = originalBody(await fetchDocument(url, signal));
+  const description = body?.textContent.trim() ?? '';
+  if (!description) warnings.push('The PR description was unavailable; intent was inferred only from code.');
+  return description + await linkedIssueContext(body, identity, warnings, signal);
 }
 
 export async function capturePullRequest({ onProgress = () => {}, signal } = {}) {
@@ -463,46 +495,52 @@ export async function capturePullRequest({ onProgress = () => {}, signal } = {})
   const identity = readPageIdentity(doc, filesUrl);
   if (!identity?.baseSha || !identity.headSha) throw new Error('GitHub did not identify the commits in this diff. Refresh Files changed and retry.');
   if (initial.baseSha && initial.baseSha !== identity.baseSha || initial.headSha && initial.headSha !== identity.headSha) throw new Error('The comparison changed while reading its diffs. Analyze again to review the selected commits.');
-  // Diff and source highlighting share one time budget, so many small files cannot add up to uninterrupted work.
+  const descriptionWarnings = [];
+  // Diff files and concurrent source readers share a budget so their microtasks cannot accumulate uninterrupted highlighting work.
   const batch = { deadline: performance.now() + HIGHLIGHT_BATCH_MS, signal };
-  const { files, warnings, highlights = {} } = await loadFiles(doc, identity, signal, onProgress, batch);
+  const [{ files, warnings, highlights = {} }, description] = await Promise.all([
+    loadFiles(doc, identity, signal, onProgress, batch),
+    readDescription(initial.url, identity, descriptionWarnings, signal)
+  ]);
+  warnings.push(...descriptionWarnings);
   const title = doc.querySelector('.js-issue-title, [data-testid="issue-title"]')?.textContent.trim() ?? doc.title.replace(/ · Pull Request.*$/, '');
   onProgress(`Reading context for ${files.length} changed files…`);
-  const discussion = await fetchDocument(initial.url, signal);
-  const body = originalBody(discussion);
-  let description = body?.textContent.trim() ?? '';
-  if (!description) warnings.push('The PR description was unavailable; intent was inferred only from code.');
-  description += await linkedIssueContext(body, identity, warnings, signal);
   const context = [];
   let contextBytes = 0;
   const runtime = files.filter(file => file.hunks.length && !isGeneratedFile(file) && !/(^|\/)(tests?|__tests__|__snapshots__|vendor|node_modules)\/|(?:\.snap|\.lock|\.min\.js)$|(?:\.test|\.spec)\./i.test(file.path));
-  for (const file of runtime.slice(0, 6)) {
-    for (const side of ['after', 'before']) {
-      if (signal?.aborted) throw new DOMException('Analysis canceled.', 'AbortError');
-      const emptySide = side === 'before' ? /^@@ -0,0 / : / \+0,0 @@/;
-      if (file.hunks.length === 1 && emptySide.test(file.hunks[0].header)) {
-        context.push({ path: file.path, side, text: '' });
-        continue;
-      }
-      const sha = side === 'after' ? identity.headSha : identity.baseSha;
-      const path = file.path.split('/').map(encodeURIComponent).join('/');
-      try {
-        const sourceDoc = await fetchDocument(`https://github.com/${identity.owner}/${identity.repo}/blob/${sha}/${path}`, signal);
-        const source = await readSource(sourceDoc, batch);
-        if (source === null || source.text.length > 220_000 || contextBytes + source.text.length > 700_000) {
-          warnings.push(`Full ${side} source for ${file.path} was unavailable or exceeded the context budget; only its diff was analyzed.`);
-          continue;
-        }
-        context.push({ path: file.path, side, text: source.text });
-        contextBytes += source.text.length;
-        highlights[file.path] ??= { before: {}, after: {} };
-        Object.assign(highlights[file.path][side], source.highlights);
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        warnings.push(`Could not read ${side} context for ${file.path}; only its diff was analyzed.`);
-      }
+  const sides = runtime.slice(0, 6).flatMap(file => ['after', 'before'].map(side => ({ file, side })));
+  const sources = await mapLimited(sides, async ({ file, side }) => {
+    const emptySide = side === 'before' ? /^@@ -0,0 / : / \+0,0 @@/;
+    if (file.hunks.length === 1 && emptySide.test(file.hunks[0].header)) return { empty: true };
+    const sha = side === 'after' ? identity.headSha : identity.baseSha;
+    const path = file.path.split('/').map(encodeURIComponent).join('/');
+    try {
+      return { source: await readSource(await fetchDocument(`https://github.com/${identity.owner}/${identity.repo}/blob/${sha}/${path}`, signal), batch) };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { failed: true };
     }
-  }
+  });
+  // The context budget is spent in file order, so the snapshot and its saved-review key match a sequential read.
+  sides.forEach(({ file, side }, index) => {
+    const { empty, failed, source } = sources[index];
+    if (empty) {
+      context.push({ path: file.path, side, text: '' });
+      return;
+    }
+    if (failed) {
+      warnings.push(`Could not read ${side} context for ${file.path}; only its diff was analyzed.`);
+      return;
+    }
+    if (source === null || source.text.length > 220_000 || contextBytes + source.text.length > 700_000) {
+      warnings.push(`Full ${side} source for ${file.path} was unavailable or exceeded the context budget; only its diff was analyzed.`);
+      return;
+    }
+    context.push({ path: file.path, side, text: source.text });
+    contextBytes += source.text.length;
+    highlights[file.path] ??= { before: {}, after: {} };
+    Object.assign(highlights[file.path][side], source.highlights);
+  });
   if (runtime.length > 6) warnings.push(`Full source was collected for 6 of ${runtime.length} runtime files. Other files are represented by their complete diff.`);
   onProgress('Checking that the PR has not changed…');
   const latest = readPageIdentity(await fetchDocument(filesUrl, signal), filesUrl);
