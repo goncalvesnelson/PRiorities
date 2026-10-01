@@ -14,8 +14,8 @@ const entries = paths.map(path => ({
   isTooBig: false,
   diffLines: [
     { type: 'HUNK', text: '@@ -1 +1 @@', left: 0, right: 0 },
-    { type: 'DELETION', text: `-before ${path}`, left: 1, right: 0 },
-    { type: 'ADDITION', text: `+after ${path}`, left: 1, right: 1 }
+    { type: 'DELETION', text: `-before ${path}`, html: `-<span class="pl-k">before</span> ${path}`, left: 1, right: 0 },
+    { type: 'ADDITION', text: `+after ${path}`, html: `+<span class="x x-first x-last"><span class="pl-k">after</span></span> ${path}`, left: 1, right: 1 }
   ],
   linesAdded: 1,
   linesDeleted: 1,

@@ -69,6 +69,31 @@
 .rf-code .rf-code-text { padding-right: 12px; }
 .rf-code-add { background: var(--diffBlob-additionLine-bgColor, #dafbe1); }
 .rf-code-delete { background: var(--diffBlob-deletionLine-bgColor, #ffebe9); }
+/* GitHub's own syntax colours, copied from Primer's prettylights rules; GitHub's theme defines the variables on :root. */
+.rf-code-text .pl-c { color: var(--color-prettylights-syntax-comment); }
+.rf-code-text .pl-c1, .rf-code-text .pl-s .pl-v { color: var(--color-prettylights-syntax-constant); }
+.rf-code-text .pl-e, .rf-code-text .pl-en { color: var(--color-prettylights-syntax-entity); }
+.rf-code-text .pl-smi, .rf-code-text .pl-s .pl-s1 { color: var(--color-prettylights-syntax-storage-modifier-import); }
+.rf-code-text .pl-ent { color: var(--color-prettylights-syntax-entity-tag); }
+.rf-code-text .pl-k { color: var(--color-prettylights-syntax-keyword); }
+.rf-code-text .pl-s, .rf-code-text .pl-pds, .rf-code-text .pl-s .pl-pse .pl-s1, .rf-code-text .pl-sr, .rf-code-text .pl-sr .pl-cce, .rf-code-text .pl-sr .pl-sre, .rf-code-text .pl-sr .pl-sra { color: var(--color-prettylights-syntax-string); }
+.rf-code-text .pl-v, .rf-code-text .pl-smw { color: var(--color-prettylights-syntax-variable); }
+.rf-code-text .pl-bu { color: var(--color-prettylights-syntax-brackethighlighter-unmatched); }
+.rf-code-text .pl-ii { color: var(--color-prettylights-syntax-invalid-illegal-text); background-color: var(--color-prettylights-syntax-invalid-illegal-bg); }
+.rf-code-text .pl-c2 { color: var(--color-prettylights-syntax-carriage-return-text); background-color: var(--color-prettylights-syntax-carriage-return-bg); }
+.rf-code-text .pl-sr .pl-cce { font-weight: bold; color: var(--color-prettylights-syntax-string-regexp); }
+.rf-code-text .pl-ml { color: var(--color-prettylights-syntax-markup-list); }
+.rf-code-text .pl-mh, .rf-code-text .pl-mh .pl-en, .rf-code-text .pl-ms { font-weight: bold; color: var(--color-prettylights-syntax-markup-heading); }
+.rf-code-text .pl-mi { font-style: italic; color: var(--color-prettylights-syntax-markup-italic); }
+.rf-code-text .pl-mb { font-weight: bold; color: var(--color-prettylights-syntax-markup-bold); }
+.rf-code-text .pl-md { color: var(--color-prettylights-syntax-markup-deleted-text); background-color: var(--color-prettylights-syntax-markup-deleted-bg); }
+.rf-code-text .pl-mi1 { color: var(--color-prettylights-syntax-markup-inserted-text); background-color: var(--color-prettylights-syntax-markup-inserted-bg); }
+.rf-code-text .pl-mc { color: var(--color-prettylights-syntax-markup-changed-text); background-color: var(--color-prettylights-syntax-markup-changed-bg); }
+.rf-code-text .pl-mi2 { color: var(--color-prettylights-syntax-markup-ignored-text); background-color: var(--color-prettylights-syntax-markup-ignored-bg); }
+.rf-code-text .pl-mdr { font-weight: bold; color: var(--color-prettylights-syntax-meta-diff-range); }
+.rf-code-text .pl-ba { color: var(--color-prettylights-syntax-brackethighlighter-angle); }
+.rf-code-text .pl-sg { color: var(--color-prettylights-syntax-sublimelinter-gutter-mark); }
+.rf-code-text .pl-corl { text-decoration: underline; color: var(--color-prettylights-syntax-constant-other-reference-link); }
 .rf-panel summary { cursor: pointer; color: var(--rf-muted); width: fit-content; max-width: 100%; }
 .rf-panel summary:hover { color: var(--rf-accent); }
 .rf-uncertainty { margin: 6px 0; color: var(--rf-muted); max-width: 90ch; font-size: 13px; }

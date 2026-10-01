@@ -19,9 +19,10 @@ const prUrl = 'https://github.com/microsoft/vscode/pull/200000';
 const sourcePath = 'src/vs/editor/contrib/suggest/browser/suggestWidgetRenderer.ts';
 const classic = await readFile(new URL('test-fixtures/github-classic.html', import.meta.url), 'utf8');
 const react = await readFile(new URL('test-fixtures/github-react.html', import.meta.url), 'utf8');
-const rawLines = JSON.parse(await readFile(new URL('test-fixtures/github-source.json', import.meta.url), 'utf8'));
-const sourcePage = `<script type="application/json" data-target="react-app.embeddedData">${JSON.stringify({ payload: { blob: { rawLines } } }).replace(/</g, '\\u003c')}</script>`;
-const fixtureStyle = '<style>:root{--bgColor-default:#fff;--bgColor-muted:#f6f8fa;--fgColor-default:#1f2328;--fgColor-muted:#59636e;--borderColor-default:#d1d9e0;--fgColor-accent:#0969da;--diffBlob-additionLine-bgColor:#dafbe1;--diffBlob-deletionLine-bgColor:#ffebe9}body{margin:24px;font:14px system-ui;color:#1f2328;background:#fff}main{max-width:1300px;margin:auto}.file{border:1px solid #d1d9e0;border-radius:6px;margin:16px 0}.file-header{background:#f6f8fa;padding:12px;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}.blob-code-inner{white-space:pre;font:12px monospace}.blob-num{width:45px;color:#59636e}.blob-code-addition{background:#dafbe1}.blob-code-hunk{background:#ddf4ff}.sr-only,template{display:none}button{cursor:pointer}</style>';
+const blob = JSON.parse(await readFile(new URL('test-fixtures/github-source.json', import.meta.url), 'utf8'));
+const { rawLines } = blob;
+const sourcePage = `<script type="application/json" data-target="react-app.embeddedData">${JSON.stringify({ payload: { blob } }).replace(/</g, '\\u003c')}</script>`;
+const fixtureStyle = '<style>:root{--color-prettylights-syntax-keyword:#cf222e;--color-prettylights-syntax-constant:#0550ae;--color-prettylights-syntax-string:#0a3069;--color-prettylights-syntax-entity:#6639ba;--color-prettylights-syntax-comment:#59636e;--bgColor-default:#fff;--bgColor-muted:#f6f8fa;--fgColor-default:#1f2328;--fgColor-muted:#59636e;--borderColor-default:#d1d9e0;--fgColor-accent:#0969da;--diffBlob-additionLine-bgColor:#dafbe1;--diffBlob-deletionLine-bgColor:#ffebe9}body{margin:24px;font:14px system-ui;color:#1f2328;background:#fff}main{max-width:1300px;margin:auto}.file{border:1px solid #d1d9e0;border-radius:6px;margin:16px 0}.file-header{background:#f6f8fa;padding:12px;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}.blob-code-inner{white-space:pre;font:12px monospace}.blob-num{width:45px;color:#59636e}.blob-code-addition{background:#dafbe1}.blob-code-hunk{background:#ddf4ff}.sr-only,template{display:none}button{cursor:pointer}</style>';
 const fixture = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' + fixtureStyle + '<main><h1 class="js-issue-title">Apply font variation settings to suggestions</h1><a href="/microsoft/vscode/pull/200000/files">Files changed <span class="Counter">1</span></a>' + classic.replace(/^.*?<main>/s, '').replace(/<\/main>\s*$/, '') + '</main>';
 const description = 'Apply editor font variation settings to suggestion labels.';
 const discussionPage = `<main><div id="issue-2025089863"><div class="js-comment-body">${description}
@@ -304,12 +305,16 @@ async function handleEvent(message) {
         file.diffLines = [{type:'HUNK',text:'@@ -1,5 +1,5 @@'},
           {type:'DELETION',text:'-before prerequisite',left:1,right:0}, {type:'ADDITION',text:'+after prerequisite',left:1,right:1},
           {type:'CONTEXT',text:' unchanged context',left:2,right:2},
-          {type:'DELETION',text:'-before contract',left:3,right:2}, {type:'ADDITION',text:'+after contract',left:3,right:3},
+          {type:'DELETION',text:'-before contract',left:3,right:2}, {type:'ADDITION',text:'+after contract',html:'+<span class="pl-s">after <span class="pl-s1">contract</span></span>',left:3,right:3},
           {type:'CONTEXT',text:' unchanged context',left:4,right:4},
           {type:'DELETION',text:'-before external caller',left:5,right:4}, {type:'ADDITION',text:'+after external caller',left:5,right:5}];
         Object.assign(route.diffSummaries[2], {linesAdded:3, linesDeleted:3, linesChanged:6});
+        const [, deletion, addition] = route.diffContents[3].diffLines;
+        deletion.html = `-<img src=x onerror="window.injectedHighlight=1">before ${changes.paths[3]}`;
+        addition.html = `+<a href="https://example.com/">after</a> ${changes.paths[3]}`;
       }
       if (changesMode === 'all-generated') for (const entry of route.diffContents) entry.newTreeEntry = { isGenerated: true };
+      if (changesMode === 'plain') for (const entry of route.diffContents) for (const line of entry.diffLines) delete line.html;
       if (changesMode === 'duplicate-summary') route.diffSummaries[4] = route.diffSummaries[0];
       if (changesMode === 'truncated-list') route.pageLimits.filesLimitExceeded = true;
       if (changesMode === 'inline-revision') route.diffContents[0].newCommitOid = '1'.repeat(40);
@@ -335,7 +340,13 @@ async function handleEvent(message) {
       const paths = url.searchParams.get('paths').split(',').map(decodeURIComponent);
       const isRange = url.searchParams.get('range') === selectedRange;
       const entries = structuredClone((isRange ? rangeEntries : changes.entries).filter(entry => paths.includes(entry.path)));
-      if (changesMode === 'guide-sections') for (const entry of entries) if (entry.path === changes.paths[5]) entry.newTreeEntry = { isGenerated: true };
+      if (changesMode === 'guide-sections') for (const entry of entries) {
+        if (entry.path === changes.paths[5]) entry.newTreeEntry = { isGenerated: true };
+        if (entry.path !== changes.paths[4]) continue;
+        entry.diffLines[1].html = `-<span class="pl-k x-evil">before</span> ${entry.path}`;
+        entry.diffLines[2].html = `+<span class="pl-k">AFTER</span> ${entry.path}`;
+      }
+      if (changesMode === 'plain') for (const entry of entries) for (const line of entry.diffLines) delete line.html;
       if (isRange && paths.includes(changes.paths[0])) {
         entries[0].isTooBig = true;
         entries[0].diffLines = [];
@@ -800,6 +811,16 @@ try {
   })()`);
   assert.ok(sourceFolds.outside > 0, 'Folds here also hold source outside GitHub’s diff.');
   assert.equal(sourceFolds.caption, sourceFolds.github, 'The folded count covers only lines GitHub’s diff would show, not captured source outside it.');
+  const highlighting = await evaluate(`(() => {
+    const keyword = ${shadow}.querySelector('tr[data-outside-diff][data-new-line="6"] .rf-code-text > .pl-k');
+    return {
+      keyword: [keyword?.textContent, keyword && getComputedStyle(keyword).color],
+      nested: Boolean(${shadow}.querySelector('tr[data-outside-diff][data-new-line="32"] .rf-code-text > .pl-pds > .pl-c1')),
+      added: Boolean(${shadow}.querySelector('tr.rf-code-add[data-new-line="137"] .rf-code-text > .pl-k')),
+      elements: [...new Set([...${shadow}.querySelectorAll('.rf-code-text *')].map(node => node.tagName))]
+    };
+  })()`);
+  assert.deepEqual(highlighting, {keyword:['import', 'rgb(207, 34, 46)'], nested:true, added:true, elements:['SPAN']}, 'Captured source uses GitHub’s nested syntax spans and theme colours, including diff rows covered by that source.');
   assert.ok(!initialLayout.visibleActions.includes('Settings') && !initialLayout.visibleActions.includes('Run fresh review'));
   await evaluate(`${shadow}.querySelector('.rf-menu > summary').focus()`);
   await page('Input.dispatchKeyEvent', {type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
@@ -900,7 +921,7 @@ try {
   await evaluate(`(() => {
     const style = document.createElement('style');
     style.id = 'fixture-dark-theme';
-    style.textContent = ':root{--bgColor-default:#0d1117;--bgColor-muted:#151b23;--fgColor-default:#f0f6fc;--fgColor-muted:#9198a1;--borderColor-default:#3d444d;--fgColor-accent:#4493f8;--diffBlob-additionLine-bgColor:#12261e;--diffBlob-deletionLine-bgColor:#331c1f}body{color:var(--fgColor-default);background:var(--bgColor-default)}';
+    style.textContent = ':root{--color-prettylights-syntax-keyword:#ff7b72;--color-prettylights-syntax-constant:#79c0ff;--color-prettylights-syntax-string:#a5d6ff;--color-prettylights-syntax-entity:#d2a8ff;--color-prettylights-syntax-comment:#9198a1;--bgColor-default:#0d1117;--bgColor-muted:#151b23;--fgColor-default:#f0f6fc;--fgColor-muted:#9198a1;--borderColor-default:#3d444d;--fgColor-accent:#4493f8;--diffBlob-additionLine-bgColor:#12261e;--diffBlob-deletionLine-bgColor:#331c1f}body{color:var(--fgColor-default);background:var(--bgColor-default)}';
     document.head.append(style);
   })()`);
   await writeFile('/tmp/review-focus-extension-dark.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
@@ -1164,7 +1185,7 @@ try {
     const module=await import(${JSON.stringify(moduleUrl)});
     const doc=new DOMParser().parseFromString(${JSON.stringify(react)},'text/html');
     const files=module.findNativeFiles(doc);
-    const snapshot=await module.capturePullRequest();
+    const {snapshot}=await module.capturePullRequest();
     return {files:files.map(file=>({path:file.path,rows:file.rows.map(({oldLine,newLine,type,text})=>({oldLine,newLine,type,text}))})), snapshot};
   })()`);
   assert.deepEqual(modern.files.map(file => file.path), ['.github/workflows/wait-for-checks.yml', '5854', 'play with this file, not readme']);
@@ -1185,8 +1206,8 @@ try {
     const module=await import(${JSON.stringify(moduleUrl)});
     const progress=[];
     try {
-      const snapshot=await module.capturePullRequest({onProgress:message=>progress.push(message)});
-      return {snapshot,progress};
+      const {snapshot,highlights}=await module.capturePullRequest({onProgress:message=>progress.push(message)});
+      return {snapshot,highlights,progress};
     } catch(error) { return {error:error.message,progress}; }
   })()`);
   const lifecycleRoute = structuredClone(changes.route);
@@ -1209,7 +1230,7 @@ try {
       }
       return new Response('<div data-testid="issue-body-viewer">Add one file, remove another, and update a third.</div>');
     };
-    try { return {snapshot:await capturePullRequest(),requests}; }
+    try { return {snapshot:(await capturePullRequest()).snapshot,requests}; }
     finally { window.fetch = originalFetch; }
   })()`);
   assert.deepEqual(lifecycleCapture.snapshot.files.map(file => [file.path, file.additions, file.deletions]), [['added.js', 2, 0], ['deleted.js', 0, 1], ['modified.js', 1, 1]], 'Added content resembling a file header must preserve complete hunks and subsequent file headers.');
@@ -1217,6 +1238,101 @@ try {
   assert.ok(!lifecycleCapture.requests.some(url => url.includes('/' + baseSha + '/added.js') || url.includes('/' + headSha + '/deleted.js')), 'Nonexistent sides of added/deleted files must not be fetched.');
   assert.deepEqual(lifecycleCapture.snapshot.context.filter(source => source.text === ''), [{path:'added.js',side:'before',text:''},{path:'deleted.js',side:'after',text:''}]);
   assert.deepEqual(lifecycleCapture.snapshot.warnings, ['Could not read after context for modified.js; only its diff was analyzed.'], 'Actual source fetch failures still report missing evidence.');
+  const beforeHighlightingCapture = (await modelRequests()).length;
+  const batchedHighlighting = await evaluate(`(async () => {
+    const {capturePullRequest} = await import(${JSON.stringify(moduleUrl)});
+    const lineCount = 12000;
+    const paths = ['tests/highlighting.ts', 'src/highlighting-1.ts', 'src/highlighting-2.ts', 'src/highlighting-3.ts'];
+    const route = ${JSON.stringify(changes.route)};
+    route.diffContents = paths.map((path, index) => ({
+      path, oldCommitOid:${JSON.stringify(baseSha)}, newCommitOid:${JSON.stringify(headSha)},
+      linesAdded:index === 0 ? lineCount : 1, linesDeleted:index === 0 ? 0 : 1, linesChanged:index === 0 ? lineCount : 2,
+      diffLines:index === 0 ? [
+        {type:'HUNK',text:'@@ -0,0 +1,' + lineCount + ' @@'},
+        ...Array.from({length:lineCount}, (_, index) => ({type:'ADDITION',text:'+x',html:index % 2 ? '+x' : '+<span class="pl-k">x</span>'}))
+      ] : [
+        {type:'HUNK',text:'@@ -1 +1 @@'},
+        {type:'DELETION',text:'-x',html:'-<span class="pl-k">x</span>'},
+        {type:'ADDITION',text:'+y',html:'+<span class="pl-k">y</span>'}
+      ]
+    }));
+    route.diffSummaries = route.diffContents;
+    const embedded = data => '<script type="application/json" data-target="react-app.embeddedData">' + JSON.stringify(data) + '</script>';
+    const diffPage = embedded({payload:{pullRequestsChangesRoute:route}});
+    const sourcePages = Object.fromEntries(['x','y'].map(text => [text, embedded({rawLines:Array(lineCount).fill(text),colorizedLines:Array.from({length:lineCount}, (_, index) => index % 2 ? text : '<span class="pl-k">' + text + '</span>')})]));
+    const originalFetch = window.fetch;
+    const originalParse = DOMParser.prototype.parseFromString;
+    const runs = [];
+    try {
+      for (const abortPhase of [null, 'diff', 'source']) {
+        const controller = new AbortController();
+        const counts = {diff:0,source:0};
+        const observed = {};
+        const tasks = [];
+        let phase = 'diff';
+        let finished = false;
+        let countsAtAbort;
+        let checkedRevision = false;
+        window.fetch = async url => {
+          if (url.includes('/files?')) return new Response(diffPage);
+          if (url.includes('/blob/')) return new Response(sourcePages[url.includes(${JSON.stringify('/' + headSha + '/')}) ? 'y' : 'x']);
+          return new Response('<div data-testid="issue-body-viewer">Exercise cooperative highlighting.</div>');
+        };
+        DOMParser.prototype.parseFromString = function(html, type) {
+          if (html.startsWith('<body>')) {
+            const currentPhase = phase;
+            counts[currentPhase]++;
+            if (counts[currentPhase] === 1) tasks.push(scheduler.postTask(() => {
+              observed[currentPhase] = {count:counts[currentPhase],finished};
+              if (abortPhase === currentPhase) {
+                countsAtAbort = {...counts};
+                controller.abort();
+              }
+            }, {priority:'user-blocking'}));
+          }
+          return originalParse.call(this, html, type);
+        };
+        let result;
+        try {
+          const {snapshot,highlights} = await capturePullRequest({signal:controller.signal,onProgress:message => {
+            if (message.startsWith('Reading context for ')) phase = 'source';
+            if (message.startsWith('Checking that the PR')) checkedRevision = true;
+          }});
+          const rows = snapshot.files[0].hunks[0].items[0].rows;
+          const validTokens = (lines, text) => Object.keys(lines).length === lineCount / 2 && Array.from({length:lineCount}, (_, index) => index % 2 ? !Object.hasOwn(lines,index + 1) : JSON.stringify(lines[index + 1]) === JSON.stringify([[text,'pl-k']])).every(Boolean);
+          result = {
+            diffRows:rows.length === lineCount && rows.every((row,index) => row.text === 'x' && row.newLine === index + 1),
+            diffTokens:validTokens(highlights[paths[0]].after,'x'),
+            sourceCount:snapshot.context.length,
+            sourceText:snapshot.context.every(source => source.text === ((source.side === 'before' ? 'x' : 'y') + '\\n').repeat(lineCount)),
+            sourceTokens:paths.slice(1).every(path => validTokens(highlights[path].before,'x') && validTokens(highlights[path].after,'y')),
+            warnings:snapshot.warnings
+          };
+        } catch (error) { result = {error:error.name}; }
+        finished = true;
+        await Promise.all(tasks);
+        await scheduler.yield();
+        runs.push({abortPhase,counts,countsAtAbort,observed,checkedRevision,result});
+      }
+      return runs;
+    } finally {
+      window.fetch = originalFetch;
+      DOMParser.prototype.parseFromString = originalParse;
+    }
+  })()`);
+  const [highlightedCapture, ...cancelledHighlights] = batchedHighlighting;
+  assert.deepEqual(highlightedCapture.counts, {diff:12006,source:72000});
+  for (const phase of ['diff', 'source']) {
+    assert.equal(highlightedCapture.observed[phase].finished, false, `A browser task runs while ${phase} highlighting is pending.`);
+    assert.ok(highlightedCapture.observed[phase].count < 12000, `The ${phase} capture yields within the first large file.`);
+  }
+  assert.deepEqual(highlightedCapture.result, {diffRows:true,diffTokens:true,sourceCount:6,sourceText:true,sourceTokens:true,warnings:[]}, 'Yielding preserves every diff row, syntax token, and complete before/after source.');
+  for (const run of cancelledHighlights) {
+    assert.deepEqual(run.result, {error:'AbortError'}, `Cancelling during ${run.abortPhase} highlighting rejects the capture without a snapshot.`);
+    assert.deepEqual(run.counts, run.countsAtAbort, 'No additional line is parsed after cancellation during a yield.');
+    assert.equal(run.checkedRevision, false, 'An aborted capture stops before the final revision check.');
+  }
+  assert.equal((await modelRequests()).length, beforeHighlightingCapture, 'Capturing and cancelling yielded highlighting do not start analysis.');
   deferredMode = 'missing';
   const missingDeferred = await captureFixture();
   assert.match(missingDeferred.error ?? '', /4 of 53 files/, 'A count in the deferred tabs must detect the missing 49 files before claiming the four placeholders are the complete diff.');
@@ -1273,6 +1389,10 @@ try {
     ]);
   }
   assert.ok(completeChanges.progress.includes('Reading context for 53 changed files…'));
+  assert.deepEqual(completeChanges.highlights[changes.paths[0]], {
+    before: {1: [['before', 'pl-k'], [` ${changes.paths[0]}`]]},
+    after: {1: [['after', 'pl-k'], [` ${changes.paths[0]}`]]}
+  }, 'GitHub’s row markup becomes text tokens keyed by line, without the diff marker or its changed-word wrapper.');
   assert.equal(completeChanges.progress.some(message => message.includes('context for 4 changed files')), false);
   const lazyRequests = changesRequests.filter(request => new URL(request.url).pathname.endsWith('/page_data/diff_entries'));
   assert.deepEqual(lazyRequests.flatMap(request => new URL(request.url).searchParams.get('paths').split(',').map(decodeURIComponent)).sort(), changes.paths.slice(4).sort(), 'Fetch every missing path exactly once, preserving commas, spaces, percent signs, and Unicode.');
@@ -1293,6 +1413,10 @@ try {
   for (const request of comparisonRequests) {
     assert.equal(new URL(request.url).searchParams.get('w'), '0', 'Capture must explicitly include whitespace changes.');
   }
+  changesMode = 'plain';
+  const plainChanges = await captureFixture();
+  assert.deepEqual(plainChanges.snapshot, completeChanges.snapshot, 'Highlighting stays outside the snapshot used for model requests and saved-review keys.');
+  assert.ok(Object.values(plainChanges.highlights).every(sides => !Object.keys(sides.before).length && !Object.keys(sides.after).length));
 
   changesMode = 'deferred-large';
   changesRequests.length = 0;
@@ -1670,7 +1794,8 @@ try {
     const parallel = await cache.cacheInfo();
     const shrunk = await cache.setCacheLimit(1);
     await cache.clearCache();
-    return {cancellation,earlierReview,keys:new Set([original,...variants].map(entry=>entry.key)).size,lru,tooLarge,parallel,shrunk,cleared:await cache.cacheInfo()};
+    const highlightKeys = new Set((await Promise.all([${JSON.stringify(completeChanges.snapshot)},${JSON.stringify(plainChanges.snapshot)}].map(snapshot=>cache.reviewCacheKey(snapshot,settings)))).map(entry=>entry.key)).size;
+    return {cancellation,earlierReview,keys:new Set([original,...variants].map(entry=>entry.key)).size,highlightKeys,lru,tooLarge,parallel,shrunk,cleared:await cache.cacheInfo()};
   })()`);
   assert.equal(cacheChecks.cancellation.preAborted, true);
   assert.equal(cacheChecks.cancellation.abortedWrite, true, 'Cancelling an uncommitted IndexedDB write must abort the transaction.');
@@ -1679,6 +1804,7 @@ try {
   assert.equal(cacheChecks.cancellation.unstarted, null);
   assert.deepEqual(cacheChecks.earlierReview, {offered:false,retained:true}, 'Reviews from the old folding prompt require fresh Guide analysis without deleting their records.');
   assert.equal(cacheChecks.keys, 9, 'Commits, intent, source context, provider, model, effort and review preferences each change the cache key.');
+  assert.equal(cacheChecks.highlightKeys, 1, 'Captures with and without highlighting share one saved-review key.');
   assert.deepEqual([cacheChecks.lru.a, cacheChecks.lru.b, cacheChecks.lru.c], [true, false, true], 'Reading A keeps it while the older B is evicted.');
   assert.equal(cacheChecks.lru.info.count, 2);
   assert.ok(cacheChecks.lru.info.usedBytes <= 1024 * 1024);
@@ -2149,6 +2275,9 @@ try {
   assert.equal((await modelRequests()).length, classifiedBeforeRangeReload, 'Resuming a range must reuse completed classifications.');
   await writeFile(uxGate, 'finish');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title') && !${shadow}.querySelector('.rf-analyze').disabled`), 'range review finishes');
+  await click('Guide');
+  assert.ok(await evaluate(`Boolean(${shadow}.querySelector('.rf-guide-file .rf-code-text > .pl-k'))`), 'A review resumed after reload keeps the highlighting captured before it.');
+  await click('Full diff');
   const rangeRequests = (await modelRequests()).slice(beforeRange);
   assert.equal(rangeRequests.length, 6);
   assert.ok(rangeRequests.every(request => request.evidence.baseSha === rangeBase && request.evidence.headSha === rangeHead && request.evidence.files.every(file => changes.paths.slice(0, 5).includes(file.path))), 'All classifications and the final check must use only the selected comparison.');
@@ -2206,6 +2335,15 @@ try {
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-group, .rf-file-order, .rf-review-index')`), null, 'Superseded grouping and ordering controls are removed.');
   assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-section-link')].map(button=>[button.dataset.topicId,button.querySelector('.rf-priority').textContent])`), [['supporting','Supporting'],['contract','Review'],['validation','Review'],['unknown','Supporting']], 'Supporting prerequisites precede their uses while overview priorities remain explicit.');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting');
+  const guideCard = path => `${shadow}.querySelector('.rf-guide-file[data-path="${path}"]')`;
+  const changedCells = path => evaluate(`[...${guideCard(path)}.querySelectorAll('tr[data-edit-id] .rf-code-text')].map(cell => cell.innerHTML)`);
+  const highlightedFirst = [`<span class="pl-k">before</span> ${changes.paths[0]}`, `<span class="pl-k">after</span> ${changes.paths[0]}`];
+  assert.deepEqual(await changedCells(changes.paths[0]), highlightedFirst, 'Guide rows render GitHub’s highlighting as pl-* spans.');
+  assert.deepEqual(await changedCells(changes.paths[4]), [`before ${changes.paths[4]}`, `after ${changes.paths[4]}`], 'A non-pl class or text that differs from the captured line renders plain.');
+  await chooseSection('validation');
+  assert.deepEqual(await changedCells(changes.paths[3]), [`before ${changes.paths[3]}`, `after ${changes.paths[3]}`], 'Markup with any element other than a pl-* span renders plain.');
+  assert.deepEqual(await evaluate(`[typeof window.injectedHighlight, ${shadow}.querySelectorAll('.rf-code img, .rf-code a').length]`), ['undefined', 0], 'Hostile highlighting markup injects no element.');
+  await chooseSection('supporting');
   assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-guide-file').length`), 3);
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-coverage').textContent`), 'Guide covers 5 of 6 files. 1 machine-maintained file not analyzed (shown in Full diff; open the file list to choose Review anyway).');
   const coverageCaption = `${shadow}.querySelector('.rf-section-coverage').textContent`;
@@ -2273,6 +2411,7 @@ try {
   assert.deepEqual(await evaluate(`[${sharedNative}.getAttribute('aria-pressed'), window.fixtureViewedClicks]`), ['true', 1], 'Collapsing and expanding never touch GitHub Viewed.');
   await click('Next');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'contract');
+  assert.equal(await evaluate(`${sharedCard}.querySelector('tr.rf-code-add[data-new-line="3"] .rf-code-text').innerHTML`), '<span class="pl-s">after </span><span class="pl-s"><span class="pl-s1">contract</span></span>', 'Each token keeps its GitHub span ancestry for Primer’s descendant rules.');
   assert.equal(await evaluate(`${sharedReviewed}.checked`), true, 'Every section’s header shows the same file-level Viewed state.');
   const evidenceCard = `${shadow}.querySelector('.rf-guide-file[data-path="${changes.paths[4]}"]')`;
   assert.deepEqual(await evaluate(`[...${evidenceCard}.querySelectorAll('tr[data-edit-id]')].map(row=>row.className)`), ['rf-code-delete','rf-code-add'], 'A before-only excerpt includes its entire removed-and-added block.');
@@ -2292,6 +2431,7 @@ try {
   assert.deepEqual(await openedView(), {view:'Full diff', guide:false, hidden:0}, 'A restored multi-section review opens in Full diff.');
   await click('Guide');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting', 'One click opens the Guide on its first section.');
+  assert.deepEqual(await changedCells(changes.paths[0]), highlightedFirst, 'A restored review is highlighted again.');
   await waitFor(() => evaluate(`${sharedReviewed}.checked && ${sharedReviewed}.getAttribute('aria-disabled') === 'false'`), 'restored Guide header reads the saved native Viewed state');
   assert.equal(await evaluate('window.fixtureViewedClicks'), 0, 'Restoring and opening the Guide never changes GitHub Viewed.');
   await chooseSection('contract');
@@ -2374,6 +2514,7 @@ try {
     assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-code-context')].every(row=>row.checkVisibility()) && !${sharedCard}.querySelector('.rf-fold')`), 'Two uncited context lines stay inline rather than behind a fold row.');
     assert.equal((await modelRequests()).length - beforeOverride, 6);
   }
+  assert.equal(/\bpl-[a-z0-9]+|<span/.test(JSON.stringify(await modelRequests())), false, 'Highlighting never reaches a model request.');
   assert.ok(workers.length > 0);
   assert.deepEqual(eventErrors, []);
   assert.deepEqual(exceptions, []);

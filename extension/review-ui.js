@@ -162,7 +162,24 @@ function sourceLink(snapshot, excerpt) {
   return `https://github.com/${parts[0]}/${parts[1]}/blob/${revision}/${path}#L${excerpt.startLine}-L${excerpt.endLine}`;
 }
 
-function renderRows(rows, path) {
+function codeText(row, sides) {
+  const cell = element('td', 'rf-code-text');
+  const tokens = sides?.after[row.newLine] ?? sides?.before[row.oldLine];
+  if (tokens?.map(([text]) => text).join('') !== row.text) {
+    cell.textContent = row.text;
+    return cell;
+  }
+  for (const [text, ...classes] of tokens) {
+    cell.append(classes.reduceRight((child, className) => {
+      const span = element('span', className);
+      span.append(child);
+      return span;
+    }, text));
+  }
+  return cell;
+}
+
+function renderRows(rows, path, sides) {
   const table = element('table', 'rf-code');
   const body = element('tbody');
   for (const row of rows) {
@@ -174,7 +191,7 @@ function renderRows(rows, path) {
     line.append(element('td', 'rf-line-number', String(row.oldLine ?? '')));
     line.append(element('td', 'rf-line-number', String(row.newLine ?? '')));
     line.append(element('td', 'rf-line-marker', row.type === 'add' ? '+' : row.type === 'delete' ? '−' : ''));
-    line.append(element('td', 'rf-code-text', row.text));
+    line.append(codeText(row, sides));
     body.append(line);
   }
   table.append(body);
@@ -200,6 +217,7 @@ export function startReviewUI() {
   const panel = element('div', 'rf-panel');
   shadow.append(style, panel);
   let snapshot;
+  let highlights;
   let analysis;
   let port;
   let controller;
@@ -566,6 +584,7 @@ export function startReviewUI() {
     nativeNotice.hidden = true;
     nativeNotice.replaceChildren();
     snapshot = undefined;
+    highlights = undefined;
     analysis = undefined;
     finalResult = false;
     reviewStage = '';
@@ -944,7 +963,7 @@ export function startReviewUI() {
         renderControls();
       } });
       if (request !== operation || !isActive()) return;
-      snapshot = captured;
+      ({ snapshot, highlights } = captured);
       mode = 'full';
       reviewStage = 'files';
       for (const file of snapshot.files) {
@@ -953,7 +972,7 @@ export function startReviewUI() {
       }
       const connection = connectReview(request, { restoringReview, cacheOnly });
       connection.postMessage({ type: 'discard' });
-      connection.postMessage({ type: 'analyze', snapshot: captured, force, cacheOnly });
+      connection.postMessage({ type: 'analyze', snapshot, highlights, force, cacheOnly });
     } catch (failure) {
       if (request !== operation) return;
       finishFailure(failure.message, request);
@@ -977,7 +996,7 @@ export function startReviewUI() {
         return;
       }
       if (message.type === 'resumed') {
-        snapshot = message.snapshot;
+        ({ snapshot, highlights } = message);
         attempted = true;
         busy = true;
         cacheOnly = message.restoring;
@@ -1268,7 +1287,7 @@ export function startReviewUI() {
     if (rows[0].outsideDiff) content.append(element('div', 'rf-context-label', 'Captured source outside the diff'));
     if (classification?.uncertainty) content.append(richText('div', 'rf-uncertainty', classification.uncertainty));
     for (const excerpt of notes) content.append(richText('div', 'rf-code-note', excerpt.note));
-    content.append(renderRows(rows, path));
+    content.append(renderRows(rows, path, highlights?.[path]));
     return content;
   }
 
