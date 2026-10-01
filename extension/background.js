@@ -354,7 +354,7 @@ function createSession(tabId, url, port) {
         ...session.snapshot,
         files: session.snapshot.files.filter(file => includedPaths.has(file.path)),
         context: session.snapshot.context.filter(source => includedPaths.has(source.path)),
-        warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated files excluded from standalone analysis: ${excludedPaths.join(', ')}.`] : [])]
+        warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated or machine-maintained files excluded from standalone analysis: ${excludedPaths.join(', ')}.`] : [])]
       };
       const classifications = validateClassifications({ edits: classified.flatMap(entry => entry.classifications) }, snapshot);
       const lines = allEdits(snapshot).flatMap(edit => edit.rows).filter(row => ['add', 'delete'].includes(row.type)).length;
@@ -442,7 +442,7 @@ function createSession(tabId, url, port) {
     }
     if (![...session.files.values()].some(entry => entry.state === 'classified')) {
       session.finalState = 'excluded';
-      settle(session, 'excluded', 'Generated files are excluded by default. Choose Review anyway on a file to analyze it.');
+      settle(session, 'excluded', 'Generated and machine-maintained files are excluded by default. Choose Review anyway on a file to analyze it.');
       return;
     }
     if (session.finalState === 'pending') void reviewPullRequest(session);
@@ -513,7 +513,7 @@ function createSession(tabId, url, port) {
       }
       for (const entry of job.files.values()) {
         const message = entry.state === 'skipped' ? 'No text edits to analyze. This file remains expanded.'
-          : entry.state === 'excluded' ? 'Generated file excluded by default. Choose Review anyway to include it.' : 'Queued for analysis.';
+          : entry.state === 'excluded' ? 'Generated or machine-maintained file excluded by default. Choose Review anyway to include it.' : 'Queued for analysis.';
         setFileState(entry, entry.state, message);
       }
       job.settings = { ...await readSettings(), review: await readReviewPreferences() };

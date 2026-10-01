@@ -4,7 +4,8 @@ const textField = { type: 'string' };
 const lockfileNames = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'composer.lock', 'Gemfile.lock', 'Pipfile.lock', 'poetry.lock', 'uv.lock', 'go.sum', 'packages.lock.json', 'Package.resolved', 'flake.lock', 'mix.lock']);
 
 export function isGeneratedFile(file) {
-  return file.isGenerated === true || lockfileNames.has(file.path.split('/').at(-1));
+  const name = file.path.split('/').at(-1);
+  return file.isGenerated === true || lockfileNames.has(name) || name.endsWith('.pbxproj');
 }
 
 export const classificationSchema = {
