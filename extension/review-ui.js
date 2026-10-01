@@ -917,6 +917,7 @@ export function startReviewUI() {
     error = message;
     status = 'Analysis did not finish. Check Settings or try again.';
     markTitle(attentionMark);
+    controller?.abort();
     controller = undefined;
     if (port) { port.disconnect(); port = undefined; }
     for (const [path, file] of fileStates) {

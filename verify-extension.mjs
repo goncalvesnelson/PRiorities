@@ -222,6 +222,8 @@ let descriptionSuffix = '';
 let transientIssueFailure = false;
 let transientSourceFailure = false;
 const changesRequests = [];
+let entryRequestsInFlight = 0;
+let entryRequestsPeak = 0;
 chrome.stderr.on('data', chunk => { browserLog = (browserLog + chunk).slice(-6000); });
 chrome.on('error', error => eventErrors.push(error));
 const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
@@ -404,6 +406,11 @@ async function handleEvent(message) {
   } else {
     await send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, message.sessionId);
     return;
+  }
+  if (changesMode && url.pathname === changes.root + '/page_data/diff_entries') {
+    entryRequestsPeak = Math.max(entryRequestsPeak, ++entryRequestsInFlight);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    entryRequestsInFlight--;
   }
   await send('Fetch.fulfillRequest', { requestId, responseCode: status, responseHeaders: [{ name: 'Content-Type', value: contentType }, ...headers], body: Buffer.from(body).toString('base64') }, message.sessionId);
 }
@@ -1177,9 +1184,46 @@ try {
   assert.equal((await evaluateExtension('captureErrorSettingsRefresh')).provider, 'codex', 'The settings refresh must finish successfully before checking the analysis error.');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-error').textContent`), captureError, 'Successful settings refresh must preserve an analysis error.');
   incomplete = false;
+  changesMode = 'complete';
+  await page('Page.navigate', {url:prUrl + '/changes'});
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('Ready to analyze') || ${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'parallel capture failure fixture ready');
+  const beforeCaptureFailure = (await modelRequests()).length;
+  await evaluateExtension(`(() => {
+    const originalFetch = globalThis.fetch;
+    let batchesStarted;
+    const ready = new Promise(resolve => { batchesStarted = resolve; });
+    window.failedCaptureRequests = [];
+    globalThis.fetch = async (input, options) => {
+      const url = new URL(input);
+      if (url.pathname === ${JSON.stringify(changes.root + '/page_data/diff_entries')}) {
+        return new Promise((resolve, reject) => {
+          const {signal} = options;
+          signal.addEventListener('abort', () => reject(signal.reason), {once:true});
+          failedCaptureRequests.push({signal, release:() => originalFetch(input, options).then(resolve, reject)});
+          if (failedCaptureRequests.length === 6) batchesStarted();
+        });
+      }
+      if (url.pathname === ${JSON.stringify(changes.root)}) {
+        await ready;
+        return new Response('', {status:503});
+      }
+      return originalFetch(input, options);
+    };
+    window.restoreCaptureFetch = () => { globalThis.fetch = originalFetch; };
+  })()`);
+  await evaluate(`${shadow}.querySelector('.rf-analyze').click()`);
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-error').textContent.includes('(503)')`), 'description failure while six diff batches are pending');
+  assert.deepEqual(await evaluateExtension('failedCaptureRequests.map(request => request.signal.aborted)'), Array(6).fill(true), 'A failed capture aborts every outstanding diff request before enabling another analysis.');
+  const failedCaptureStatus = await evaluate(`${shadow}.querySelector('.rf-status').textContent`);
+  await evaluateExtension('Promise.all(failedCaptureRequests.map(request => request.release()))');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-status').textContent`), failedCaptureStatus, 'Late diff responses must not replace the failure announcement.');
+  assert.equal(await evaluateExtension('failedCaptureRequests.length'), 6, 'A failed capture must not start another batch of GitHub reads.');
+  assert.equal((await modelRequests()).length, beforeCaptureFailure, 'A failed capture must not reach the model.');
+  await evaluateExtension('restoreCaptureFetch()');
+  changesMode = '';
   modernMode = true;
   const moduleUrl = `chrome-extension://${extensionId}/github.js`;
-  await page('Page.reload');
+  await page('Page.navigate', {url:prUrl + '/files'});
   await waitFor(() => evaluate(`import(${JSON.stringify(moduleUrl)}).then(module => module.readPageIdentity()?.headSha === 'c28cc8e5271452b5b4c347d46a63f717c29417d6')`), 'React capture fixture displayed');
   const modern = await evaluate(`(async()=>{
     const module=await import(${JSON.stringify(moduleUrl)});
@@ -1326,7 +1370,7 @@ try {
     assert.equal(highlightedCapture.observed[phase].finished, false, `A browser task runs while ${phase} highlighting is pending.`);
     assert.ok(highlightedCapture.observed[phase].count < 12000, `The ${phase} capture yields within the first large file.`);
   }
-  assert.deepEqual(highlightedCapture.result, {diffRows:true,diffTokens:true,sourceCount:6,sourceText:true,sourceTokens:true,warnings:[]}, 'Yielding preserves every diff row, syntax token, and complete before/after source.');
+  assert.deepEqual(highlightedCapture.result, {diffRows:true,diffTokens:true,sourceCount:6,sourceText:true,sourceTokens:true,warnings:[]}, 'Yielding preserves every diff row, syntax token, and complete before/after source across six concurrent readers.');
   for (const run of cancelledHighlights) {
     assert.deepEqual(run.result, {error:'AbortError'}, `Cancelling during ${run.abortPhase} highlighting rejects the capture without a snapshot.`);
     assert.deepEqual(run.counts, run.countsAtAbort, 'No additional line is parsed after cancellation during a yield.');
@@ -1370,7 +1414,9 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('Ready to analyze')`), 'the authenticated Changes route fixture');
   assert.equal(await evaluate('document.querySelectorAll("table[data-diff-anchor]").length'), 4, 'Only four split-view tables are rendered while the payload inventories 53 files.');
   changesRequests.length = 0;
+  entryRequestsPeak = 0;
   const completeChanges = await captureFixture();
+  assert.equal(entryRequestsPeak, 6, 'Missing file diffs load six requests at a time, not one after another.');
   assert.equal(completeChanges.error, undefined, 'Capture must read the Changes route and load the 49 entries missing from the rendered split view.');
   const splitRows = await evaluate(`[...document.querySelectorAll('tr.diff-line-row')].filter(row=>row.querySelectorAll('.diff-text').length === 2).map(row=>row.checkVisibility())`);
   assert.deepEqual(splitRows, [true, true, true, true], 'Capture leaves every native split row visible and unchanged.');
