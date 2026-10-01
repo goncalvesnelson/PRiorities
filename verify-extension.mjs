@@ -41,7 +41,7 @@ const issuePage = `<h1 data-testid="issue-title">Suggestion font parity</h1><div
   <div class="comment-body">NOT_INCLUDED_ISSUE_COMMENT</div>`;
 const assessment = {
   summary: 'Confirm the suggestion widget follows editor font variation settings.\n- Applies `fontVariationSettings` to **both** rendering paths.\n- Keeps <img src=x onerror=alert(1)> and a `dangling **marker as text.',
-  topics: [{ id: 'font-settings', priority: 'review', title: 'Check both suggestion rendering paths', reason: 'Both rendering paths must match the editor typography; missing one leaves suggestions inconsistent.', before: 'The widget did not set font variation settings.', after: 'Each path applies the configured variation settings.', questions: ['Do both paths receive the intended font setting?', 'Should **other** widgets apply `fontVariationSettings` too?'], uncertainty: 'No application tests were run.', editIds: ['0-0-3', '0-1-3'], excerpts: [{ path: sourcePath, side: 'after', startLine: 137, endLine: 137, note: 'The label element receives `fontVariationSettings`.' }] }]
+  topics: [{ id: 'font-settings', priority: 'review', title: 'Check both suggestion rendering paths', gist: 'Where labels apply `fontVariationSettings` <img src=x onerror="window.injectedGist=1">', reason: 'Both rendering paths must match the editor typography; missing one leaves suggestions inconsistent.', before: 'The widget did not set font variation settings.', after: 'Each path applies the configured variation settings.', questions: ['Do both paths receive the intended font setting?', 'Should **other** widgets apply `fontVariationSettings` too?'], uncertainty: 'No application tests were run.', editIds: ['0-0-3', '0-1-3'], excerpts: [{ path: sourcePath, side: 'after', startLine: 137, endLine: 137, note: 'The label element receives `fontVariationSettings`.' }] }]
 };
 const classifications = ['0-0-3', '0-1-3'].map(editId => ({ editId, kinds: ['behavior'], reason: 'The assignment applies a font variation setting.', uncertainty: '' }));
 const profile = await mkdtemp(join(tmpdir(), 'review-focus-extension-'));
@@ -96,7 +96,7 @@ if (mode === 'guide-sections') {
   labels = labels.map(label => unknown.has(label.editId) ? {...label, kinds:['unknown'], uncertainty:'The external caller contract is unavailable.'} : label);
   if (!schema.required.includes('edits')) {
     const ids = index => idsFor(evidence.files[index]);
-    const topic = (id, title, priority, editIds, excerpts = []) => ({...review.topics[0], id, title, priority, editIds, excerpts});
+    const topic = (id, title, priority, editIds, excerpts = []) => ({...review.topics[0], id, title, gist: 'Gist for ' + title.toLowerCase() + '.', priority, editIds, excerpts});
     review.topics = [
       topic('supporting', 'Supporting setup', 'supporting', [...ids(0), ...ids(4), ids(2)[0]]),
       topic('contract', 'Check the contract and its implementation', 'review', [ids(2)[1]], [{path:evidence.files[2].path,side:'after',startLine:3,endLine:3,note:'The contract changes here.'},{path:evidence.files[4].path,side:'before',startLine:1,endLine:1,note:'The implementation read the old contract.'},{path:evidence.files[2].path,side:'after',startLine:2,endLine:4,note:'Surrounding context keeps the contract readable.'}]),
@@ -109,7 +109,7 @@ if (mode === 'many-decisions') {
   review = {
     summary: 'Five separate behavior decisions remain available across loaded and unloaded files.',
     topics: evidence.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => ({
-      id: item.id, priority: 'review', title: 'Check ' + file.path,
+      id: item.id, priority: 'review', title: 'Check ' + file.path, gist: 'The replacement value in ' + file.path + '.',
       reason: 'Verify the replacement value before consumers receive the changed content.',
       before: 'The fixture returned its previous value.', after: 'The fixture returns the replacement value.',
       questions: ['Does the replacement match the intended change?'], uncertainty: '',
@@ -754,6 +754,8 @@ try {
     return {
       filesOpen: !overview.querySelector('.rf-file-progress').hidden,
       sections: overview.querySelectorAll('.rf-section-link').length,
+      gists: [overview.querySelector('.rf-section-title + .rf-gist'), overview.querySelector('.rf-section-link .rf-gist')].map(node => [node.textContent, node.title, node.querySelector('code')?.textContent, getComputedStyle(node).webkitLineClamp]),
+      injectedGist: [typeof window.injectedGist, overview.querySelectorAll('.rf-gist img').length],
       panels: overview.querySelectorAll('.rf-guide-file').length,
       change: overview.querySelector('.rf-change-explanation').textContent,
       rationale: overview.querySelector('.rf-reason').textContent,
@@ -792,6 +794,9 @@ try {
   })()`);
   assert.equal(initialLayout.filesOpen, false);
   assert.equal(initialLayout.sections, 1);
+  const shownGist = 'Where labels apply fontVariationSettings <img src=x onerror="window.injectedGist=1">';
+  assert.deepEqual(initialLayout.gists, [[shownGist, shownGist, 'fontVariationSettings', '2'], [shownGist, shownGist, 'fontVariationSettings', '2']], 'The gist sits under the section title and its overview entry, clamped to two lines with the full text in its tooltip.');
+  assert.deepEqual(initialLayout.injectedGist, ['undefined', 0], 'Hostile gist markup renders as text.');
   assert.equal(initialLayout.panels, 1, 'A section combines each file’s before and after in one panel.');
   assert.equal(initialLayout.change, assessment.topics[0].after);
   assert.equal(initialLayout.rationale, assessment.topics[0].reason);
@@ -874,8 +879,8 @@ try {
       position: getComputedStyle(root.querySelector('.rf-guide-explanation')).position,
       codeHeight: code.height,
       scrolledPast: root.querySelector('.rf-guide-code').getBoundingClientRect().top < 0,
-      caption: [nav.querySelector('.rf-caption').textContent, inView(nav.querySelector('.rf-caption'))],
-      controls: [...nav.querySelectorAll('button')].map(node => [node.textContent, inView(node)]),
+      caption: [nav.querySelector('.rf-section-picker').textContent, inView(nav.querySelector('.rf-section-picker'))],
+      controls: [...nav.querySelectorAll(':scope > button:not(.rf-section-picker)')].map(node => [node.textContent, inView(node)]),
       files: inView(root.querySelector('.rf-section-files')),
       fileHeading: [root.querySelector('.rf-guide-file-heading').getBoundingClientRect().top, inView(root.querySelector('.rf-guide-file-heading .rf-file-name')), inView(root.querySelector('.rf-guide-file-heading .rf-reviewed-toggle input'))],
       sequence: root.querySelector('.rf-section-sequence').checkVisibility()
@@ -925,8 +930,8 @@ try {
     await new Promise(requestAnimationFrame);
     const nav = root.querySelector('.rf-section-nav').getBoundingClientRect();
     const heading = root.querySelector('.rf-guide-file-heading').getBoundingClientRect();
-    return [Math.round(nav.top), Math.round(heading.top), [...root.querySelectorAll('.rf-section-nav button')].map(node => node.textContent)];
-  })()`), [60, 104, ['Previous', 'Next', 'Full diff']], 'Deep in a long file on a narrow screen, section navigation and the file header stay pinned below GitHub’s toolbar.');
+    return [Math.round(nav.top), Math.round(heading.top), [...root.querySelectorAll('.rf-section-nav > button')].map(node => [node.textContent, node.scrollWidth <= node.clientWidth])];
+  })()`), [60, 104, [['Section 1 of 1', true], ['Previous', true], ['Next', true], ['Full diff', true]]], 'Deep in a long file on a narrow screen, section navigation and the file header stay pinned below GitHub’s toolbar.');
   await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
   await evaluate('window.scrollTo(0,0)');
   await writeFile('/tmp/review-focus-extension-mobile.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
@@ -2486,6 +2491,50 @@ try {
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-group, .rf-file-order, .rf-review-index')`), null, 'Superseded grouping and ordering controls are removed.');
   assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-section-link')].map(button=>[button.dataset.topicId,button.querySelector('.rf-priority').textContent])`), [['supporting','Supporting'],['contract','Review'],['validation','Review'],['unknown','Supporting']], 'Supporting prerequisites precede their uses while overview priorities remain explicit.');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting');
+  const sectionGists = ['Gist for supporting setup.', 'Gist for check the contract and its implementation.', 'Gist for check the separate validation path.', 'Gist for external caller contract.'];
+  assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-section-link .rf-gist')].map(node => node.textContent)`), sectionGists, 'Every overview entry shows its section’s gist.');
+  const picker = `${shadow}.querySelector('.rf-section-picker')`;
+  const sectionMenu = `${shadow}.querySelector('.rf-section-menu')`;
+  const pressKey = async (key, code) => {
+    await page('Input.dispatchKeyEvent', {type:'keyDown',key,code:key,windowsVirtualKeyCode:code});
+    await page('Input.dispatchKeyEvent', {type:'keyUp',key,code:key,windowsVirtualKeyCode:code});
+  };
+  const focusedSection = () => evaluate(`${shadow}.activeElement?.dataset.topicId`);
+  await evaluate(`window.sectionTitleTop = ${shadow}.querySelector('.rf-section-title').getBoundingClientRect().top; ${picker}.focus(); ${picker}.click()`);
+  await waitFor(async () => await focusedSection() === 'supporting', 'the section menu focusing the current section');
+  assert.deepEqual(await evaluate(`(() => {
+    const menu = ${sectionMenu};
+    const nav = ${shadow}.querySelector('.rf-section-nav').getBoundingClientRect();
+    const box = menu.getBoundingClientRect();
+    return {
+      open: menu.matches(':popover-open'), expanded: ${picker}.getAttribute('aria-expanded'), controls: ${shadow}.getElementById(${picker}.getAttribute('aria-controls')) === menu,
+      entries: [...menu.querySelectorAll('li > button')].map(entry => [entry.querySelector('.rf-section-name').firstChild.textContent, entry.dataset.topicId, entry.getAttribute('aria-current'), entry.querySelector('.rf-priority').textContent, entry.querySelector('.rf-gist').textContent]),
+      marked: getComputedStyle(menu.querySelector('[aria-current="true"]')).boxShadow !== 'none',
+      anchored: Math.abs(box.top - nav.bottom) < 8 && Math.abs(box.left - nav.left) < 1 && Math.abs(box.width - nav.width) < 1,
+      shifted: ${shadow}.querySelector('.rf-section-title').getBoundingClientRect().top !== window.sectionTitleTop
+    };
+  })()`), {
+    open: true, expanded: 'true', controls: true,
+    entries: [['1. ', 'supporting', 'true', 'Supporting', sectionGists[0]], ['2. ', 'contract', 'false', 'Review', sectionGists[1]], ['3. ', 'validation', 'false', 'Review', sectionGists[2]], ['4. ', 'unknown', 'false', 'Supporting', sectionGists[3]]],
+    marked: true, anchored: true, shifted: false
+  }, 'The pinned section button opens every section under the navigation bar without moving the page, marking the current one.');
+  await pressKey('ArrowDown', 40);
+  assert.equal(await focusedSection(), 'contract');
+  await pressKey('ArrowUp', 38);
+  await pressKey('ArrowUp', 38);
+  assert.equal(await focusedSection(), 'unknown', 'Arrow keys move between sections and wrap around.');
+  await pressKey('Escape', 27);
+  assert.deepEqual(await evaluate(`[${sectionMenu}.matches(':popover-open'), ${picker}.getAttribute('aria-expanded'), ${shadow}.activeElement === ${picker}]`), [false, 'false', true], 'Escape closes the section menu and returns focus to its button.');
+  await evaluate(`${picker}.click()`);
+  await waitFor(() => evaluate(`${sectionMenu}.matches(':popover-open')`), 'the section menu reopening');
+  await page('Input.dispatchMouseEvent', {type:'mousePressed',x:4,y:4,button:'left',clickCount:1});
+  await page('Input.dispatchMouseEvent', {type:'mouseReleased',x:4,y:4,button:'left',clickCount:1});
+  assert.deepEqual(await evaluate(`[${sectionMenu}.matches(':popover-open'), ${picker}.getAttribute('aria-expanded')]`), [false, 'false'], 'A click outside closes the section menu.');
+  await evaluate(`${picker}.click()`);
+  await waitFor(() => evaluate(`${sectionMenu}.matches(':popover-open')`), 'the section menu opening to navigate');
+  await evaluate(`${sectionMenu}.querySelector('[data-topic-id="validation"]').click()`);
+  assert.deepEqual(await evaluate(`[${shadow}.querySelector('.rf-guide-section').dataset.topicId, ${sectionMenu}.matches(':popover-open'), ${picker}.textContent, ${shadow}.querySelector('.rf-section-title + .rf-gist').textContent, ${shadow}.activeElement === ${shadow}.querySelector('.rf-section-title')]`), ['validation', false, 'Section 3 of 4', sectionGists[2], true], 'Choosing a section in the menu opens it and closes the menu.');
+  await chooseSection('supporting');
   const guideCard = path => `${shadow}.querySelector('.rf-guide-file[data-path="${path}"]')`;
   const changedCells = path => evaluate(`[...${guideCard(path)}.querySelectorAll('tr[data-edit-id] .rf-code-text')].map(cell => cell.innerHTML)`);
   const highlightedFirst = [`<span class="pl-k">before</span> ${changes.paths[0]}`, `<span class="pl-k">after</span> ${changes.paths[0]}`];
@@ -2644,6 +2693,33 @@ try {
   await writeFile('/tmp/priorities-guide-sections-mobile.png', Buffer.from((await page('Page.captureScreenshot', {format:'png'})).data,'base64'));
   await page('Emulation.setDeviceMetricsOverride', {width:1512,height:1080,deviceScaleFactor:1,mobile:false});
   assert.equal((await modelRequests()).length - beforeGuide, 6, 'Section navigation, Viewed controls and reload reuse the assessment.');
+  await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});
+  await waitFor(() => evaluate('!document.querySelector("#save-review-preferences").disabled'), 'extension page ready to rewrite the saved review');
+  assert.equal(await evaluate(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('review-focus');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const transaction = request.result.transaction('reviews', 'readwrite');
+      let removed = 0;
+      transaction.objectStore('reviews').openCursor().onsuccess = event => {
+        const cursor = event.target.result;
+        if (!cursor) return;
+        for (const topic of cursor.value.value.analysis.topics) if (Object.hasOwn(topic, 'gist')) removed += delete topic.gist;
+        cursor.update(cursor.value);
+        cursor.continue();
+      };
+      transaction.oncomplete = () => { request.result.close(); resolve(removed); };
+      transaction.onerror = () => reject(transaction.error);
+    };
+  })`), 4, 'The saved Guide review now matches one stored before sections had a gist.');
+  await page('Page.navigate', { url: prUrl + '/changes' });
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved Guide without gists');
+  await click('Open saved review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'Guide without gists restored');
+  await click('Guide');
+  const sectionNames = ['1. Supporting setup', '2. Check the contract and its implementation', '3. Check the separate validation path', '4. External caller contract'];
+  assert.deepEqual(await evaluate(`[${shadow}.querySelectorAll('.rf-gist').length, ${shadow}.querySelector('.rf-section-title').textContent, [...${shadow}.querySelectorAll('.rf-section-link .rf-section-name')].map(node => node.textContent), [...${sectionMenu}.querySelectorAll('.rf-section-name')].map(node => node.textContent)]`), [0, 'Supporting setup', sectionNames, sectionNames], 'A review saved without gists restores with titles only.');
+  assert.equal((await modelRequests()).length - beforeGuide, 6, 'Restoring a review without gists makes no model call.');
   for (const override of ['always-visible', 'protected']) {
     await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});
     await waitFor(() => evaluate('!document.querySelector("#save-review-preferences").disabled'), 'visibility override preferences ready');

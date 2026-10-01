@@ -42,6 +42,12 @@ function appendInline(parent, text) {
   return parent;
 }
 
+function gistLine(tag, gist) {
+  const node = appendInline(element(tag, 'rf-gist'), gist);
+  node.title = node.textContent;
+  return node;
+}
+
 function richText(tag, className, text) {
   const node = element(tag, `rf-rich ${className}`.trim());
   let block;
@@ -1453,18 +1459,23 @@ export function startReviewUI() {
     }
     const nav = element('nav', 'rf-section-overview');
     nav.setAttribute('aria-label', 'Guide sections');
-    const sections = element('ol', 'rf-section-list');
-    for (const [index, topic] of analysis.topics.entries()) {
-      const control = button('', () => selectTopic(topic.id), 'rf-section-link');
-      control.dataset.topicId = topic.id;
-      control.setAttribute('aria-current', String(!selectedFile && topic.id === selectedTopicId));
-      control.append(appendInline(element('span', 'rf-section-name', `${index + 1}. `), topic.title), element('span', 'rf-priority', topic.priority === 'review' ? 'Review' : 'Supporting'));
-      const item = element('li');
-      item.append(control);
-      sections.append(item);
-    }
-    nav.append(sections);
     const topic = selectedFile ? null : analysis.topics.find(topic => topic.id === selectedTopicId) ?? analysis.topics[0];
+    const sectionList = className => {
+      const list = element('ol', 'rf-section-list');
+      for (const [index, entry] of analysis.topics.entries()) {
+        const control = button('', () => selectTopic(entry.id), className);
+        control.dataset.topicId = entry.id;
+        control.setAttribute('aria-current', String(entry === topic));
+        const name = appendInline(element('span', 'rf-section-name', `${index + 1}. `), entry.title);
+        if (entry.gist) name.append(gistLine('span', entry.gist));
+        control.append(name, element('span', 'rf-priority', entry.priority === 'review' ? 'Review' : 'Supporting'));
+        const item = element('li');
+        item.append(control);
+        list.append(item);
+      }
+      return list;
+    };
+    nav.append(sectionList('rf-section-link'));
     const index = analysis.topics.indexOf(topic);
     const position = index < 0 ? 'Not analyzed' : `Section ${index + 1} of ${analysis.topics.length}`;
     const step = (label, offset) => {
@@ -1478,10 +1489,43 @@ export function startReviewUI() {
     const explanation = element('div', 'rf-guide-explanation');
     const sectionNav = element('nav', 'rf-section-nav');
     sectionNav.setAttribute('aria-label', 'Section navigation');
-    sectionNav.append(element('span', 'rf-caption', position), step('Previous', -1), step('Next', 1), button('Full diff', () => { setMode('full'); full.focus(); }));
+    const picker = element('button', 'rf-button rf-section-picker', position);
+    picker.type = 'button';
+    picker.title = 'Show all sections';
+    const sectionMenu = element('div', 'rf-section-menu');
+    sectionMenu.id = 'rf-section-menu';
+    sectionMenu.popover = 'auto';
+    sectionMenu.append(sectionList('rf-section-option'));
+    picker.popoverTargetElement = sectionMenu;
+    picker.setAttribute('aria-controls', sectionMenu.id);
+    picker.setAttribute('aria-expanded', 'false');
+    sectionMenu.addEventListener('beforetoggle', event => picker.setAttribute('aria-expanded', String(event.newState === 'open')));
+    sectionMenu.addEventListener('toggle', event => {
+      if (event.newState === 'open') (sectionMenu.querySelector('[aria-current="true"]') ?? sectionMenu.querySelector('button')).focus();
+    });
+    sectionMenu.addEventListener('keydown', event => {
+      const options = [...sectionMenu.querySelectorAll('button')];
+      const current = options.indexOf(event.target);
+      const next = event.key === 'ArrowDown' ? (current + 1) % options.length
+        : event.key === 'ArrowUp' ? (current + options.length - 1) % options.length : undefined;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        sectionMenu.hidePopover();
+        picker.focus();
+      } else if (next !== undefined) {
+        event.preventDefault();
+        options[next].focus();
+      }
+    });
+    sectionMenu.addEventListener('focusout', event => {
+      if (event.relatedTarget !== picker && !sectionMenu.contains(event.relatedTarget)) sectionMenu.hidePopover();
+    });
+    sectionNav.append(picker, sectionMenu, step('Previous', -1), step('Next', 1), button('Full diff', () => { setMode('full'); full.focus(); }));
     const title = appendInline(element('h2', 'rf-section-title'), topic?.title ?? 'Captured changes · not analyzed');
     title.tabIndex = -1;
     explanation.append(sectionNav, title);
+    if (topic?.gist) explanation.append(gistLine('p', topic.gist));
     const changedLines = edits => edits.filter(({ file }) => file.isGenerated !== true).flatMap(({ edit }) => edit.rows).filter(row => row.type === 'add' || row.type === 'delete').length;
     const sectionCoverage = element('p', 'rf-caption rf-section-coverage');
     sectionCoverage.title = 'Folded lines open in place, other sections explain the rest, and Full diff shows every line.';

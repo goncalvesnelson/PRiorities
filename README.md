@@ -4,7 +4,7 @@ Focus GitHub code reviews on the changes that need your judgment.
 
 PRiorities is a Chrome extension that uses your local Codex or Claude Code login to explain changes in a Guide beside captured before/after code. Each file is classified separately, with up to six files in parallel by default, then a single review of the whole PR chooses what to show.
 
-- Follow behavior-based sections in comprehension order, with prerequisites first and review priorities visible in a compact overview. Each section gives before/after behavior, why it matters and its review questions in a column that stays pinned beside long files on wide screens, with section navigation and **Full diff** always in reach.
+- Follow behavior-based sections in comprehension order, with prerequisites first and review priorities visible in a compact overview. Each section has a one-line description of what it covers, shown under its title and in the overview. Each section gives before/after behavior, why it matters and its review questions in a column that stays pinned beside long files on wide screens, with section navigation and **Full diff** always in reach; the pinned **Section N of M** button lists every section to jump to.
 - Read before/after code together, with a short note above each cited range; fold other sections’ changes with links to their explanations, and collapse files you have marked reviewed.
 - Results open in GitHub’s **Full diff** so you can survey the whole change first; **Guide** is one click away, without another model call. Comments and draft reviews stay in Full diff.
 - Choose review focus, always-visible change types and file paths, and custom analysis prompts in Settings.
