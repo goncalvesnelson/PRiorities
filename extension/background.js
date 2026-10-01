@@ -1,11 +1,12 @@
 import { analyzeWithCLI, getCLIModels, getCLIStatus } from './cli-client.js';
 import { allEdits, analysisSchema, classificationSchema, isGeneratedFile, makeClassificationPrompt, makePrompt, validateAnalysis, validateClassifications, validateSnapshot } from './review-data.js';
 import { cacheInfo, clearCache, peekReview, readReview, reviewCacheKey, reviewLookup, saveReview, setCacheLimit } from './review-cache.js';
-import { defaultReviewPreferences, validateReviewPreferences } from './review-preferences.js';
+import { changeKinds, defaultReviewPreferences, validateReviewPreferences } from './review-preferences.js';
 
 const jobs = new Map();
 const connectionChecks = new Map();
 const storageReady = chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+let durationWrite = Promise.resolve();
 
 function isOptions(sender) {
   return sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL('options.html');
@@ -51,6 +52,31 @@ function validEffort(effort) {
 
 function validConcurrency(concurrency) {
   return Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 10;
+}
+
+async function readDurations() {
+  await storageReady;
+  const { analysisDurations } = await chrome.storage.local.get('analysisDurations');
+  return Array.isArray(analysisDurations) ? analysisDurations : [];
+}
+
+async function expectedSeconds({ provider, model }, lines) {
+  try {
+    const rates = (await readDurations()).filter(run => run?.provider === provider && run.model === model && run.seconds > 0 && run.lines > 0)
+      .map(run => run.seconds / run.lines).sort((a, b) => a - b);
+    if (rates.length < 3) return undefined;
+    return Math.round(rates[Math.floor(rates.length / 2)] * lines);
+  } catch {
+    return undefined;
+  }
+}
+
+function recordDuration({ provider, model }, seconds, lines) {
+  if (!(seconds > 0 && lines > 0)) return;
+  durationWrite = durationWrite.then(async () => {
+    const runs = [...await readDurations(), { provider, model, seconds, lines }].slice(-20);
+    await chrome.storage.local.set({ analysisDurations: runs });
+  }).catch(() => {});
 }
 
 async function readReviewPreferences() {
@@ -172,10 +198,23 @@ function createSession(tabId, url, port) {
     }
   };
 
+  function fileProgress(path, entry) {
+    return { type: 'file-progress', path, state: entry.state, ...(entry.message ? { message: entry.message } : {}), ...(entry.state === 'classifying' && entry.labelled ? { labelled: entry.labelled } : {}) };
+  }
+
+  function sessionMessage() {
+    return { type: 'session', ...job.settings, startedAt: job.startedAt };
+  }
+
+  function restartClock() {
+    job.startedAt = Date.now();
+    send(sessionMessage());
+  }
+
   function setFileState(entry, state, message) {
     entry.state = state;
     entry.message = message;
-    send({ type: 'file-progress', path: entry.snapshot.files[0].path, state, ...(message ? { message } : {}) });
+    send(fileProgress(entry.snapshot.files[0].path, entry));
   }
 
   function settle(session, state, message) {
@@ -234,13 +273,11 @@ function createSession(tabId, url, port) {
     job.port = port;
     if (previous && previous !== port) previous.disconnect();
     send({ type: 'resumed', snapshot: job.snapshot, restoring: job.restoring === true });
-    if (job.settings) send({ type: 'session', ...job.settings });
-    for (const [path, entry] of job.files) {
-      send({ type: 'file-progress', path, state: entry.state, ...(entry.message ? { message: entry.message } : {}) });
-    }
+    if (job.settings) send(sessionMessage());
+    for (const [path, entry] of job.files) send(fileProgress(path, entry));
     if (job.result) send(job.result);
     else if (job.settled) send(job.settlement);
-    else if (job.finalState === 'checking') send({ type: 'progress', stage: 'checking', message: 'Choosing review decisions for the PR…' });
+    else if (job.finalState === 'checking') send(job.progress);
   };
 
   function finish(session, result) {
@@ -264,9 +301,16 @@ function createSession(tabId, url, port) {
     }, 600_000);
     const heartbeat = setInterval(() => setFileState(entry, entry.state, `Classifying edits… ${Math.floor((Date.now() - started) / 1000)}s`), 15_000);
     try {
+      entry.labelled = 0;
       setFileState(entry, 'classifying', 'Classifying edits…');
       const changedPaths = [...session.files.values()].filter(file => file.included).map(file => file.snapshot.files[0].path);
-      const raw = await analyzeWithCLI({ ...session.settings, signal: controller.signal, prompt: makeClassificationPrompt(entry.snapshot, changedPaths, session.settings.review, session.snapshot), schema: classificationSchema });
+      const raw = await analyzeWithCLI({
+        ...session.settings, signal: controller.signal, prompt: makeClassificationPrompt(entry.snapshot, changedPaths, session.settings.review, session.snapshot), schema: classificationSchema,
+        onProgress: progress => {
+          entry.labelled = progress.labelled;
+          setFileState(entry, entry.state, entry.message);
+        }
+      });
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       entry.classifications = validateClassifications(raw, entry.snapshot);
       setFileState(entry, 'classified', 'Classified. Review decisions follow once every file is classified.');
@@ -291,14 +335,18 @@ function createSession(tabId, url, port) {
     session.finalState = 'checking';
     let timedOut = false;
     const started = Date.now();
-    const progress = 'Choosing review decisions for the PR…';
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
     }, 600_000);
-    const heartbeat = setInterval(() => send({ type: 'progress', stage: 'checking', message: `${progress} ${Math.floor((Date.now() - started) / 1000)}s` }), 15_000);
+    const heartbeat = setInterval(() => send({ type: 'heartbeat' }), 15_000);
+    const report = progress => {
+      session.progress = { ...session.progress, ...progress };
+      send(session.progress);
+    };
     try {
-      send({ type: 'progress', stage: 'checking', message: progress });
+      session.progress = { type: 'progress', stage: 'checking', startedAt: started };
+      send(session.progress);
       const classified = [...session.files.values()].filter(entry => entry.state === 'classified');
       const includedPaths = new Set([...session.files].filter(([, entry]) => entry.included).map(([path]) => path));
       const excludedPaths = session.snapshot.files.filter(file => !includedPaths.has(file.path)).map(file => file.path);
@@ -309,13 +357,21 @@ function createSession(tabId, url, port) {
         warnings: [...session.snapshot.warnings, ...(excludedPaths.length ? [`Generated files excluded from standalone analysis: ${excludedPaths.join(', ')}.`] : [])]
       };
       const classifications = validateClassifications({ edits: classified.flatMap(entry => entry.classifications) }, snapshot);
+      const lines = allEdits(snapshot).flatMap(edit => edit.rows).filter(row => ['add', 'delete'].includes(row.type)).length;
+      const kinds = changeKinds.map(kind => [kind, classifications.filter(entry => entry.kinds.includes(kind)).length]).filter(([, count]) => count).sort((a, b) => b[1] - a[1]);
+      const estimate = await expectedSeconds(session.settings, lines);
+      if (controller.signal.aborted) throw new Error('Analysis cancelled.');
+      if (session.checkVersion !== version) return;
+      report({ edits: classifications.length, kinds, ...(estimate ? { estimate } : {}) });
       const raw = await analyzeWithCLI({
-        ...session.settings, signal: controller.signal,
+        ...session.settings, signal: controller.signal, onProgress: report,
         prompt: makePrompt(snapshot, classifications, session.settings.review, session.snapshot), schema: analysisSchema
       });
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       if (session.checkVersion !== version) return;
+      report({ phase: 'checking', startedAt: Date.now() });
       const analysis = validateAnalysis(raw, snapshot, classifications, session.settings.review.alwaysShow);
+      void recordDuration(session.settings, (Date.now() - started) / 1000, lines);
       let cache = { saved: false, message: 'This review could not be saved locally. It remains available in this tab.' };
       try {
         if (session.cacheIdentity) cache = await saveReview(session.cacheIdentity, {
@@ -409,6 +465,7 @@ function createSession(tabId, url, port) {
       job.finalState = 'pending';
       job.result = null;
       entry.included = true;
+      restartClock();
       setFileState(entry, 'queued', 'Queued for your requested review.');
       job.checking?.abort();
       schedule(job);
@@ -423,6 +480,7 @@ function createSession(tabId, url, port) {
       job.checkVersion++;
       job.finalState = 'pending';
       job.result = null;
+      restartClock();
       setFileState(entry, 'queued', 'Queued for another attempt.');
       schedule(job);
       return;
@@ -444,6 +502,7 @@ function createSession(tabId, url, port) {
       const snapshot = validateSnapshot(message.snapshot);
       if (message.force !== undefined && typeof message.force !== 'boolean' || message.cacheOnly !== undefined && typeof message.cacheOnly !== 'boolean' || message.force && message.cacheOnly) throw new Error('Invalid saved-review request.');
       job.restoring = message.cacheOnly === true;
+      job.startedAt = Date.now();
       if (pullRequestUrl(snapshot.url) !== url) throw new Error('The assessment does not match this pull request. Refresh the page.');
       job.snapshot = snapshot;
       for (const file of snapshot.files) {
@@ -459,7 +518,7 @@ function createSession(tabId, url, port) {
       }
       job.settings = { ...await readSettings(), review: await readReviewPreferences() };
       if (job.disposed) return;
-      send({ type: 'session', ...job.settings });
+      send(sessionMessage());
       const session = job;
       let cacheError;
       let cacheFailureMessage = 'Could not calculate the captured PR fingerprint to open or save its review. Reload the extension and try again.';

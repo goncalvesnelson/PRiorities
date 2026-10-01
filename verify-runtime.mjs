@@ -1418,6 +1418,17 @@ try {
     const beforeNavigation = requests.length;
     const navigating = await beginReview();
     await until(() => held, `The ${stage} request should start before navigation.`);
+    const progress = { type: 'progress', phase: 'writing', sections: stage === 'checking' ? ['Handle the new null return', `Long ${'😀'.repeat(195)}`] : [], labelled: 1 };
+    const beforeInvalidProgress = navigating.messages.length;
+    for (const invalid of [{ ...progress, extra: true }, { ...progress, sections: ['Bell\u0007'] }, { ...progress, sections: ['x'.repeat(201)] }, { ...progress, sections: ['😀'.repeat(201)] }, { ...progress, labelled: -1 }, { ...progress, phase: 'finished' }]) await held.helper.onMessage.emit(invalid);
+    assert.equal(navigating.messages.length, beforeInvalidProgress, 'Invalid progress must not be relayed.');
+    await held.helper.onMessage.emit(progress);
+    const relayed = navigating.messages.at(-1);
+    if (stage === 'checking') {
+      assert.deepEqual({ ...relayed, startedAt: 0 }, { type: 'progress', stage: 'checking', startedAt: 0, edits: 1, kinds: [['behavior', 1], ['interface', 1]], phase: 'writing', sections: ['Handle the new null return', `Long ${'😀'.repeat(195)}`], labelled: 1 }, 'Valid progress accepts titles up to 200 code points, with the PR review stage and its labelling summary.');
+      assert.ok(Number.isFinite(relayed.startedAt));
+    } else assert.deepEqual(relayed, { type: 'file-progress', path: 'account.js', state: 'classifying', message: 'Classifying edits…', labelled: 1 }, 'Only valid model progress is relayed as labelled blocks for its file.');
+    assert.equal(held.helper.disconnected, false, 'Invalid progress is ignored without ending the analysis.');
     const beforeDisconnect = navigating.messages.length;
     await navigating.disconnect();
     assert.equal(held.helper.disconnected, false, 'Navigating or reloading must not stop a running helper.');
@@ -1427,7 +1438,9 @@ try {
     assert.deepEqual(resumed.messages[0].snapshot, snapshot);
     assert.equal(resumed.messages[1].type, 'session', 'Pinned settings arrive before the file results that use them.');
     assert.equal(resumed.messages.find(message => message.type === 'file-progress').state, stage === 'checking' ? 'classified' : stage);
-    if (stage === 'checking') assert.equal(resumed.messages.at(-1).stage, 'checking');
+    if (stage === 'checking') assert.deepEqual(resumed.messages.at(-1), relayed, 'Resuming re-sends the latest PR review progress.');
+    else assert.deepEqual(resumed.messages.find(message => message.type === 'file-progress'), relayed, 'Resuming re-sends labelled blocks.');
+    assert.ok(Number.isFinite(resumed.messages[1].startedAt), 'The session start time survives reconnection.');
     assert.equal(requests.length, callsBeforeResume, 'Reconnecting must not start another model request.');
     await navigating.onMessage.emit({ type: 'cancel' });
     assert.equal(held.helper.disconnected, false, 'Messages from the old document must not cancel the resumed session.');
@@ -1438,6 +1451,71 @@ try {
     assert.equal(requests.length - beforeNavigation, 2, 'Every session runs exactly once despite navigation.');
     assert.equal(navigating.messages.length, beforeDisconnect, 'A detached document must not receive later results.');
     await closeTab(resumed);
+  }
+
+  const durationSettings = { provider: storage.reviewProvider === 'claude' ? 'claude' : 'codex' };
+  durationSettings.model = storage[`${durationSettings.provider}Settings`]?.model ?? '';
+  storage.analysisDurations = [
+    ...Array.from({ length: 19 }, () => ({ provider: 'claude', model: 'unrelated-model', seconds: 99, lines: 1 })),
+    ...[2, 2].map(rate => ({ ...durationSettings, seconds: rate * 10, lines: 10 }))
+  ];
+  for (const expected of [undefined, 6]) {
+    let heldReview;
+    const response = stagedResponses(classifications, assessment);
+    nativeHandler = (request, helper) => {
+      if (request.schema.properties.edits) return response(request);
+      heldReview = { request, helper };
+    };
+    const timed = await beginReview();
+    await until(() => heldReview, 'The PR review should start.');
+    const reviewStarted = timed.messages.find(message => message.type === 'progress').startedAt;
+    assert.equal(timed.messages.filter(message => message.type === 'progress').at(-1).estimate, expected, expected ? 'Three earlier reviews with this provider and model give an estimate for 3 changed lines.' : 'Fewer than three earlier reviews give no estimate.');
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await heldReview.helper.onMessage.emit(response(heldReview.request));
+    await waitForSettlement(timed);
+    assert.equal(timed.messages.at(-1).type, 'result');
+    assert.ok(timed.messages.find(message => message.phase === 'checking').startedAt > reviewStarted, 'Checking starts its own timer after the model finishes choosing review decisions.');
+    await until(() => storage.analysisDurations.at(-1).lines === 3 && storage.analysisDurations.at(-1).seconds > 0 && storage.analysisDurations.length === 20, 'The finished PR review duration is stored.');
+    assert.deepEqual(Object.keys(storage.analysisDurations.at(-1)), ['provider', 'model', 'seconds', 'lines']);
+    assert.equal(storage.analysisDurations.at(-1).provider, durationSettings.provider);
+    await closeTab(timed);
+    storage.analysisDurations = storage.analysisDurations.map(run => ({ ...run }));
+  }
+  assert.equal(storage.analysisDurations.length, 20, 'Stored durations stay bounded.');
+
+  for (const failFirstWrite of [false, true]) {
+    const clock = fakeClock();
+    const savedDurations = storage.analysisDurations;
+    const originalSet = chrome.storage.local.set;
+    const held = [];
+    const completed = [];
+    let durationWrites = 0;
+    try {
+      storage.analysisDurations = [];
+      chrome.storage.local.set = async value => {
+        if (Object.hasOwn(value, 'analysisDurations') && ++durationWrites === 1 && failFirstWrite) throw new Error('Synthetic duration storage failure.');
+        return originalSet(value);
+      };
+      const response = stagedResponses(classifications, assessment);
+      nativeHandler = (request, helper) => {
+        if (request.schema.properties.edits) return response(request);
+        held.push({ request, helper });
+      };
+      completed.push(...await Promise.all([beginReview(), beginReview()]));
+      await until(() => held.length === 2, 'Both tabs should reach the PR review.');
+      clock.tick(1000);
+      await Promise.all(held.map(({ request, helper }) => helper.onMessage.emit(response(request))));
+      await Promise.all(completed.map(review => waitForSettlement(review)));
+      assert.ok(completed.every(review => review.messages.at(-1).type === 'result'), 'Duration storage failures must not fail reviews.');
+      await until(() => durationWrites === 2, 'Both completed reviews should write their durations.');
+      assert.equal(storage.analysisDurations.length, failFirstWrite ? 1 : 2, failFirstWrite ? 'A failed duration write must not block later samples.' : 'Simultaneous reviews in different tabs must retain both duration samples.');
+      assert.ok(storage.analysisDurations.every(run => run.seconds === 1 && run.lines === 3));
+    } finally {
+      await Promise.all(completed.map(closeTab));
+      chrome.storage.local.set = originalSet;
+      storage.analysisDurations = savedDurations;
+      clock.restore();
+    }
   }
 
   const partialSnapshot = { ...manyDecisions, files: manyDecisions.files.slice(0, 2), context: manyDecisions.context.slice(0, 2) };
