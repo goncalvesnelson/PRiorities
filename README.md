@@ -10,7 +10,7 @@ PRiorities is a Chrome extension that uses your local Codex or Claude Code login
 - Choose review focus, always-visible change types and file paths, and custom analysis prompts in Settings.
 - Pick your CLI model and reasoning effort, and see them beside the review.
 - Analyze the full PR or the commit range selected in GitHub, with source context and saved reviews matched to those commits.
-- Skip generated files and lockfiles by default, with **Review anyway** available for each file.
+- Skip generated and machine-maintained files (lockfiles, Xcode `project.pbxproj`) by default, with **Review anyway** available for each file.
 - Retry individual files or the whole-PR review without repeating completed classifications.
 - Keep unfinished analysis running across GitHub tab changes and reloads in the same browser tab; reconnect on return to the diff.
 - Follow analysis on one toolbar line: steps with a timer, labelled blocks per file, section titles as the model writes them (Claude Code; Codex reports its phase), and an estimate once a model has three earlier reviews. A hidden tab's title shows when the review is ready or needs attention.

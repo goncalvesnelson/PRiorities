@@ -630,7 +630,7 @@ export function startReviewUI() {
   }
 
   function fileLabel(file) {
-    return { queued: 'AI waiting', classifying: 'AI classifying', classified: 'AI classified · review decisions pending', complete: 'AI ready', failed: 'AI needs retry', cancelled: 'AI cancelled', skipped: 'AI skipped · no text changes', excluded: 'AI skipped · generated' }[file.state];
+    return { queued: 'AI waiting', classifying: 'AI classifying', classified: 'AI classified · review decisions pending', complete: 'AI ready', failed: 'AI needs retry', cancelled: 'AI cancelled', skipped: 'AI skipped · no text changes', excluded: 'AI skipped · machine-maintained' }[file.state];
   }
 
   function fileTopics(path) {
@@ -651,7 +651,7 @@ export function startReviewUI() {
     const waiting = states.filter(file => file.state === 'queued').length;
     const failed = states.filter(file => file.state === 'failed').length;
     const excluded = generatedCount();
-    return `${classifiedCount()} of ${total} files ${finalResult ? 'AI ready' : 'classified'}${active ? ` · ${active} classifying` : ''}${waiting ? ` · ${waiting} waiting` : ''}${failed ? ` · ${failed} failed` : ''}${excluded ? ` · ${excluded} generated ${excluded === 1 ? 'file' : 'files'} skipped by AI` : ''}`;
+    return `${classifiedCount()} of ${total} files ${finalResult ? 'AI ready' : 'classified'}${active ? ` · ${active} classifying` : ''}${waiting ? ` · ${waiting} waiting` : ''}${failed ? ` · ${failed} failed` : ''}${excluded ? ` · ${excluded} machine-maintained ${excluded === 1 ? 'file' : 'files'} skipped by AI` : ''}`;
   }
 
   function renderProgressSummary() {
@@ -1397,7 +1397,7 @@ export function startReviewUI() {
     const locations = editLocations();
     const guided = new Set(analysis.topics.flatMap(topic => [...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)]));
     const excluded = generatedCount();
-    const coverage = element('p', 'rf-caption rf-coverage', `Guide covers ${guided.size} of ${snapshot.files.length} files.${excluded ? ` ${excluded} generated ${excluded === 1 ? 'file' : 'files'} not analyzed (shown in Full diff; open the file list to choose Review anyway).` : ''}`);
+    const coverage = element('p', 'rf-caption rf-coverage', `Guide covers ${guided.size} of ${snapshot.files.length} files.${excluded ? ` ${excluded} machine-maintained ${excluded === 1 ? 'file' : 'files'} not analyzed (shown in Full diff; open the file list to choose Review anyway).` : ''}`);
     coverage.title = 'Full diff shows every file and line.';
     summary.append(coverage);
     const unresolved = analysis.classifications.filter(entry => entry.kinds.includes('unknown'));

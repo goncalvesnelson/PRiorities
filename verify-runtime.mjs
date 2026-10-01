@@ -727,6 +727,10 @@ try {
     if (index) file.hunks[0].items[0].rows[1].text = `GENERATED_DIFF_${index}`;
   }
   generatedSnapshot.files.push({ path: 'generated/data.bin', isGenerated: true, hunks: [] });
+  generatedSnapshot.files.push({ path: 'App.xcodeproj/project.pbxproj', hunks: [{ header: '@@ -1 +1 @@', items: [{ type: 'edit', id: 'pbxproj-0-0', rows: [
+    { type: 'delete', text: 'GENERATED_PBXPROJ_BEFORE', oldLine: 1, newLine: null },
+    { type: 'add', text: 'GENERATED_PBXPROJ_AFTER', oldLine: null, newLine: 1 }
+  ] }] }] });
   generatedSnapshot.context.push({ path: 'generated/data.bin', side: 'after', text: 'GENERATED_BINARY_CONTEXT' });
   const generatedAssessment = {
     ...completeReview,
@@ -1126,6 +1130,7 @@ try {
     assert.deepEqual(fileStates(defaultGenerated, 'package-lock.json'), ['excluded']);
     assert.deepEqual(fileStates(defaultGenerated, 'generated/client.js'), ['excluded']);
     assert.deepEqual(fileStates(defaultGenerated, 'generated/data.bin'), ['skipped']);
+    assert.deepEqual(fileStates(defaultGenerated, 'App.xcodeproj/project.pbxproj'), ['excluded'], 'Xcode project files are machine-maintained and skipped like generated files.');
     assert.equal(defaultGenerated.messages.at(-1).analysis.classifications.length, 1);
     for (const request of defaultRequests) {
       const evidence = JSON.parse(request.prompt.user);
@@ -1135,7 +1140,7 @@ try {
       if (evidence.changedPaths) assert.deepEqual(evidence.changedPaths, ['authorization.js']);
     }
     const generatedFinalEvidence = JSON.parse(defaultRequests.at(-1).prompt.user);
-    assert.ok(generatedFinalEvidence.evidenceLimits.some(warning => warning.includes('package-lock.json') && warning.includes('generated/client.js') && warning.includes('generated/data.bin')));
+    assert.ok(generatedFinalEvidence.evidenceLimits.some(warning => warning.includes('package-lock.json') && warning.includes('generated/client.js') && warning.includes('generated/data.bin') && warning.includes('App.xcodeproj/project.pbxproj')));
     const beforeCompleteIdle = defaultGenerated.messages.length;
     clock.tick(60_000);
     assert.deepEqual(defaultGenerated.messages.slice(beforeCompleteIdle), [{ type: 'heartbeat' }, { type: 'heartbeat' }, { type: 'heartbeat' }], 'A completed review with excluded files must keep Review anyway available without replaying its result.');

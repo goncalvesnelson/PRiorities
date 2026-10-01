@@ -1364,7 +1364,7 @@ try {
   await page('Page.navigate', { url: prUrl + '/changes' });
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('Ready to analyze')`), 'generated review fixture');
   await click('Analyze PR');
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-coverage')?.textContent.includes('1 generated file not analyzed (shown in Full diff') && !${shadow}.querySelector('.rf-analyze').disabled`), 'final result excluding generated file');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-coverage')?.textContent.includes('1 machine-maintained file not analyzed (shown in Full diff') && !${shadow}.querySelector('.rf-analyze').disabled`), 'final result excluding generated file');
   const defaultRequests = (await modelRequests()).slice(beforeGenerated);
   assert.equal(defaultRequests.length, 3, 'Only the two ordinary files and their PR review invoke Codex.');
   assert.equal(defaultRequests.some(request => request.evidence.files.some(file => file.path === changes.paths[0])), false);
@@ -1403,7 +1403,7 @@ try {
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-result').checkVisibility()`), false, 'The failed replacement must not present the old summary as current.');
   await writeFile(modeFile, 'generated-review');
   await click('Retry review decisions');
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && !${shadow}?.querySelector('.rf-coverage').textContent.includes('generated') && document.querySelectorAll('.review-focus-file-progress[data-state=complete]').length === 3 && !${shadow}?.querySelector('.rf-analyze')?.disabled`), 'forced generated file followed by an updated PR review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && !${shadow}?.querySelector('.rf-coverage').textContent.includes('machine-maintained') && document.querySelectorAll('.review-focus-file-progress[data-state=complete]').length === 3 && !${shadow}?.querySelector('.rf-analyze')?.disabled`), 'forced generated file followed by an updated PR review');
   const forcedRequests = (await modelRequests()).slice(beforeOptIn);
   assert.equal(forcedRequests.length, 2, 'Opt-in runs only the chosen file’s classification and a new PR review.');
   assert.deepEqual(forcedRequests[0].evidence.files.map(file => file.path), [changes.paths[0]]);
@@ -2207,7 +2207,7 @@ try {
   assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-section-link')].map(button=>[button.dataset.topicId,button.querySelector('.rf-priority').textContent])`), [['supporting','Supporting'],['contract','Review'],['validation','Review'],['unknown','Supporting']], 'Supporting prerequisites precede their uses while overview priorities remain explicit.');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting');
   assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-guide-file').length`), 3);
-  assert.equal(await evaluate(`${shadow}.querySelector('.rf-coverage').textContent`), 'Guide covers 5 of 6 files. 1 generated file not analyzed (shown in Full diff; open the file list to choose Review anyway).');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-coverage').textContent`), 'Guide covers 5 of 6 files. 1 machine-maintained file not analyzed (shown in Full diff; open the file list to choose Review anyway).');
   const coverageCaption = `${shadow}.querySelector('.rf-section-coverage').textContent`;
   const sectionCoverage = [];
   for (const id of ['supporting', 'contract', 'validation', 'unknown']) {
