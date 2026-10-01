@@ -1,5 +1,5 @@
 import { parseDiff } from './diff.js';
-import { isGeneratedFile, validateSnapshot } from './review-data.js';
+import { defaultFileLimit, isGeneratedFile, maxChangedFiles, validateSnapshot } from './review-data.js';
 
 const shaPattern = /^[a-f0-9]{40}$/;
 const MAX_HTML = 16_000_000;
@@ -181,6 +181,27 @@ function expectedFileCount(doc) {
   return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
+function checkFileCount(total, deleted, fileLimit) {
+  if (total > maxChangedFiles) throw new Error(`This PR changes ${total} files; PRiorities reads up to ${maxChangedFiles}. Use Full diff to review it. No analysis was sent.`);
+  const analyzed = total - deleted;
+  if (analyzed <= fileLimit) return;
+  const scope = deleted ? `${analyzed} files besides ${deleted} deleted ${deleted === 1 ? 'file' : 'files'}` : `${analyzed} files`;
+  throw new Error(`This PR changes ${scope}; PRiorities analyzes up to ${fileLimit} (change this in Settings). Use Full diff to review it. No analysis was sent.`);
+}
+
+function isDeletedFile(file) {
+  return file.hunks.length === 1 && / \+0,0 @@/.test(file.hunks[0].header);
+}
+
+function separateDeletedFiles(loaded, { fileLimit, listDeletedFiles }) {
+  const deleted = listDeletedFiles ? loaded.files.filter(isDeletedFile) : [];
+  checkFileCount(loaded.files.length, deleted.length, fileLimit);
+  if (!listDeletedFiles) return loaded;
+  const deletedPaths = new Set(deleted.map(file => file.path));
+  const highlights = Object.fromEntries(Object.entries(loaded.highlights ?? {}).filter(([path]) => !deletedPaths.has(path)));
+  return { ...loaded, files: loaded.files.filter(file => !deletedPaths.has(file.path)), highlights, deletedFiles: deleted.map(file => ({ path: file.path, deletions: file.deletions })) };
+}
+
 function repositoryUrl(href, identity) {
   const url = new URL(href, identity.url);
   if (url.origin !== 'https://github.com' || url.username || url.password || !url.pathname.startsWith(`/${identity.owner}/${identity.repo}/`)) throw new Error('GitHub returned an unexpected diff URL.');
@@ -344,9 +365,9 @@ function fetchChangeEntries(doc, identity, range, paths, signal) {
   return fetchChangeData(doc, identity, 'diff_entries', params, signal);
 }
 
-async function loadChanges(doc, route, identity, signal, onProgress, batch) {
+async function loadChanges(doc, route, identity, { fileLimit, listDeletedFiles }, signal, onProgress, batch) {
   const { diffSummaries, diffContents, comparison, pageLimits } = route;
-  if (!Array.isArray(diffSummaries) || !diffSummaries.length || diffSummaries.length > 100 || !Array.isArray(diffContents)) throw new Error('Expected a complete inventory of 1–100 changed files. No analysis was sent.');
+  if (!Array.isArray(diffSummaries) || !diffSummaries.length || !Array.isArray(diffContents)) throw new Error('GitHub did not supply a readable list of changed files. No analysis was sent.');
   const selected = comparison?.selectedRange ?? (comparison?.viewing === 'FULL' ? comparison.fullDiff : null);
   if (comparison?.selectedRange && selected.baseOid !== identity.baseSha || selected?.headOid !== identity.headSha || pageLimits?.filesLimitExceeded || pageLimits?.linesChangedLimitExceeded) throw new Error('GitHub supplied an incomplete comparison. Load the selected diff with whitespace changes shown and retry.');
   const range = comparison.selectedRange ? `${identity.baseSha}..${identity.headSha}` : identity.headSha;
@@ -355,6 +376,10 @@ async function loadChanges(doc, route, identity, signal, onProgress, batch) {
     if (!summary || typeof summary.path !== 'string' || summaries.has(summary.path) || ![summary.linesAdded, summary.linesDeleted, summary.linesChanged].every(count => Number.isSafeInteger(count) && count >= 0) || summary.linesChanged !== summary.linesAdded + summary.linesDeleted) throw new Error('GitHub returned an invalid or duplicate file inventory. No analysis was sent.');
     summaries.set(summary.path, summary);
   }
+  const deleted = listDeletedFiles ? [...summaries.values()].filter(summary => summary.changeType === 'REMOVED') : [];
+  checkFileCount(summaries.size, deleted.length, fileLimit);
+  const deletedPaths = new Set(deleted.map(summary => summary.path));
+  for (const path of deletedPaths) summaries.delete(path);
   const entries = new Map();
   function addEntries(batch, paths) {
     if (!Array.isArray(batch) || paths && batch.length !== paths.length) throw new Error('GitHub did not supply every requested file diff. No analysis was sent.');
@@ -366,7 +391,7 @@ async function loadChanges(doc, route, identity, signal, onProgress, batch) {
       entries.set(entry.path, entry);
     }
   }
-  addEntries(diffContents);
+  addEntries(diffContents.filter(entry => !deletedPaths.has(entry?.path)));
   const missing = [...summaries.keys()].filter(path => !entries.has(path));
   onProgress(`Reading all ${summaries.size} changed files…`);
   const batches = [];
@@ -389,20 +414,22 @@ async function loadChanges(doc, route, identity, signal, onProgress, batch) {
     entries.set(entry.path, { ...loaded, diffLines: data.diffEntryLines, isTooBig: false, truncatedReason: null });
   });
   if (entries.size !== summaries.size) throw new Error(`GitHub supplied ${entries.size} of ${summaries.size} files. No analysis was sent.`);
-  return parseEntries([...summaries.keys()].map(path => entries.get(path)), batch);
+  const loaded = await parseEntries([...summaries.keys()].map(path => entries.get(path)), batch);
+  return listDeletedFiles ? { ...loaded, deletedFiles: deleted.map(summary => ({ path: summary.path, deletions: summary.linesDeleted })) } : loaded;
 }
 
-async function loadFiles(doc, identity, signal, onProgress, batch) {
+async function loadFiles(doc, identity, limits, signal, onProgress, batch) {
   const changes = changesRoute(doc);
-  if (changes) return loadChanges(doc, changes, identity, signal, onProgress, batch);
+  if (changes) return loadChanges(doc, changes, identity, limits, signal, onProgress, batch);
   const modern = reactDiff(doc);
   if (modern) {
     if (modern.moreDiffsToLoad || modern.asyncDiffLoadInfo?.truncated || modern.ignoreWhitespace || Number.isInteger(modern.headerInfo?.filesChanged) && modern.headerInfo.filesChanged !== modern.diffEntryData.length) throw new Error('GitHub supplied a partial or whitespace-filtered diff. Load all files with whitespace changes shown, then retry.');
-    return parseEntries(modern.diffEntryData, batch);
+    return separateDeletedFiles(await parseEntries(modern.diffEntryData, batch), limits);
   }
   const expected = await loadFileCount(doc, identity, signal);
   if (expected === null) throw new Error('GitHub did not supply the total changed-file count. Refresh the PR and retry. No analysis was sent.');
-  if (expected > 100) throw new Error('This prototype supports up to 100 changed files per PR.');
+  // Deleted files are only recognizable once their diffs load, so this early check can bound only the whole inventory.
+  checkFileCount(expected, 0, limits.listDeletedFiles ? maxChangedFiles : limits.fileLimit);
   onProgress(`Reading all ${expected} changed files…`);
   const visited = new Set();
   for (let page = 0; page < 200; page++) {
@@ -421,7 +448,7 @@ async function loadFiles(doc, identity, signal, onProgress, batch) {
   const files = parseDiff(native.map(fileDiff).join('\n'));
   assertCompleteHunks(files);
   const warnings = files.filter(file => !file.hunks.length).map(file => `No text diff was available for ${file.path}; inspect it in GitHub. It will not be folded.`);
-  return { files, warnings };
+  return separateDeletedFiles({ files, warnings }, limits);
 }
 
 async function readSource(doc, batch) {
@@ -484,7 +511,7 @@ async function readDescription(url, identity, warnings, signal) {
   return description + await linkedIssueContext(body, identity, warnings, signal);
 }
 
-export async function capturePullRequest({ onProgress = () => {}, signal } = {}) {
+export async function capturePullRequest({ onProgress = () => {}, signal, fileLimit = defaultFileLimit, listDeletedFiles = false } = {}) {
   const initial = readPageIdentity(document, location.href);
   if (!initial) throw new Error('Open a GitHub pull request first.');
   const pathname = location.pathname;
@@ -498,10 +525,11 @@ export async function capturePullRequest({ onProgress = () => {}, signal } = {})
   const descriptionWarnings = [];
   // Diff files and concurrent source readers share a budget so their microtasks cannot accumulate uninterrupted highlighting work.
   const batch = { deadline: performance.now() + HIGHLIGHT_BATCH_MS, signal };
-  const [{ files, warnings, highlights = {} }, description] = await Promise.all([
-    loadFiles(doc, identity, signal, onProgress, batch),
+  const [{ files, warnings, highlights = {}, deletedFiles }, description] = await Promise.all([
+    loadFiles(doc, identity, { fileLimit, listDeletedFiles }, signal, onProgress, batch),
     readDescription(initial.url, identity, descriptionWarnings, signal)
   ]);
+  if (!files.length) throw new Error('Every file in this PR is deleted, and Settings lists deleted files without analyzing them. Use Full diff to review it, or turn that setting off. No analysis was sent.');
   warnings.push(...descriptionWarnings);
   const title = doc.querySelector('.js-issue-title, [data-testid="issue-title"]')?.textContent.trim() ?? doc.title.replace(/ · Pull Request.*$/, '');
   onProgress(`Reading context for ${files.length} changed files…`);
@@ -546,6 +574,6 @@ export async function capturePullRequest({ onProgress = () => {}, signal } = {})
   const latest = readPageIdentity(await fetchDocument(filesUrl, signal), filesUrl);
   if (latest?.headSha !== identity.headSha || latest?.baseSha !== identity.baseSha || location.pathname !== pathname) throw new Error('The comparison changed while reading it. Analyze again to review the selected commits.');
   // Highlighting stays outside the snapshot so it never reaches the model or the saved-review key.
-  const snapshot = validateSnapshot({ url: initial.url, title, description, baseSha: identity.baseSha, headSha: identity.headSha, files, context, warnings });
+  const snapshot = validateSnapshot({ url: initial.url, title, description, baseSha: identity.baseSha, headSha: identity.headSha, files, context, warnings, ...(deletedFiles ? { deletedFiles } : {}) });
   return { snapshot, highlights };
 }

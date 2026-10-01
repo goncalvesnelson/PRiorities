@@ -27,6 +27,25 @@ const entries = paths.map(path => ({
   status: 'MODIFIED',
   truncatedReason: null
 }));
+const removed = ['removed/legacy-report.ts', 'removed/legacy-chart.ts'].map(path => ({
+  isBinary: false,
+  isSubmodule: false,
+  isTooBig: false,
+  diffLines: [
+    { type: 'HUNK', text: '@@ -1,2 +0,0 @@', left: 0, right: 0 },
+    { type: 'DELETION', text: `-DELETED_CONTENT ${path}`, html: `-<span class="pl-k">DELETED_CONTENT</span> ${path}`, left: 1, right: 0 },
+    { type: 'DELETION', text: '-DELETED_CONTENT end', left: 2, right: 0 }
+  ],
+  linesAdded: 0,
+  linesDeleted: 2,
+  linesChanged: 2,
+  oldCommitOid: baseSha,
+  newCommitOid: headSha,
+  path,
+  pathDigest: createHash('sha256').update(path).digest('hex'),
+  status: 'REMOVED',
+  truncatedReason: null
+}));
 const route = {
   isSingleFileMode: false,
   comparison: { fullDiff: { baseOid: targetBaseSha, headOid: headSha }, selectedRange: null, viewing: 'FULL' },
@@ -45,6 +64,13 @@ const splitTables = entries.slice(0, 4).map(({ path, pathDigest }) => `<section 
   </tbody></table>
 </section>`).join('');
 
+const removedTables = removed.map(({ path, pathDigest }) => `<section id="diff-${pathDigest}" role="region" aria-labelledby="${pathDigest}">
+  <div data-diff-header-wrapper><div class="diff-file-header"><code>${path}</code></div></div>
+  <table data-diff-anchor="diff-${pathDigest}"><tbody>
+    <tr class="diff-line-row"><td class="new-diff-line-number">1</td><td class="new-diff-line-number empty-diff-line"></td><td class="diff-text-cell"><code class="diff-text deletion"><span class="diff-text-inner">DELETED_CONTENT ${path}</span></code></td></tr>
+  </tbody></table>
+</section>`).join('');
+
 const unifiedTables = entries.slice(0, 3).map(({ path, pathDigest }) => `<section id="diff-${pathDigest}" role="region" aria-labelledby="${pathDigest}">
   <div data-diff-header-wrapper style="position:sticky;top:0;z-index:1;background:var(--bgColor-muted,#f6f8fa)"><div class="diff-file-header"><code>${path}</code><button class="js-expand-all-difflines-button" aria-label="Expand all lines: ${path}">Expand all</button></div></div>
   <table data-diff-anchor="diff-${pathDigest}"><tbody>
@@ -54,10 +80,10 @@ const unifiedTables = entries.slice(0, 3).map(({ path, pathDigest }) => `<sectio
 </section>`).join('');
 
 export const changes = {
-  root, baseSha, headSha, fetchNonce, release, paths, entries, route,
-  page(value = route, unified = false) {
+  root, baseSha, headSha, fetchNonce, release, paths, entries, removed, route,
+  page(value = route, unified = false, withRemoved = false) {
     const data = { payload: { pullRequestsChangesRoute: value, userViewSettings: { splitPreference: 'split' } } };
-    const files = (unified ? unifiedTables : splitTables).replaceAll('<section', '<div class="fixture-diff-entry"><section').replaceAll('</section>', '</section></div>');
+    const files = ((unified ? unifiedTables : splitTables) + (withRemoved ? removedTables : '')).replaceAll('<section', '<div class="fixture-diff-entry"><section').replaceAll('</section>', '</section></div>');
     return `<!doctype html><title>Synthetic Changes route fixture</title><meta name="fetch-nonce" content="${fetchNonce}"><meta name="release" content="${release}"><style>.d-flex{display:flex!important}</style><main><h1 class="js-issue-title">Synthetic Changes route fixture</h1><div data-testid="diff-content"><div data-testid="progressive-diffs-list" class="d-flex flex-column">${files}</div></div></main><script type="application/json" data-target="react-app.embeddedData">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`;
   }
 };

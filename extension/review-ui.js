@@ -7,6 +7,8 @@ const ownedAttribute = 'data-review-focus-owned';
 const readyMark = '✓ Ready · ';
 const attentionMark = '⚠ Needs attention · ';
 const titleMarks = /^(?:✓ Ready|⚠ Needs attention) ·\s*/;
+const unanalyzedStates = ['skipped', 'excluded', 'deleted'];
+const deletedFileState = { state: 'deleted', message: 'Deleted file listed without sending its contents to the AI. Turn off this option in Settings to analyze deleted files.' };
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -232,6 +234,8 @@ export function startReviewUI() {
   let configured = false;
   let model = '';
   let effort = '';
+  let fileLimit;
+  let listDeletedFiles;
   let status = '';
   let error = '';
   let settingsError = '';
@@ -388,7 +392,7 @@ export function startReviewUI() {
     cancel.hidden = !busy;
     cancel.disabled = pendingAction?.type === 'cancel';
     viewToggle.hidden = !finalResult;
-    retryFinal.hidden = busy || !port || !['check-failed', 'cancelled'].includes(reviewStage) || [...fileStates.values()].some(file => !['classified', 'complete', 'skipped', 'excluded'].includes(file.state));
+    retryFinal.hidden = busy || !port || !['check-failed', 'cancelled'].includes(reviewStage) || [...fileStates.values()].some(file => !['classified', 'complete', ...unanalyzedStates].includes(file.state));
     guide.setAttribute('aria-pressed', String(mode === 'guide'));
     guide.disabled = !finalResult;
     full.setAttribute('aria-pressed', String(mode === 'full'));
@@ -398,7 +402,7 @@ export function startReviewUI() {
     welcome.hidden = busy || Boolean(analysis) || fileStates.size > 0;
     progressPanel.hidden = !busy;
     const states = [...fileStates.values()];
-    const total = states.filter(file => !['skipped', 'excluded'].includes(file.state)).length;
+    const total = states.filter(file => !unanalyzedStates.includes(file.state)).length;
     const classified = classifiedCount();
     const stage = openingSavedReview || !snapshot ? 0 : reviewStage !== 'checking' ? 1 : checkProgress?.phase === 'checking' ? 3 : 2;
     progressStage = stage;
@@ -500,6 +504,7 @@ export function startReviewUI() {
       configured = Boolean(settings?.configured);
       model = settings?.model ?? '';
       effort = settings?.effort ?? '';
+      ({ fileLimit, listDeletedFiles } = settings);
       settingsError = '';
       void refreshSavedReview(true);
       renderControls();
@@ -648,8 +653,12 @@ export function startReviewUI() {
     return [...fileStates.values()].filter(file => file.state === 'excluded').length;
   }
 
+  function deletedCaption(count) {
+    return `${count} deleted ${count === 1 ? 'file' : 'files'} listed, not analyzed`;
+  }
+
   function fileLabel(file) {
-    return { queued: 'AI waiting', classifying: 'AI classifying', classified: 'AI classified · review decisions pending', complete: 'AI ready', failed: 'AI needs retry', cancelled: 'AI cancelled', skipped: 'AI skipped · no text changes', excluded: 'AI skipped · machine-maintained' }[file.state];
+    return { queued: 'AI waiting', classifying: 'AI classifying', classified: 'AI classified · review decisions pending', complete: 'AI ready', failed: 'AI needs retry', cancelled: 'AI cancelled', skipped: 'AI skipped · no text changes', excluded: 'AI skipped · machine-maintained', deleted: 'AI skipped · deleted' }[file.state];
   }
 
   function fileTopics(path) {
@@ -665,19 +674,20 @@ export function startReviewUI() {
 
   function fileCounts() {
     const states = [...fileStates.values()];
-    const total = states.filter(file => !['skipped', 'excluded'].includes(file.state)).length;
+    const total = states.filter(file => !unanalyzedStates.includes(file.state)).length;
     const active = states.filter(file => file.state === 'classifying').length;
     const waiting = states.filter(file => file.state === 'queued').length;
     const failed = states.filter(file => file.state === 'failed').length;
     const excluded = generatedCount();
-    return `${classifiedCount()} of ${total} files ${finalResult ? 'AI ready' : 'classified'}${active ? ` · ${active} classifying` : ''}${waiting ? ` · ${waiting} waiting` : ''}${failed ? ` · ${failed} failed` : ''}${excluded ? ` · ${excluded} machine-maintained ${excluded === 1 ? 'file' : 'files'} skipped by AI` : ''}`;
+    const deleted = states.filter(file => file.state === 'deleted').length;
+    return `${classifiedCount()} of ${total} files ${finalResult ? 'AI ready' : 'classified'}${active ? ` · ${active} classifying` : ''}${waiting ? ` · ${waiting} waiting` : ''}${failed ? ` · ${failed} failed` : ''}${excluded ? ` · ${excluded} machine-maintained ${excluded === 1 ? 'file' : 'files'} skipped by AI` : ''}${deleted ? ` · ${deletedCaption(deleted)}` : ''}`;
   }
 
   function renderProgressSummary() {
     const states = [...fileStates.values()];
     const reviewed = [...fileStates.keys()].filter(path => observedReviews.get(path) === true).length;
     const unknown = [...fileStates.keys()].filter(path => !observedReviews.has(path)).length;
-    const total = states.filter(file => !['skipped', 'excluded'].includes(file.state)).length;
+    const total = states.filter(file => !unanalyzedStates.includes(file.state)).length;
     const phaseLabel = openingSavedReview ? 'Opening saved review' : reviewStage === 'checking' ? 'Review decisions' : reviewStage === 'check-failed' ? 'Review decisions failed' : reviewStage === 'cancelled' || !busy && states.some(file => file.state === 'cancelled') ? 'Cancelled' : states.some(file => file.state === 'failed') ? 'Needs retry' : busy ? 'Analyzing' : '';
     progressToggle.hidden = !states.length;
     const analyzed = total ? `${finalResult ? 'AI ready' : 'Classified'} ${classifiedCount()}/${total}` : `All ${states.length} files skipped`;
@@ -785,8 +795,9 @@ export function startReviewUI() {
       row.dataset.path = path;
       const label = element('span', 'rf-file-state', fileLabel(file));
       label.dataset.state = file.state;
-      row.append(button(path, () => finalResult ? selectFile(path) : showNativeFile(path), 'rf-file-path'), label, reviewToggle(path));
-      if (finalResult) {
+      const guided = finalResult && file.state !== 'deleted';
+      row.append(button(path, () => guided ? selectFile(path) : showNativeFile(path), 'rf-file-path'), label, reviewToggle(path));
+      if (guided) {
         const owners = fileTopics(path);
         const references = analysis.topics.filter(topic => !owners.includes(topic) && topic.excerpts.some(excerpt => excerpt.path === path));
         const links = element('div', 'rf-file-sections');
@@ -958,7 +969,7 @@ export function startReviewUI() {
     renderControls();
     controller = new AbortController();
     try {
-      const captured = await capturePullRequest({ signal: controller.signal, onProgress: message => {
+      const captured = await capturePullRequest({ signal: controller.signal, fileLimit, listDeletedFiles, onProgress: message => {
         if (request !== operation) return;
         status = message;
         renderControls();
@@ -971,6 +982,7 @@ export function startReviewUI() {
         const hasEdits = file.hunks.some(hunk => hunk.items.some(item => item.type === 'edit'));
         fileStates.set(file.path, { state: !hasEdits ? 'skipped' : isGeneratedFile(file) ? 'excluded' : 'queued' });
       }
+      for (const file of snapshot.deletedFiles ?? []) fileStates.set(file.path, deletedFileState);
       const connection = connectReview(request, { restoringReview, cacheOnly });
       connection.postMessage({ type: 'discard' });
       connection.postMessage({ type: 'analyze', snapshot, highlights, force, cacheOnly });
@@ -1006,6 +1018,7 @@ export function startReviewUI() {
         reviewStage = 'files';
         fileStates.clear();
         for (const file of snapshot.files) fileStates.set(file.path, { state: 'queued' });
+        for (const file of snapshot.deletedFiles ?? []) fileStates.set(file.path, deletedFileState);
         status = 'Reconnected to the analysis already running in this tab.';
         renderControls();
         return;
@@ -1083,7 +1096,7 @@ export function startReviewUI() {
           : message.cache?.saved ? 'Review saved on this browser. Reopen this PR to reuse it, or run a fresh review anytime.' : message.cache?.message || '';
         cacheWarning = !message.cache?.restored && !message.cache?.saved && Boolean(message.cache?.message);
         for (const [path, file] of fileStates) {
-          if (!['skipped', 'excluded'].includes(file.state)) fileStates.set(path, { ...file, state: 'complete', message: '' });
+          if (!unanalyzedStates.includes(file.state)) fileStates.set(path, { ...file, state: 'complete', message: '' });
         }
         error = '';
         status = '';
@@ -1253,7 +1266,7 @@ export function startReviewUI() {
     if (navigationNotice) {
       nativeNotice.append(document.createTextNode(navigationNotice + ' '));
       const file = captured.files.find(file => file.path === path);
-      const hasAfter = file.hunks.some(hunk => hunk.items.some(item => (item.type === 'edit' ? item.rows : [item]).some(row => row.newLine !== null)));
+      const hasAfter = file?.hunks.some(hunk => hunk.items.some(item => (item.type === 'edit' ? item.rows : [item]).some(row => row.newLine !== null)));
       nativeNotice.append(sourceAnchor(path, hasAfter ? 'after' : 'before', 1, 'Open source at this commit'));
     }
     nativeNotice.hidden = !navigationNotice;
@@ -1417,9 +1430,21 @@ export function startReviewUI() {
     const locations = editLocations();
     const guided = new Set(analysis.topics.flatMap(topic => [...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)]));
     const excluded = generatedCount();
-    const coverage = element('p', 'rf-caption rf-coverage', `Guide covers ${guided.size} of ${snapshot.files.length} files.${excluded ? ` ${excluded} machine-maintained ${excluded === 1 ? 'file' : 'files'} not analyzed (shown in Full diff; open the file list to choose Review anyway).` : ''}`);
+    const deletedFiles = snapshot.deletedFiles ?? [];
+    const coverage = element('p', 'rf-caption rf-coverage', `Guide covers ${guided.size} of ${snapshot.files.length} files.${excluded ? ` ${excluded} machine-maintained ${excluded === 1 ? 'file' : 'files'} not analyzed (shown in Full diff; open the file list to choose Review anyway).` : ''}${deletedFiles.length ? ` ${deletedCaption(deletedFiles.length)} (shown in Full diff).` : ''}`);
     coverage.title = 'Full diff shows every file and line.';
     summary.append(coverage);
+    if (deletedFiles.length) {
+      const group = disclosure(`${deletedCaption(deletedFiles.length)} · −${deletedFiles.reduce((sum, file) => sum + file.deletions, 0).toLocaleString()} lines`, 'rf-deleted-files');
+      const list = element('ul');
+      for (const file of deletedFiles) {
+        const item = element('li');
+        item.append(button(file.path, () => void showNativeFile(file.path), 'rf-link-button'), element('span', 'rf-file-delta', `−${file.deletions.toLocaleString()}`));
+        list.append(item);
+      }
+      group.append(list);
+      summary.append(group);
+    }
     const unresolved = analysis.classifications.filter(entry => entry.kinds.includes('unknown'));
     if (unresolved.length) {
       const notice = element('div', 'rf-unresolved', `${unresolved.length} ${unresolved.length === 1 ? 'edit has' : 'edits have'} unresolved evidence. `);

@@ -191,9 +191,10 @@ globalThis.chrome = {
   storage: {
     local: {
       setAccessLevel: async value => { accessLevel = value.accessLevel; },
-      get: async key => {
-        storageReads.push(key);
-        return { [key]: structuredClone(storage[key]) };
+      get: async keys => {
+        const list = [keys].flat();
+        storageReads.push(...list);
+        return Object.fromEntries(list.map(key => [key, structuredClone(storage[key])]));
       },
       set: async value => { storage = { ...storage, ...structuredClone(value) }; }
     },
@@ -275,33 +276,44 @@ try {
   await import('./extension/background.js');
   assert.equal(accessLevel, 'TRUSTED_CONTEXTS');
   nativeHandler = () => ({ type: 'status', authenticated: true });
-  assert.deepEqual(await sendMessage({ type: 'get-settings' }, contentSender), { configured: true, provider: 'codex', model: '', effort: '', concurrency: 6 });
-  assert.ok(storageReads.every(key => ['reviewProvider', 'codexSettings', 'classificationConcurrency'].includes(key)), 'Only provider, model and concurrency preferences are read.');
-  assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6 }, contentSender)).error, /Only the settings page/);
+  assert.deepEqual(await sendMessage({ type: 'get-settings' }, contentSender), { configured: true, provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false });
+  assert.ok(storageReads.every(key => ['reviewProvider', 'codexSettings', 'classificationConcurrency', 'changedFileLimit', 'listDeletedFiles'].includes(key)), 'Only provider, model, concurrency and changed-file preferences are read.');
+  assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false }, contentSender)).error, /Only the settings page/);
   assert.match((await sendMessage({ type: 'get-settings' }, { ...contentSender, frameId: 1 })).error, /cannot use PRiorities/);
   assert.match((await sendMessage({ type: 'get-settings' }, { ...contentSender, url: 'https://github.com.attacker.example/example/repository/pull/7' })).error, /cannot use PRiorities/);
-  assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', apiKey: 'rejected-credential', model: '', effort: '' })).error, /Only provider, model, effort and concurrency preferences/);
+  assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', apiKey: 'rejected-credential', model: '', effort: '' })).error, /Only provider, model, effort, concurrency and changed-file preferences/);
   assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: 'model; echo bad', effort: '' })).error, /valid model/);
   for (const concurrency of [0, 11, 2.5, '6', null, undefined]) {
     assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency })).error, /whole number from 1 to 10/);
   }
+  for (const fileLimit of [0, 301, 2.5, '100', null, undefined]) {
+    assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit, listDeletedFiles: false })).error, /whole number from 1 to 300 changed files/);
+  }
+  for (const listDeletedFiles of ['true', 1, null, undefined]) {
+    assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles })).error, /list deleted files/);
+  }
   assert.deepEqual(storage, {}, 'Rejected settings must not be stored.');
   assert.match((await sendMessage({ type: 'delete-key' })).error, /Unknown/);
-  assert.equal((await sendMessage({ type: 'save-settings', provider: 'codex', model: 'openai/codex-test-model', effort: '', concurrency: 6 })).configured, true);
+  assert.equal((await sendMessage({ type: 'save-settings', provider: 'codex', model: 'openai/codex-test-model', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false })).configured, true);
   assert.deepEqual(storage.codexSettings, { model: 'openai/codex-test-model', effort: '' });
   assert.equal((await sendMessage({ type: 'get-settings' }, contentSender)).model, 'openai/codex-test-model', 'Model IDs accepted by the native helper must survive saving and reading settings.');
-  assert.equal((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6 })).configured, true);
-  assert.deepEqual(storage, { reviewProvider: 'codex', codexSettings: { model: '', effort: '' }, classificationConcurrency: 6 });
-  storage.classificationConcurrency = 0;
-  assert.equal((await sendMessage({ type: 'get-settings' }, contentSender)).concurrency, 6, 'An invalid stored limit falls back to the default.');
-  storage.classificationConcurrency = 6;
+  assert.equal((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false })).configured, true);
+  assert.deepEqual(storage, { reviewProvider: 'codex', codexSettings: { model: '', effort: '' }, classificationConcurrency: 6, changedFileLimit: 100, listDeletedFiles: false });
+  assert.deepEqual(await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 300, listDeletedFiles: true }), { configured: true, provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 300, listDeletedFiles: true });
+  assert.deepEqual((({ fileLimit, listDeletedFiles }) => ({ fileLimit, listDeletedFiles }))(await sendMessage({ type: 'get-settings' }, contentSender)), { fileLimit: 300, listDeletedFiles: true }, 'Both changed-file settings reach the PR page that captures the diff.');
+  Object.assign(storage, { classificationConcurrency: 0, changedFileLimit: 301, listDeletedFiles: 'yes' });
+  const fallbackSettings = await sendMessage({ type: 'get-settings' }, contentSender);
+  assert.equal(fallbackSettings.concurrency, 6, 'An invalid stored limit falls back to the default.');
+  assert.equal(fallbackSettings.fileLimit, 100, 'An invalid stored file limit falls back to the default.');
+  assert.equal(fallbackSettings.listDeletedFiles, false, 'Only a stored true lists deleted files.');
+  Object.assign(storage, { classificationConcurrency: 6, changedFileLimit: 100, listDeletedFiles: false });
   assert.match((await sendMessage({ type: 'get-settings', provider: 'claude' }, contentSender)).error, /Only the settings page/);
   for (const invalid of ['', 'anthropic', '../claude', null]) {
     assert.match((await sendMessage({ type: 'get-settings', provider: invalid })).error, /Choose Codex or Claude Code/);
     assert.match((await sendMessage({ type: 'save-settings', provider: invalid, model: '', effort: '' })).error, /Choose Codex or Claude Code/);
   }
   const preview = await sendMessage({ type: 'get-settings', provider: 'claude' });
-  assert.deepEqual(preview, { configured: true, provider: 'claude', model: '', effort: '', concurrency: 6 });
+  assert.deepEqual(preview, { configured: true, provider: 'claude', model: '', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false });
   assert.equal(storage.reviewProvider, 'codex', 'Previewing a connection must not switch new reviews.');
   assert.equal(nativePorts.at(-1).name, 'com.review_focus.claude');
   nativeHandler = (_request, helper) => helper.hostDisconnect('Specified native messaging host not found.');
@@ -309,7 +321,7 @@ try {
   assert.equal(missingHelper.configured, false);
   assert.match(missingHelper.connectionError, /helper is not installed/);
   nativeHandler = () => ({ type: 'status', authenticated: false, message: 'Run codex login.' });
-  assert.deepEqual(await sendMessage({ type: 'get-settings' }), { configured: false, provider: 'codex', model: '', effort: '', concurrency: 6, connectionError: 'Run codex login.' });
+  assert.deepEqual(await sendMessage({ type: 'get-settings' }), { configured: false, provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false, connectionError: 'Run codex login.' });
   await sendMessage({ type: 'open-settings' }, contentSender);
   await onClicked.emit();
   assert.equal(optionsOpened, 2);
@@ -344,7 +356,7 @@ try {
 
     storage.codexSettings = { model: 'codex-new-preference', effort: '' };
     connectionClock.tick(59_999);
-    assert.deepEqual(await sendMessage({ type: 'get-settings', refreshConnection: false }, otherTab), { provider: 'codex', model: 'codex-new-preference', effort: '', concurrency: 6, configured: true });
+    assert.deepEqual(await sendMessage({ type: 'get-settings', refreshConnection: false }, otherTab), { provider: 'codex', model: 'codex-new-preference', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false, configured: true });
     assert.equal(statusCalls(), beforeInvalidRefresh + 1, 'Cached status must use the latest model without launching a helper.');
     nativeHandler = () => ({ type: 'status', authenticated: true });
     connectionClock.tick(1);
@@ -360,16 +372,16 @@ try {
     nativeHandler = () => ({ type: 'status', authenticated: true });
     assert.equal((await sendMessage({ type: 'get-settings', refreshConnection: false })).configured, true);
     assert.equal(statusCalls(), beforeInvalidRefresh + 4, 'Settings checks must bypass the cooldown.');
-    await sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-saved-latest', effort: '', concurrency: 6 });
+    await sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-saved-latest', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false });
     assert.equal(statusCalls(), beforeInvalidRefresh + 5, 'Saving settings must check the connection again.');
 
     storage.reviewProvider = 'claude';
     storage.claudeSettings = { model: 'claude-current-model', effort: '' };
     nativeHandler = () => ({ type: 'status', authenticated: false, message: 'Claude needs login.' });
-    assert.deepEqual(await sendMessage({ type: 'get-settings' }, otherTab), { provider: 'claude', model: 'claude-current-model', effort: '', concurrency: 6, configured: false, connectionError: 'Claude needs login.' });
+    assert.deepEqual(await sendMessage({ type: 'get-settings' }, otherTab), { provider: 'claude', model: 'claude-current-model', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false, configured: false, connectionError: 'Claude needs login.' });
     assert.equal(nativePorts.at(-1).name, 'com.review_focus.claude');
     storage.reviewProvider = 'codex';
-    assert.deepEqual(await sendMessage({ type: 'get-settings' }, contentSender), { provider: 'codex', model: 'codex-saved-latest', effort: '', concurrency: 6, configured: true });
+    assert.deepEqual(await sendMessage({ type: 'get-settings' }, contentSender), { provider: 'codex', model: 'codex-saved-latest', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false, configured: true });
     assert.equal(statusCalls(), beforeInvalidRefresh + 6, 'Changing providers must not mix or discard their independent status caches.');
 
     nativeHandler = (_request, helper) => helper.hostDisconnect('Specified native messaging host not found.');
@@ -403,7 +415,7 @@ try {
       const firstUncachedTab = sendMessage({ type: 'get-settings' }, contentSender);
       const secondUncachedTab = sendMessage({ type: 'get-settings' }, otherTab);
       await until(() => uncachedStatus, 'Unavailable session storage must still permit a connection check.');
-      const savingWithoutCache = sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-without-cooldown-cache', effort: '', concurrency: 6 });
+      const savingWithoutCache = sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-without-cooldown-cache', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false });
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(statusCalls(), beforeUncachedStatus + 1, 'Unavailable cooldown storage must preserve shared in-flight checks.');
       await uncachedStatus.onMessage.emit({ type: 'status', authenticated: true });
@@ -412,7 +424,7 @@ try {
       assert.deepEqual(storage.codexSettings, { model: 'codex-without-cooldown-cache', effort: '' });
       nativeHandler = () => ({ type: 'status', authenticated: false, message: 'Please sign in again.' });
       assert.deepEqual(await sendMessage({ type: 'get-settings', refreshConnection: true }, contentSender), {
-        provider: 'codex', model: 'codex-without-cooldown-cache', effort: '', concurrency: 6, configured: false, connectionError: 'Please sign in again.'
+        provider: 'codex', model: 'codex-without-cooldown-cache', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false, configured: false, connectionError: 'Please sign in again.'
       }, 'A cache write failure must not replace the actual CLI connection result.');
     } finally {
       chrome.storage.session.get = savedSessionGet;
@@ -675,7 +687,7 @@ try {
     if (request.type === 'status') return { type: 'status', authenticated: true };
     pending.push({ request, helper });
   };
-  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 2 });
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 2, fileLimit: 100, listDeletedFiles: false });
   const beforeParallel = requests.length;
   const parallel = await beginReview(manyDecisions);
   await until(() => pending.length === 2, 'The saved limit of two helpers should start concurrently.');
@@ -693,7 +705,7 @@ try {
     assert.equal(evidence.headSha, manyDecisions.headSha);
   }
   // The queue tests below keep this saved limit of three.
-  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 3 });
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 3, fileLimit: 100, listDeletedFiles: false });
   const second = pending[1];
   await second.helper.onMessage.emit(normalResponse(second.request));
   await until(() => pending.length >= 3, 'A classified file must release a queue slot.');
@@ -1343,8 +1355,8 @@ try {
   }
 
   nativeHandler = () => ({ type: 'status', authenticated: true });
-  await sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-saved-model', effort: '', concurrency: 6 });
-  assert.deepEqual(await sendMessage({ type: 'save-settings', provider: 'claude', model: 'claude-saved-model', effort: '', concurrency: 6 }), { configured: true, provider: 'claude', model: 'claude-saved-model', effort: '', concurrency: 6 });
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-saved-model', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false });
+  assert.deepEqual(await sendMessage({ type: 'save-settings', provider: 'claude', model: 'claude-saved-model', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false }), { configured: true, provider: 'claude', model: 'claude-saved-model', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false });
   assert.deepEqual(storage.codexSettings, { model: 'codex-saved-model', effort: '' });
   assert.deepEqual(storage.claudeSettings, { model: 'claude-saved-model', effort: '' });
   assert.equal((await sendMessage({ type: 'get-settings' }, contentSender)).provider, 'claude');
@@ -1370,7 +1382,7 @@ try {
   assert.match((await sendMessage({type:'save-review-preferences',preferences:{...customPreferences,classificationPrompt:'x'.repeat(12001)}})).error, /12,000/);
   assert.deepEqual((await sendMessage({type:'save-review-preferences',preferences:customPreferences})).preferences, customPreferences);
   assert.deepEqual((await sendMessage({type:'get-review-preferences'})).preferences, customPreferences);
-  await sendMessage({type:'save-settings',provider:'claude',model:'claude-saved-model',effort:'high',concurrency:6});
+  await sendMessage({type:'save-settings',provider:'claude',model:'claude-saved-model',effort:'high',concurrency:6,fileLimit:100,listDeletedFiles:false});
 
   const beforePinnedProvider = nativePorts.length;
   let heldClaude;
@@ -1381,7 +1393,7 @@ try {
   const pinnedProviderReview = await beginReview(generatedSnapshot);
   await until(() => heldClaude, 'The chosen Claude provider should start the first file.');
   await sendMessage({type:'save-review-preferences',preferences:{...customPreferences,focus:'thorough',classificationPrompt:'Changed instructions.',prioritizationPrompt:'Changed priorities.'}});
-  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6 });
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false });
   await heldClaude.helper.onMessage.emit({ type: 'error', message: 'Synthetic classification failure.' });
   await waitForSettlement(pinnedProviderReview);
   assert.equal(fileStates(pinnedProviderReview, 'authorization.js').at(-1), 'failed');
@@ -1601,7 +1613,40 @@ try {
   }
   await Promise.all(reviewPorts.map(closeTab));
 
+  assert.throws(() => validateSnapshot({ ...snapshot, files: Array.from({ length: 301 }, () => snapshot.files[0]) }), /1–300 changed files/);
+  for (const deletedFiles of [{}, [{ path: 'account.js', deletions: 1 }], [{ path: '../escape.js', deletions: 1 }], [{ path: 'gone.js', deletions: -1 }], [{ path: 'gone.js', deletions: 1 }, { path: 'gone.js', deletions: 2 }], Array.from({ length: 3000 }, (_, index) => ({ path: `gone-${index}.js`, deletions: 1 }))]) {
+    assert.throws(() => validateSnapshot({ ...snapshot, deletedFiles }), /deleted/i, 'Deleted files must be valid, unique, disjoint from analyzed files and within the 3,000-file inventory.');
+  }
+  const deletedSnapshot = validateSnapshot({ ...snapshot, deletedFiles: [{ path: 'legacy/report.js', deletions: 40 }, { path: 'legacy/one.js', deletions: 1 }] });
+  storage.listDeletedFiles = true;
+  nativeHandler = stagedResponses(classifications, assessment);
+  const beforeDeletedFiles = requests.length;
+  const deletedReview = await beginReview(deletedSnapshot);
+  await waitForSettlement(deletedReview);
+  assert.equal(deletedReview.messages.at(-1).type, 'result');
+  const deletedRequests = requests.slice(beforeDeletedFiles).filter(request => request.type === 'analyze');
+  assert.equal(deletedRequests.length, 2, 'Deleted files are never queued for classification: one file classification, then the PR review.');
+  assert.deepEqual(fileStates(deletedReview, 'legacy/report.js'), []);
+  assert.ok(!deletedRequests[0].prompt.user.includes('legacy/'), 'File classification receives no deleted-file information.');
+  const deletedEvidence = JSON.parse(deletedRequests[1].prompt.user);
+  assert.deepEqual(deletedEvidence.files.map(file => file.path), ['account.js']);
+  assert.ok(deletedEvidence.evidenceLimits.some(limit => limit.includes('legacy/report.js (40 lines)') && limit.includes('legacy/one.js (1 line)') && limit.includes('not supplied or analyzed')), 'The PR review receives deleted paths and deleted-line counts as an evidence limit.');
+  storage.listDeletedFiles = false;
+  const beforeChangedSetting = requests.length;
+  const changedSetting = await beginReview(deletedSnapshot);
+  assert.match(changedSetting.messages.at(-1).message, /deleted-files setting changed/, 'A snapshot captured with a different deleted-files setting must not be analyzed or saved under the current key.');
+  storage.changedFileLimit = 4;
+  const overLimit = await beginReview(generatedSnapshot);
+  assert.equal(overLimit.messages.at(-1).message, 'This PR has 5 files to analyze; PRiorities analyzes up to 4 (change this in Settings). Use Full diff to review it. No analysis was sent.');
+  assert.equal(requests.length, beforeChangedSetting, 'Rejected snapshots make no model calls.');
+  storage.changedFileLimit = 100;
+  await Promise.all([deletedReview, changedSetting, overLimit].map(closeTab));
+
   const reviewCache = await import('./extension/review-cache.js');
+  const lookupSettings = { provider: 'codex', model: 'fixture-model', effort: 'high', concurrency: 6, fileLimit: 100, listDeletedFiles: false, review: defaultReviewPreferences() };
+  assert.equal(reviewCache.reviewLookup(snapshot, lookupSettings), JSON.stringify([7, snapshot.url, snapshot.baseSha, snapshot.headSha, 'codex', 'fixture-model', 'high', defaultReviewPreferences()]), 'Reviews made without listing deleted files keep their existing saved-review key.');
+  assert.equal(reviewCache.reviewLookup(snapshot, { ...lookupSettings, fileLimit: 300 }), reviewCache.reviewLookup(snapshot, lookupSettings), 'The file limit only gates analysis and is not part of the saved-review key.');
+  assert.notEqual(reviewCache.reviewLookup(snapshot, { ...lookupSettings, listDeletedFiles: true }), reviewCache.reviewLookup(snapshot, lookupSettings), 'Reviews made while listing deleted files never replace or reopen reviews made without it.');
   const cachedReview = { analysis: result.analysis, paths: ['account.js'], savedAt: Date.now() };
   let storedReview = structuredClone(cachedReview);
   let failCacheRead = false;
@@ -1856,7 +1901,7 @@ try {
   }
   assert.ok(nativePorts.every(helper => helper.disconnected), 'Every native request must be cleaned up.');
   assert.ok(!JSON.stringify(requests).includes('apiKey'), 'No provider credentials belong in the native protocol.');
-  console.log('Runtime verified: shared per-provider connection cooldowns and optional storage failures, explicit refresh and worker restart persistence, saved-review failure reporting and recovery, six default and saved-limit concurrent file classifications followed by one PR review, generated-file exclusion and explicit review, scoped PR reviews, late and concurrent opt-in, superseded check cancellation, isolated failure and retry, per-file timeouts, navigation and reload reconnection without repeated calls, detached completion and retained unsaved results, tab-close cleanup during initialization and active work, idle session heartbeats, pinned evidence, trusted settings and native cleanup. No live Codex calls.');
+  console.log('Runtime verified: shared per-provider connection cooldowns and optional storage failures, explicit refresh and worker restart persistence, saved-review failure reporting and recovery, six default and saved-limit concurrent file classifications followed by one PR review, generated-file exclusion and explicit review, deleted files listed only for the PR review, changed-file limit and saved-review key separation, scoped PR reviews, late and concurrent opt-in, superseded check cancellation, isolated failure and retry, per-file timeouts, navigation and reload reconnection without repeated calls, detached completion and retained unsaved results, tab-close cleanup during initialization and active work, idle session heartbeats, pinned evidence, trusted settings and native cleanup. No live Codex calls.');
 } finally {
   await Promise.all(reviewPorts.map(closeTab));
   globalThis.fetch = savedFetch;
