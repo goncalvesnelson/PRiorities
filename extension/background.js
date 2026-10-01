@@ -272,7 +272,7 @@ function createSession(tabId, url, port) {
     const previous = job.port;
     job.port = port;
     if (previous && previous !== port) previous.disconnect();
-    send({ type: 'resumed', snapshot: job.snapshot, restoring: job.restoring === true });
+    send({ type: 'resumed', snapshot: job.snapshot, highlights: job.highlights, restoring: job.restoring === true });
     if (job.settings) send(sessionMessage());
     for (const [path, entry] of job.files) send(fileProgress(path, entry));
     if (job.result) send(job.result);
@@ -505,6 +505,7 @@ function createSession(tabId, url, port) {
       job.startedAt = Date.now();
       if (pullRequestUrl(snapshot.url) !== url) throw new Error('The assessment does not match this pull request. Refresh the page.');
       job.snapshot = snapshot;
+      job.highlights = message.highlights;
       for (const file of snapshot.files) {
         const fileSnapshot = { ...snapshot, files: [file], context: snapshot.context.filter(source => source.path === file.path) };
         const hasEdits = file.hunks.some(hunk => hunk.items.some(item => item.type === 'edit'));
