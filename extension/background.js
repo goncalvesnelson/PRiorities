@@ -383,7 +383,7 @@ function createSession(tabId, url, port) {
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       if (session.checkVersion !== version) return;
       report({ phase: 'checking', startedAt: Date.now() });
-      const analysis = validateAnalysis(raw, snapshot, classifications, session.settings.review.alwaysShow);
+      const analysis = validateAnalysis(raw, snapshot, { initialClassifications: classifications, alwaysShow: session.settings.review.alwaysShow });
       void recordDuration(session.settings, (Date.now() - started) / 1000, lines);
       let cache = { saved: false, message: 'This review could not be saved locally. It remains available in this tab.' };
       try {
@@ -419,7 +419,7 @@ function createSession(tabId, url, port) {
     if ([...session.files].some(([path, entry]) => entry.included && entry.state !== 'skipped' && !restored.has(path))) return false;
     const included = session.snapshot.files.filter(file => restored.has(file.path) || session.files.get(file.path).included && session.files.get(file.path).state === 'skipped');
     const snapshot = { ...session.snapshot, files: included, context: session.snapshot.context.filter(source => included.some(file => file.path === source.path)) };
-    const analysis = validateAnalysis(cached.analysis, snapshot);
+    const analysis = validateAnalysis(cached.analysis, snapshot, { saved: true });
     session.initialized = true;
     session.restoring = false;
     for (const path of restored) {

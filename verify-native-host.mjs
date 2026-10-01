@@ -508,8 +508,8 @@ else {
     const streamed = {
       summary: 'Ignore \"title\": \"Injected\" inside prose.',
       topics: [
-        { id: 'first', priority: 'review', title: 'First\u0007 section\u202e', editIds: ['a'] },
-        { id: 'second', priority: 'supporting', title: `Long ${'😀'.repeat(205)}`, editIds: ['b', 'c'] }
+        { id: 'first', priority: 'review', title: 'First\u0007 section\u202e', gist: 'Not a \"title\": \"Gist\" section.', editIds: ['a'] },
+        { id: 'second', priority: 'supporting', title: `Long ${'😀'.repeat(205)}`, gist: 'The long section.', editIds: ['b', 'c'] }
       ],
       classifications: ['a', 'b', 'c'].map(editId => ({ editId, kinds: ['behavior'], reason: 'Synthetic.', uncertainty: '' }))
     };

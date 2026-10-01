@@ -20,7 +20,7 @@ const snapshot = validateSnapshot({
 const assessment = {
   summary: 'Confirm how callers handle a missing account.',
   topics: [{
-    id: 'missing-account', priority: 'review', title: 'Handle the new null return',
+    id: 'missing-account', priority: 'review', title: 'Handle the new null return', gist: 'The early `account` guard and what callers now receive.',
     reason: 'The guard changes the missing-account result.', before: 'Missing account throws.',
     after: 'Missing account returns null.', questions: ['Do callers accept null?'],
     uncertainty: 'Caller source is not provided.',
@@ -452,6 +452,12 @@ try {
   assert.deepEqual(sentClassifications, classifications.edits);
   assert.deepEqual(citableLines, { 'account.js': { before: [[1, 1]], after: [[1, 2]] } }, 'The PR review must list the only lines it may cite.');
   assert.deepEqual(reviewEvidence, { ...classificationEvidence, title: snapshot.title, description: snapshot.description }, 'The PR review must retain the source evidence and add only intent, validated classifications and citable lines.');
+  const multiLineReview = structuredClone({ ...assessment, classifications: classifications.edits });
+  multiLineReview.topics[0].gist = 'First line\n\tsecond line\r\n';
+  nativeHandler = request => ({ type: 'result', result: request.schema.properties.edits ? classifications : multiLineReview });
+  const flattened = await beginReview({ ...snapshot, context: [{ path: 'account.js', side: 'after', text: ['if (!account) return null;', 'return account.balance;', ...Array.from({ length: 59 }, (_, index) => `supplied context ${index}`)].join('\n') }] });
+  await waitForSettlement(flattened);
+  assert.equal(flattened.messages.find(message => message.type === 'result')?.analysis.topics[0].gist, 'First line second line', 'Line breaks and tabs in a gist become single spaces instead of failing the analysis.');
   assert.deepEqual(fileStates(reviewPort, 'account.js'), ['queued', 'classifying', 'classified']);
   const classifiedFile = reviewPort.messages.findIndex(message => message.state === 'classified');
   const prReview = reviewPort.messages.findIndex(message => message.stage === 'checking');
@@ -460,6 +466,7 @@ try {
   assert.deepEqual(result.analysis.classifications, classifications.edits, 'Unchanged classifications must survive the PR review.');
   assert.equal(result.analysis.headSha, snapshot.headSha);
   assert.equal(result.analysis.topics[0].excerpts[0].rows[0].text, 'if (!account) return null;');
+  assert.equal(result.analysis.topics[0].gist, assessment.topics[0].gist, 'Each section keeps its gist for the Guide.');
   assert.equal(result.analysis.topics[0].changedLines, 3);
 
   const beforeVisibilityPreferences = storage.reviewPreferences;
@@ -814,6 +821,9 @@ try {
     ['blank review question', review => { review.topics[0].questions = [' ']; }, /invalid review questions/],
     ['excerpt without note', review => { review.topics[0].excerpts[0].note = ' '; }, /missing its note/],
     ['invented edit', review => { review.topics[0].editIds = ['invented-edit']; }, /map each edit exactly once/],
+    ['missing gist', review => { delete review.topics[0].gist; }, /invalid section description/],
+    ['overlong gist', review => { review.topics[0].gist = 'x'.repeat(201); }, /invalid section description/],
+    ['control character in gist', review => { review.topics[0].gist = 'First line\u0007second line'; }, /invalid section description/],
     ['duplicate topics', review => { review.topics.push(structuredClone(review.topics[0])); }, /invalid review topics/],
     ['reversed excerpt', review => { review.topics[0].excerpts[0].startLine = 2; }, /invalid source excerpt/],
     ['zero line number', review => { review.topics[0].excerpts[0].startLine = 0; }, /invalid source excerpt/],
@@ -1731,13 +1741,25 @@ try {
     assert.equal(requests.length, beforeLargeRestore, 'Restoring the larger review must not invoke a model.');
     await restoredLargeReview.disconnect();
 
+    storedReview = structuredClone(cachedReview);
+    for (const topic of storedReview.analysis.topics) delete topic.gist;
+    const beforeGistlessRestore = requests.length;
+    const gistlessReview = port();
+    await onConnect.emit(gistlessReview);
+    await gistlessReview.onMessage.emit({ type: 'analyze', snapshot, cacheOnly: true });
+    assert.equal(gistlessReview.messages.at(-1).type, 'result', 'A review saved before sections had a gist must still restore.');
+    assert.ok(gistlessReview.messages.at(-1).analysis.topics.every(topic => !Object.hasOwn(topic, 'gist')), 'Restoring never invents a gist.');
+    assert.equal(requests.length, beforeGistlessRestore, 'Restoring a review without gists must not invoke a model.');
+    await gistlessReview.disconnect();
+
     nativeHandler = stagedResponses(classifications, assessment);
-    for (const failure of ['fingerprint', 'read', 'invalid-paths', 'invalid-analysis']) {
+    for (const failure of ['fingerprint', 'read', 'invalid-paths', 'invalid-analysis', 'invalid-gist']) {
       storedReview = structuredClone(cachedReview);
       failCacheRead = failure === 'read';
       if (failure === 'fingerprint') crypto.subtle.digest = async () => { throw new Error('Synthetic digest failure.'); };
       if (failure === 'invalid-paths') storedReview.paths = [];
       if (failure === 'invalid-analysis') storedReview.analysis = {};
+      if (failure === 'invalid-gist') storedReview.analysis.topics[0].gist = ' ';
       const beforeSavedCalls = requests.length;
       const beforeSavedEntry = structuredClone(storedReview);
       const savedOnly = port();
