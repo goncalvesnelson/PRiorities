@@ -4,6 +4,9 @@ import { isProtectedPath } from './review-preferences.js';
 
 const surfaceHiddenClass = 'review-focus-native-surface-hidden';
 const ownedAttribute = 'data-review-focus-owned';
+const readyMark = '✓ Ready · ';
+const attentionMark = '⚠ Needs attention · ';
+const titleMarks = /^(?:✓ Ready|⚠ Needs attention) ·\s*/;
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -143,6 +146,14 @@ function guideFileRows(snapshot, file) {
   return rows;
 }
 
+function clockTime(seconds) {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function roughDuration(seconds) {
+  return seconds < 60 ? `${Math.max(5, Math.round(seconds / 5) * 5)} s` : `${Math.round(seconds / 60)} min`;
+}
+
 function sourceLink(snapshot, excerpt) {
   const url = new URL(snapshot.url);
   const parts = url.pathname.split('/').filter(Boolean);
@@ -238,6 +249,12 @@ export function startReviewUI() {
   let cacheProbeVersion = 0;
   let fileFilter = 'all';
   let fileListOpen = false;
+  let captureStartedAt;
+  let startedAt;
+  let checkProgress;
+  let progressStage = 0;
+  let clock;
+  let titleMark = '';
 
   const header = element('div', 'rf-toolbar');
   const brand = element('strong', 'rf-brand', 'PRiorities');
@@ -305,12 +322,17 @@ export function startReviewUI() {
   const welcome = element('p', 'rf-welcome', 'Focus on the changes that need you. Every line stays accessible.');
   const progressPanel = element('div', 'rf-progress-panel');
   const phase = element('strong', 'rf-phase');
+  const steps = element('ol', 'rf-steps');
+  steps.setAttribute('aria-label', 'Analysis steps');
+  const elapsed = element('span', 'rf-elapsed');
+  elapsed.setAttribute('role', 'timer');
   const progressDetail = element('span', 'rf-progress-detail');
-  const progressHeading = element('div', 'rf-progress-heading');
-  progressHeading.append(phase, progressDetail);
+  const progressLine = element('div', 'rf-progress-line');
+  progressLine.append(phase, steps, progressDetail);
   const progressBar = element('progress', 'rf-progress-bar');
   progressBar.setAttribute('aria-label', 'Files classified');
-  progressPanel.append(progressHeading, progressBar);
+  progressPanel.append(progressLine, progressBar);
+  header.insertBefore(progressPanel, buttons);
   const cacheNotice = element('p', 'rf-cache-notice');
   const runSettings = element('p', 'rf-run-settings rf-caption');
   const fileProgress = element('div', 'rf-file-progress');
@@ -318,7 +340,7 @@ export function startReviewUI() {
   fileProgress.hidden = true;
   const secondary = element('div', 'rf-secondary');
   secondary.append(runSettings);
-  panel.append(header, secondary, welcome, progressPanel, statusNode, cacheNotice, errorNode, nativeNotice, fileProgress, result);
+  panel.append(header, secondary, welcome, statusNode, cacheNotice, errorNode, nativeNotice, fileProgress, result);
 
   function canOpenSavedReview() {
     return Boolean(savedReview && !analysis && !missedSavedReviews.has(savedReview.candidate));
@@ -356,20 +378,50 @@ export function startReviewUI() {
     errorNode.hidden = !currentError;
     if (errorNode.textContent !== currentError) errorNode.textContent = currentError;
     welcome.hidden = busy || Boolean(analysis) || fileStates.size > 0;
-    progressPanel.hidden = !busy || fileStates.size > 0;
+    progressPanel.hidden = !busy;
     const states = [...fileStates.values()];
     const total = states.filter(file => !['skipped', 'excluded'].includes(file.state)).length;
     const classified = classifiedCount();
-    const stage = openingSavedReview || !snapshot ? 0 : reviewStage === 'checking' ? 2 : 1;
-    phase.textContent = [reviewStage === 'reconnecting' ? 'Reconnecting to analysis' : openingSavedReview ? 'Opening saved review' : 'Reading this pull request', 'Classifying files', 'Choosing review decisions'][stage];
-    progressDetail.textContent = stage === 1 ? `${classified} of ${total} files classified` : stage === 2 ? 'Every file is classified; comparing the changes' : reviewStage === 'reconnecting' ? 'Checking for work already running in this tab' : openingSavedReview ? 'Checking the saved review against the current context' : 'Capturing the complete diff and context';
+    const stage = openingSavedReview || !snapshot ? 0 : reviewStage !== 'checking' ? 1 : checkProgress?.phase === 'checking' ? 3 : 2;
+    progressStage = stage;
+    phase.textContent = [reviewStage === 'reconnecting' ? 'Reconnecting to analysis' : openingSavedReview ? 'Opening saved review' : 'Copying this pull request', 'Labelling files', 'Writing the review', 'Checking the review'][stage];
+    const detail = stage === 1 ? `${classified} of ${total} files classified` : stage === 2 ? 'Every file is classified; comparing the changes' : stage === 3 ? 'Validating the answer against the captured code' : reviewStage === 'reconnecting' ? 'Checking for work already running in this tab' : openingSavedReview ? 'Checking the saved review against the current context' : 'Capturing the complete diff and context';
+    const tracked = !openingSavedReview && reviewStage !== 'reconnecting';
+    phase.hidden = tracked;
+    steps.hidden = !tracked;
+    const kinds = checkProgress?.kinds?.map(([kind, count]) => `${count} ${kind}`).join(' · ');
+    const estimate = checkProgress?.estimate ? roughDuration(checkProgress.estimate) : '';
+    steps.replaceChildren(...[
+      ['Copy', ''], [`Label${total ? ` ${classified}/${total}` : ''}`, kinds ? `Labelled blocks: ${kinds}` : ''],
+      ['Write review', estimate ? `Usually about ${estimate} with this model, based on recent reviews` : ''], ['Check', '']
+    ].map(([label, note], index) => {
+      const step = element('li', '', label);
+      step.dataset.state = index < stage ? 'done' : index === stage ? 'current' : 'pending';
+      if (note) {
+        step.title = note;
+        step.append(element('span', 'rf-visually-hidden', `, ${note}`));
+      }
+      if (index < stage) step.append(element('span', 'rf-visually-hidden', ', done'));
+      if (index === stage) {
+        step.setAttribute('aria-current', 'step');
+        step.append(' ', elapsed);
+        if (stage === 2 && estimate) step.append(element('span', 'rf-estimate', ` / ~${estimate}`));
+      }
+      return step;
+    }));
+    const live = liveProgress(stage);
+    progressDetail.textContent = live.text || detail;
+    progressDetail.title = live.title || progressDetail.textContent;
+    renderClock();
+    if (busy && !clock) clock = setInterval(renderClock, 1000);
+    if (!busy && clock) { clearInterval(clock); clock = undefined; }
     renderProgressSummary();
     if (stage === 1 && total) { progressBar.max = total; progressBar.value = classified; }
     else progressBar.removeAttribute('value');
     cacheNotice.hidden = Boolean(analysis) && !cacheWarning || !cacheMessage && !savedReview;
     cacheNotice.textContent = cacheMessage || (savedReview ? `Saved ${new Date(savedReview.savedAt).toLocaleString()}. Opening checks the current context without a new model call.` : '');
     let nextStatus = pendingAction?.message ?? status;
-    if (busy && snapshot && !currentError && !pendingAction) nextStatus = `${phase.textContent}. ${progressDetail.textContent}.`;
+    if (busy && snapshot && !currentError && !pendingAction) nextStatus = `${phase.textContent}. ${detail}.`;
     if (!busy && !status) nextStatus = !configured
       ? `Connect your local ${providerName} helper in Settings, then analyze this PR.`
       : `Ready to analyze ${rangeSelected ? 'these commits' : 'this PR'} with ${providerName}${model ? ` (${model})` : ''}. Analysis starts only when you click ${analyzeLabel}.`;
@@ -378,6 +430,44 @@ export function startReviewUI() {
     const ordinaryStatus = (busy && snapshot || finalResult && verifiedPage() || !attempted && configured && !status) && !currentError && !pendingAction && !(settingsChanged && !busy);
     statusNode.classList.toggle('rf-visually-hidden', Boolean(ordinaryStatus));
     result.hidden = mode === 'full' || !finalResult;
+  }
+
+  function renderClock() {
+    const since = [captureStartedAt, startedAt, checkProgress?.startedAt, checkProgress?.startedAt][progressStage];
+    elapsed.textContent = Number.isFinite(since) ? clockTime(Math.max(0, Math.floor((Date.now() - since) / 1000))) : '';
+  }
+
+  function liveProgress(stage) {
+    if (stage === 1) {
+      const active = [...fileStates].filter(([, file]) => file.state === 'classifying').map(([path, file]) => {
+        const blocks = snapshot.files.find(entry => entry.path === path)?.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit')).length ?? 0;
+        return { path, count: file.labelled ? `${Math.min(file.labelled, blocks)}/${blocks}` : '' };
+      });
+      if (!active.length) return {};
+      return {
+        text: `Labelling ${active.map(({ path, count }) => `${path.split('/').at(-1)}${count ? ` ${count}` : ''}`).join(' · ')}`,
+        title: active.map(({ path, count }) => `${path}${count ? `: ${count} blocks labelled` : ''}`).join('\n')
+      };
+    }
+    if (stage !== 2 || !checkProgress) return {};
+    const { sections = [], labelled, edits, phase: activity } = checkProgress;
+    const blocks = labelled ? `${Math.min(labelled, edits)}/${edits} blocks` : '';
+    const latest = sections.length ? `Section ${sections.length}: ${sections.at(-1)}` : { reasoning: 'Reasoning…', writing: 'Writing the answer…' }[activity] ?? '';
+    return {
+      text: [blocks, latest].filter(Boolean).join(' · '),
+      title: [blocks && `${blocks} labelled in the answer`, ...sections.map((title, index) => `${index + 1}. ${title}`)].filter(Boolean).join('\n')
+    };
+  }
+
+  function applyTitleMark() {
+    const title = `${titleMark}${document.title.replace(titleMarks, '')}`;
+    if (document.title !== title) document.title = title;
+  }
+
+  function markTitle(mark) {
+    if (!document.hidden) return;
+    titleMark = mark;
+    applyTitleMark();
   }
 
   async function loadSettings(refreshConnection = false) {
@@ -489,6 +579,8 @@ export function startReviewUI() {
     cacheWarning = false;
     cacheLookupFailed = false;
     openingSavedReview = false;
+    startedAt = undefined;
+    checkProgress = undefined;
     cacheProbe = '';
     cacheProbeVersion++;
     fileFilter = 'all';
@@ -509,6 +601,7 @@ export function startReviewUI() {
     updateSurface();
     error = '';
     reviewStage = path ? 'files' : 'checking';
+    checkProgress = undefined;
     pendingAction = { type: path ? 'file' : 'check', path, message: path ? `Retrying ${path}…` : 'Retrying review decisions…' };
     port.postMessage(path ? { type: 'retry-file', path } : { type: 'retry-final' });
     renderControls();
@@ -524,6 +617,7 @@ export function startReviewUI() {
     updateSurface();
     error = '';
     reviewStage = 'files';
+    checkProgress = undefined;
     pendingAction = { type: 'file', path, message: `Analyzing ${path}…` };
     port.postMessage({ type: 'review-file', path });
     if (analysis) renderAnalysis();
@@ -568,7 +662,8 @@ export function startReviewUI() {
     const phaseLabel = openingSavedReview ? 'Opening saved review' : reviewStage === 'checking' ? 'Review decisions' : reviewStage === 'check-failed' ? 'Review decisions failed' : reviewStage === 'cancelled' || !busy && states.some(file => file.state === 'cancelled') ? 'Cancelled' : states.some(file => file.state === 'failed') ? 'Needs retry' : busy ? 'Analyzing' : '';
     progressToggle.hidden = !states.length;
     const analyzed = total ? `${finalResult ? 'AI ready' : 'Classified'} ${classifiedCount()}/${total}` : `All ${states.length} files skipped`;
-    progressToggle.textContent = `${analyzed}${phaseLabel ? ` · ${phaseLabel}` : ''} · Viewed ${reviewed}/${states.length}${unknown ? ` (${unknown} unknown)` : ''}`;
+    const stepsShown = busy && !openingSavedReview;
+    progressToggle.textContent = `${stepsShown ? 'Files' : `${analyzed}${phaseLabel ? ` · ${phaseLabel}` : ''}`} · Viewed ${reviewed}/${states.length}${unknown ? ` (${unknown} unknown)` : ''}`;
     progressToggle.title = `${fileCounts()}. ${reviewed} of ${states.length} files viewed in GitHub. ${fileListOpen ? 'Hide' : 'Show'} file progress.`;
     progressToggle.setAttribute('aria-expanded', String(fileListOpen));
   }
@@ -802,6 +897,7 @@ export function startReviewUI() {
     pendingAction = undefined;
     error = message;
     status = 'Analysis did not finish. Check Settings or try again.';
+    markTitle(attentionMark);
     controller = undefined;
     if (port) { port.disconnect(); port = undefined; }
     for (const [path, file] of fileStates) {
@@ -838,6 +934,7 @@ export function startReviewUI() {
     busy = true;
     error = '';
     status = 'Reading this pull request and its pinned source…';
+    captureStartedAt = Date.now();
     renderControls();
     controller = new AbortController();
     try {
@@ -898,6 +995,8 @@ export function startReviewUI() {
         reviewModel = message.model;
         reviewEffort = message.effort;
         reviewPreferences = message.review;
+        startedAt = message.startedAt;
+        renderControls();
         return;
       }
       if (message.type === 'cache-miss') {
@@ -929,7 +1028,7 @@ export function startReviewUI() {
       } else if (message.type === 'progress') {
         if (pendingAction?.type === 'check' && message.stage === 'checking') pendingAction = undefined;
         reviewStage = message.stage;
-        status = message.message;
+        checkProgress = message;
         renderControls();
       } else if (message.type === 'settled') {
         busy = false;
@@ -937,6 +1036,7 @@ export function startReviewUI() {
         reviewStage = message.state;
         status = `${fileCounts()}. ${message.message}`;
         error = message.state === 'check-failed' ? message.message : '';
+        if (message.state !== 'cancelled') markTitle(attentionMark);
         renderFileProgress();
         renderControls();
       } else if (message.type === 'error') {
@@ -974,6 +1074,7 @@ export function startReviewUI() {
         renderFileProgress();
         updateSurface();
         renderControls();
+        markTitle(readyMark);
       }
     });
     connection.onDisconnect.addListener(() => {
@@ -1247,6 +1348,9 @@ export function startReviewUI() {
       }
       const key = JSON.stringify([topic?.id, file.path, rowKey(hidden[0]), rowKey(hidden.at(-1))]);
       const fold = disclosure(`${hidden.length} ${owners.length ? 'other' : 'unchanged'} ${hidden.length === 1 ? 'line' : 'lines'}`, 'rf-fold');
+      fold.dataset.lines = hidden.length;
+      // GitHub collapses files it marks generated and never shows source outside its diff, so only the rest counts as hidden by the Guide.
+      fold.dataset.githubLines = file.isGenerated === true ? 0 : hidden.filter(row => row.type !== 'marker' && !row.outsideDiff).length;
       appendRuns(fold, hidden);
       fold.open = expanded.has(key);
       fold.addEventListener('toggle', () => { if (fold.open) expanded.add(key); else expanded.delete(key); });
@@ -1290,8 +1394,12 @@ export function startReviewUI() {
     summary.append(richText('div', 'rf-summary', analysis.summary));
     summary.append(element('p', 'rf-caption', 'Mark each file Reviewed by you when you finish it. Comments, draft reviews and approval stay in Full diff.'));
     if (!reviews) summary.append(element('p', 'rf-caption', 'All sections are supporting. You can inspect every captured change.'));
+    const locations = editLocations();
+    const guided = new Set(analysis.topics.flatMap(topic => [...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)]));
     const excluded = generatedCount();
-    if (excluded) summary.append(element('p', 'rf-generated-notice', `${excluded} generated ${excluded === 1 ? 'file was' : 'files were'} skipped by AI. Open the file list to read captured code or choose Review anyway.`));
+    const coverage = element('p', 'rf-caption rf-coverage', `Guide covers ${guided.size} of ${snapshot.files.length} files.${excluded ? ` ${excluded} generated ${excluded === 1 ? 'file' : 'files'} not analyzed (shown in Full diff; open the file list to choose Review anyway).` : ''}`);
+    coverage.title = 'Full diff shows every file and line.';
+    summary.append(coverage);
     const unresolved = analysis.classifications.filter(entry => entry.kinds.includes('unknown'));
     if (unresolved.length) {
       const notice = element('div', 'rf-unresolved', `${unresolved.length} ${unresolved.length === 1 ? 'edit has' : 'edits have'} unresolved evidence. `);
@@ -1319,7 +1427,6 @@ export function startReviewUI() {
       control.disabled = index < 0 || !analysis.topics[index + offset];
       return control;
     };
-    const locations = editLocations();
     const paths = selectedFile ? [selectedFile] : topic ? [...new Set([...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)])] : [];
     const section = element('section', 'rf-guide-section');
     if (topic) section.dataset.topicId = topic.id;
@@ -1330,7 +1437,19 @@ export function startReviewUI() {
     const title = appendInline(element('h2', 'rf-section-title'), topic?.title ?? 'Captured changes · not analyzed');
     title.tabIndex = -1;
     explanation.append(sectionNav, title);
+    const changedLines = edits => edits.filter(({ file }) => file.isGenerated !== true).flatMap(({ edit }) => edit.rows).filter(row => row.type === 'add' || row.type === 'delete').length;
+    const sectionCoverage = element('p', 'rf-caption rf-section-coverage');
+    sectionCoverage.title = 'Folded lines open in place, other sections explain the rest, and Full diff shows every line.';
+    const updateCoverage = () => {
+      const folded = [...code.querySelectorAll('.rf-fold:not([open])')].reduce((sum, fold) => sum + Number(fold.dataset.githubLines), 0);
+      sectionCoverage.textContent = [
+        `${paths.length} of ${snapshot.files.length.toLocaleString()} files`,
+        `${changedLines(topic.editIds.map(id => locations.get(id))).toLocaleString()} of ${changedLines([...locations.values()]).toLocaleString()} changed lines`,
+        folded && `${folded.toLocaleString()} ${folded === 1 ? 'line' : 'lines'} folded here`
+      ].filter(Boolean).join(' · ');
+    };
     if (topic) {
+      explanation.append(sectionCoverage);
       const files = element('ul', 'rf-section-files');
       for (const path of paths) {
         const jump = button(path.split('/').at(-1), () => revealGuideFile(path), 'rf-link-button');
@@ -1378,6 +1497,10 @@ export function startReviewUI() {
     foldLabel.append(foldInput, document.createTextNode('Fold other code'));
     code.append(foldLabel);
     for (const path of paths) code.append(renderGuideFile(snapshot.files.find(file => file.path === path), topic, locations));
+    if (topic) {
+      updateCoverage();
+      code.addEventListener('toggle', updateCoverage, true);
+    }
     section.append(explanation, code);
     const sequence = element('div', 'rf-section-sequence');
     sequence.append(step('Previous section', -1), element('span', 'rf-caption', position), step('Next section', 1));
@@ -1407,6 +1530,7 @@ export function startReviewUI() {
 
   function checkPage() {
     if (!isActive()) return;
+    applyTitleMark();
     const identity = readPageIdentity(document, location.href);
     if (!identity) {
       detachAnalysis();
@@ -1476,9 +1600,12 @@ export function startReviewUI() {
     listeners.abort();
     observer.disconnect();
     clearInterval(interval);
+    clearInterval(clock);
     clearTimeout(timer);
     detachAnalysis();
     host.remove();
+    titleMark = '';
+    applyTitleMark();
   }
 
   const observer = new MutationObserver(records => {
@@ -1498,6 +1625,11 @@ export function startReviewUI() {
   window.addEventListener('popstate', scheduleCheck, eventOptions);
   window.addEventListener('focus', refreshConnection, eventOptions);
   document.addEventListener('visibilitychange', refreshConnection, eventOptions);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    titleMark = '';
+    applyTitleMark();
+  }, eventOptions);
   const interval = setInterval(() => {
     if (!isActive()) return;
     const identity = readPageIdentity(document, location.href);

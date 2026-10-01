@@ -5,7 +5,14 @@ function connectionError(label, message) {
   return new Error(`The local ${label} helper disconnected. ${message || 'Check the helper installation and retry.'}`);
 }
 
-function nativeRequest(provider, request, signal) {
+function validProgress(message) {
+  return Object.keys(message).length === 4 && ['reasoning', 'writing'].includes(message.phase)
+    && Number.isSafeInteger(message.labelled) && message.labelled >= 0
+    && Array.isArray(message.sections) && message.sections.length <= 50
+    && message.sections.every(title => typeof title === 'string' && title.length > 0 && [...title].length <= 200 && !/[\p{Cc}\p{Cf}]/u.test(title));
+}
+
+function nativeRequest(provider, request, signal, onProgress) {
   return new Promise((resolve, reject) => {
     if (!['codex', 'claude'].includes(provider)) {
       reject(new Error('Choose Codex or Claude Code in Settings.'));
@@ -49,6 +56,10 @@ function nativeRequest(provider, request, signal) {
         finish(null, { authenticated: message.authenticated, ...(message.message ? { message: message.message } : {}) });
         return;
       }
+      if (request.type === 'analyze' && message?.type === 'progress') {
+        if (validProgress(message)) onProgress?.({ phase: message.phase, sections: message.sections, labelled: message.labelled });
+        return;
+      }
       if (request.type === 'analyze' && message?.type === 'result' && message.result && typeof message.result === 'object' && !Array.isArray(message.result)) {
         finish(null, message.result);
         return;
@@ -81,6 +92,6 @@ export function getCLIModels(provider) {
   return nativeRequest(provider, { type: 'models' });
 }
 
-export function analyzeWithCLI({ provider, model, effort = '', prompt, schema, signal }) {
-  return nativeRequest(provider, { type: 'analyze', model, effort, prompt, schema }, signal);
+export function analyzeWithCLI({ provider, model, effort = '', prompt, schema, signal, onProgress }) {
+  return nativeRequest(provider, { type: 'analyze', model, effort, prompt, schema }, signal, onProgress);
 }

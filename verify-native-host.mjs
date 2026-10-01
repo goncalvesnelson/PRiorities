@@ -31,6 +31,36 @@ const untrustedEnvironment = {
   CLAUDE_CODE_PLUGIN_DIR: '/untrusted-plugin', NODE_OPTIONS: '--trace-warnings'
 };
 
+function claudeEvents(answer, { chunk = 11, wait = 0, partial } = {}) {
+  const text = partial ?? JSON.stringify(answer);
+  const deltas = [];
+  for (let offset = 0; offset < text.length; offset += chunk) {
+    deltas.push({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: text.slice(offset, offset + chunk) } } });
+    if (wait) deltas.push({ wait });
+  }
+  return [
+    { type: 'system', subtype: 'init', tools: ['StructuredOutput'] },
+    { type: 'stream_event', event: { type: 'message_start', message: { role: 'assistant', content: [] } } },
+    { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', name: 'StructuredOutput', input: {} } } },
+    ...deltas,
+    { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } },
+    ...(answer ? [
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'StructuredOutput', input: answer }] } },
+      { type: 'result', subtype: 'success', is_error: false, result: '', structured_output: answer }
+    ] : [])
+  ];
+}
+
+function codexEvents(answer) {
+  return [
+    { type: 'thread.started', thread_id: 'thread' },
+    { type: 'item.completed', item: { id: 'item_0', type: 'error', message: 'Under-development features enabled: skip_host_skill_discovery.' } },
+    { type: 'turn.started' },
+    { type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: JSON.stringify(answer) } },
+    { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }
+  ];
+}
+
 function frame(value) {
   const body = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
   const header = Buffer.alloc(4);
@@ -45,8 +75,20 @@ function openHost(launcherPath, extensionOrigin = origin, environment = {}) {
   }, stdio: ['pipe', 'pipe', 'pipe'] });
   liveChildren.add(child);
   let output = Buffer.alloc(0);
+  let unread = Buffer.alloc(0);
   let errorOutput = '';
-  child.stdout.on('data', chunk => { output = Buffer.concat([output, chunk]); });
+  const frames = [];
+  child.stdout.on('data', chunk => {
+    output = Buffer.concat([output, chunk]);
+    unread = Buffer.concat([unread, chunk]);
+    while (unread.length >= 4) {
+      const size = littleEndian ? unread.readUInt32LE(0) : unread.readUInt32BE(0);
+      if (unread.length < size + 4) break;
+      assert.ok(size < 1024 * 1024);
+      frames.push({ at: Date.now(), message: JSON.parse(unread.subarray(4, size + 4).toString()) });
+      unread = unread.subarray(size + 4);
+    }
+  });
   child.stderr.on('data', chunk => { errorOutput += chunk; });
   child.stdin.on('error', () => {});
   const completed = new Promise((resolve, reject) => {
@@ -55,13 +97,13 @@ function openHost(launcherPath, extensionOrigin = origin, environment = {}) {
     child.once('close', code => {
       clearTimeout(timeout);
       liveChildren.delete(child);
-      resolve({ code, output, errorOutput });
+      resolve({ code, output, errorOutput, frames, unread });
     });
   });
   return { child, completed };
 }
 
-async function exchange(launcherPath, value, fragmented = false, extensionOrigin = origin, environment = {}) {
+async function exchangeFrames(launcherPath, value, fragmented = false, extensionOrigin = origin, environment = {}) {
   const host = openHost(launcherPath, extensionOrigin, environment);
   const bytes = Buffer.isBuffer(value) ? value : frame(value);
   if (fragmented) {
@@ -70,14 +112,24 @@ async function exchange(launcherPath, value, fragmented = false, extensionOrigin
       await delay(5);
     }
   } else host.child.stdin.write(bytes);
-  const { output, errorOutput, code } = await host.completed;
+  const { errorOutput, code, frames, unread } = await host.completed;
   assert.equal(code, 0);
   assert.equal(errorOutput, '');
-  assert.ok(output.length > 4);
-  const size = littleEndian ? output.readUInt32LE(0) : output.readUInt32BE(0);
-  assert.equal(output.length, size + 4);
-  assert.ok(size < 1024 * 1024);
-  return JSON.parse(output.subarray(4).toString());
+  assert.equal(unread.length, 0);
+  assert.ok(frames.length > 0);
+  assert.ok(frames.slice(0, -1).every(frame => frame.message.type === 'progress'), 'Only progress may precede the final message.');
+  return frames;
+}
+
+async function exchange(...args) {
+  return (await exchangeFrames(...args)).at(-1).message;
+}
+
+function progressOf(frames) {
+  const progress = frames.filter(frame => frame.message.type === 'progress');
+  for (const { message } of progress) assert.deepEqual(Object.keys(message), ['type', 'phase', 'sections', 'labelled']);
+  for (let index = 1; index < progress.length; index++) assert.ok(progress[index].at - progress[index - 1].at >= 900, 'Progress is throttled to about one message per second.');
+  return progress.map(frame => frame.message);
 }
 
 async function control(mode = 'success', authenticated = true, status = {}, details = {}) {
@@ -107,6 +159,14 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSyn
 import { spawn } from 'node:child_process';
 const control = JSON.parse(readFileSync(${JSON.stringify(controlPath)}, 'utf8'));
 const args = process.argv.slice(2);
+const claudeEvents = ${claudeEvents};
+const codexEvents = ${codexEvents};
+const emit = async events => {
+  for (const event of events) {
+    if (event.wait) await new Promise(resolve => setTimeout(resolve, event.wait));
+    else await new Promise(resolve => process.stdout.write((typeof event === 'string' ? event : JSON.stringify(event)) + '\\n', resolve));
+  }
+};
 const claude = args.includes('--safe-mode');
 if (args.includes('status')) {
   appendFileSync(${JSON.stringify(statusCallsPath)}, JSON.stringify({ args, environment: Object.keys(process.env), cwd: process.cwd() }) + '\\n');
@@ -162,6 +222,9 @@ if (control.mode === 'events') {
   }
   output(JSON.stringify(result));
   process.exitCode = control.code;
+} else if (control.mode === 'stream') {
+  await emit(control.events);
+  if (!claude) writeFileSync(value('--output-last-message'), JSON.stringify(control.answer));
 } else if (control.mode === 'wait') {
   const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   writeFileSync(${JSON.stringify(startedPath)}, JSON.stringify({ pid: process.pid, descendant: descendant.pid, cwd: process.cwd() }));
@@ -171,7 +234,10 @@ if (control.mode === 'events') {
   console.error('PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path');
   process.exit(1);
 } else if (control.mode === 'diagnostic' || control.mode === 'diagnostic-envelope') {
-  if (claude) console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,errors:[control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path']}));
+  if (claude) {
+    await emit([{type:'system',subtype:'init'},{type:'assistant',message:{role:'assistant',content:[{type:'text',text:control.diagnostic}]},error:'unknown'}]);
+    console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,errors:[control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path']}));
+  }
   else console.log(JSON.stringify({type:'turn.failed',error:{message:control.diagnostic + ' PRIVATE REPOSITORY SOURCE test-secret-key /private/sensitive/path'}}));
   process.exit(control.mode === 'diagnostic-envelope' ? 0 : 1);
 } else if (control.mode === 'removed-output' || control.mode === 'unreadable-output') {
@@ -184,7 +250,10 @@ else if (control.mode === 'error-envelope') output(JSON.stringify({ type: 'resul
 else if (control.mode === 'error-success') output(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, structured_output: result }));
 else if (control.mode === 'missing-output') output(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(result) }));
 else if (control.mode === 'nonobject') output(claude ? JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: [] }) : '[]');
-else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_error: false, structured_output: result } : result));
+else {
+  await emit(claude ? claudeEvents(result) : codexEvents(result));
+  if (!claude) output(JSON.stringify(result));
+}
 }
 `, { mode: 0o700 });
   await chmod(fakeCliPath, 0o700);
@@ -243,7 +312,9 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
     }
     assert.equal((await calls()).length, 0, 'Listing models must never start analysis.');
     await control();
-    const first = await exchange(installed.launcherPath, request, true);
+    const firstFrames = await exchangeFrames(installed.launcherPath, request, true);
+    const first = firstFrames.at(-1).message;
+    assert.equal(progressOf(firstFrames)[0].phase, provider === 'claude' ? 'writing' : 'reasoning', 'Analysis reports its phase before the result.');
     assert.equal(first.type, 'result');
     assert.equal(first.result.edits[0].editId, 'sample-edit');
     const prioritization = { ...request, model: 'test-model', effort: 'high', prompt: { system: 'Prioritize the classified edits.', user: JSON.stringify({ evidence: request.prompt.user, classifications: first.result.edits }) }, schema: { type: 'object', properties: { summary: { type: 'string' }, topics: { type: 'array', items: { type: 'object' } } }, required: ['summary', 'topics'], additionalProperties: false } };
@@ -272,7 +343,8 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
         assert.equal(record.config.model_reasoning_effort, record === recorded[1] ? '"high"' : undefined);
       } else {
         for (const flag of ['--safe-mode', '--print', '--strict-mcp-config', '--disable-slash-commands', '--no-chrome', '--no-session-persistence']) assert.ok(record.args.includes(flag));
-        for (const [flag, value] of [['--tools', ''], ['--setting-sources', ''], ['--mcp-config', '{"mcpServers":{}}'], ['--permission-mode', 'dontAsk'], ['--permission-prompts', 'none'], ['--output-format', 'json']]) assert.equal(record.args[record.args.indexOf(flag) + 1], value);
+        for (const [flag, value] of [['--tools', ''], ['--setting-sources', ''], ['--mcp-config', '{"mcpServers":{}}'], ['--permission-mode', 'dontAsk'], ['--permission-prompts', 'none'], ['--output-format', 'stream-json']]) assert.equal(record.args[record.args.indexOf(flag) + 1], value);
+        for (const flag of ['--verbose', '--include-partial-messages', '--json-schema']) assert.ok(record.args.includes(flag));
         assert.equal(record.args.includes('--effort') ? record.args[record.args.indexOf('--effort') + 1] : undefined, record === recorded[1] ? 'high' : undefined);
         assert.ok(!record.args.includes('--bare'));
         assert.ok(!record.args.includes('--dangerously-skip-permissions'));
@@ -431,6 +503,52 @@ else output(JSON.stringify(claude ? { type: 'result', subtype: 'success', is_err
       assert.equal((await exchange(installed.launcherPath, request)).type, 'result', 'A successful turn must not inherit an earlier recovered error or agent message.');
       await control('events', true, {}, { events: [], code: 0 });
       assert.equal((await exchange(installed.launcherPath, { ...request, prompt: { ...request.prompt, user: keywords } })).type, 'result', 'Successful analysis must not interpret echoed stderr as a startup error.');
+    }
+
+    const streamed = {
+      summary: 'Ignore \"title\": \"Injected\" inside prose.',
+      topics: [
+        { id: 'first', priority: 'review', title: 'First\u0007 section\u202e', editIds: ['a'] },
+        { id: 'second', priority: 'supporting', title: `Long ${'😀'.repeat(205)}`, editIds: ['b', 'c'] }
+      ],
+      classifications: ['a', 'b', 'c'].map(editId => ({ editId, kinds: ['behavior'], reason: 'Synthetic.', uncertainty: '' }))
+    };
+    const reviewRequest = { ...request, schema: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] } };
+    if (provider === 'claude') {
+      await control('stream', true, {}, { events: [...claudeEvents(streamed, { chunk: 7, wait: 25 }).slice(0, -2), { wait: 1100 }, ...claudeEvents(streamed).slice(-2)] });
+      const streamFrames = await exchangeFrames(installed.launcherPath, reviewRequest);
+      assert.deepEqual(streamFrames.at(-1).message, { type: 'result', result: streamed }, 'Progress never changes the extracted result.');
+      const sectionProgress = progressOf(streamFrames);
+      assert.ok(sectionProgress.length >= 2 && sectionProgress.length <= 5, `Expected throttled progress, received ${sectionProgress.length} messages.`);
+      assert.deepEqual(sectionProgress.at(-1), { type: 'progress', phase: 'writing', sections: ['First section', `Long ${'😀'.repeat(195)}`], labelled: 3 }, 'Titles are complete, cleaned and capped at 200 code points; prose is not parsed as structure.');
+      assert.ok(sectionProgress.every(progress => progress.labelled <= 3 && progress.sections.every(title => sectionProgress.at(-1).sections.includes(title))));
+
+      const labels = { edits: streamed.classifications };
+      await control('stream', true, {}, { events: [...claudeEvents(labels, { chunk: 5 }).slice(0, -2), { wait: 1100 }, ...claudeEvents(labels).slice(-2)] });
+      const labelFrames = await exchangeFrames(installed.launcherPath, request);
+      assert.deepEqual(labelFrames.at(-1).message, { type: 'result', result: labels });
+      assert.deepEqual(progressOf(labelFrames).at(-1), { type: 'progress', phase: 'writing', sections: [], labelled: 3 }, 'File classification reports how many blocks are labelled.');
+
+      for (const [partial, expected] of [
+        ['{"summary":"x","topics":[{"title":"Good"}]]]}}"title":"Bad","classifications":[{"editId":"z"}', ['Good']],
+        ['{"topics":[{"title":"Unterminated', []],
+        ['not json at all "title":"Loose"', []]
+      ]) {
+        await control('stream', true, {}, { events: [...claudeEvents(null, { partial }), { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 42 } } }, { wait: 1100 }, claudeEvents(streamed).at(-1)] });
+        const garbageFrames = await exchangeFrames(installed.launcherPath, reviewRequest);
+        assert.deepEqual(garbageFrames.at(-1).message, { type: 'result', result: streamed }, 'Unreadable partial answers leave the final result intact.');
+        assert.deepEqual(progressOf(garbageFrames).at(-1).sections, expected);
+        assert.equal(progressOf(garbageFrames).at(-1).labelled, 0);
+      }
+      await control('stream', true, {}, { events: claudeEvents(null, { partial: '{"topics":[{"title":"Cut off"},{"title":"Next' }) });
+      const truncatedStream = await exchange(installed.launcherPath, reviewRequest);
+      assert.equal(truncatedStream.type, 'error');
+      assert.match(truncatedStream.message, /did not return valid JSON/, 'A stream that ends before its result still fails safely.');
+    } else {
+      await control('stream', true, {}, { events: [...codexEvents(streamed).slice(0, 3), { wait: 1100 }, ...codexEvents(streamed).slice(3)], answer: streamed });
+      const codexFrames = await exchangeFrames(installed.launcherPath, reviewRequest);
+      assert.deepEqual(codexFrames.at(-1).message, { type: 'result', result: streamed });
+      assert.deepEqual(progressOf(codexFrames), [{ type: 'progress', phase: 'reasoning', sections: [], labelled: 0 }], 'Codex exposes no partial answer, so it reports its coarse phase only.');
     }
 
     for (const cancellation of ['disconnect', 'signal', 'second-request']) {

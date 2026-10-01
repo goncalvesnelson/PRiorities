@@ -13,6 +13,8 @@ PRiorities is a Chrome extension that uses your local Codex or Claude Code login
 - Skip generated files and lockfiles by default, with **Review anyway** available for each file.
 - Retry individual files or the whole-PR review without repeating completed classifications.
 - Keep unfinished analysis running across GitHub tab changes and reloads in the same browser tab; reconnect on return to the diff.
+- Follow analysis on one toolbar line: steps with a timer, labelled blocks per file, section titles as the model writes them (Claude Code; Codex reports its phase), and an estimate once a model has three earlier reviews. A hidden tab's title shows when the review is ready or needs attention.
+- See how much each Guide section covers: its files and changed lines out of the whole PR, and how many lines are folded; Full diff always shows everything.
 - Mark files with GitHub’s **Viewed** checkbox or **Reviewed by you** in Guide file headers and the file list, with your progress shown separately from AI analysis.
 - Reopen completed reviews from a local cache: 100 MB by default, customizable in Settings. Commit or context changes require a fresh review; the cache evicts the least recently used entries when full.
 
@@ -51,7 +53,7 @@ npm run verify:extension
 
 This builds the extension and runs native-host, background/runtime, and installed-extension browser checks. Tests use public or synthetic GitHub fixtures and fake CLIs; they don't send code to a live model. The browser checks require Google Chrome at its standard macOS installation path. `npm run verify` runs the same suite.
 
-After pulling changes, run `npm ci`, `npm run build:extension`, and `npm run install:cli-host`, then reload the extension in Chrome and refresh the PR tab. The installer updates Chrome’s copied helper; reloading the extension alone does not. Preserve any custom `CODEX_HOME` or `CLAUDE_CONFIG_DIR` when rerunning it.
+After pulling changes, run `npm ci`, `npm run build:extension`, and `npm run install:cli-host`, then reload the extension in Chrome and refresh the PR tab. The installer updates Chrome’s copied helper; reloading the extension alone does not. Live model progress needs the current helper: without rerunning `npm run install:cli-host`, analysis still works but shows only its steps and timer. Preserve any custom `CODEX_HOME` or `CLAUDE_CONFIG_DIR` when rerunning it.
 
 The earlier standalone prototype and its captured private PR data remain outside this repository. Tests here don't require another repository checkout.
 

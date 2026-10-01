@@ -117,6 +117,15 @@ if (mode === 'many-decisions') {
   };
   const initialFile = evidence.files.length === 1 && evidence.files[0].path === 'tests/change-1.ts';
   const final = !schema.required.includes('edits');
+  if (isClaude && !initialFile) {
+    const text = JSON.stringify(final ? { ...review, classifications: labels } : { edits: labels });
+    let cut = text.indexOf('"classifications"');
+    for (let count = 0; count < 3; count++) cut = text.indexOf('"editId"', cut + 1);
+    const partial = final ? text.slice(0, cut) : text.slice(0, -2);
+    const events = [{type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',name:'StructuredOutput',input:{}}}}];
+    for (let offset = 0; offset < partial.length; offset += 10) events.push({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:partial.slice(offset, offset + 10)}}});
+    process.stdout.write(events.map(event => JSON.stringify(event) + '\\n').join(''));
+  }
   const started = Date.now();
   while (!initialFile) {
     const gate = await readFile(${JSON.stringify(uxGate)}, 'utf8');
@@ -784,6 +793,13 @@ try {
     assert.equal(row.oldLine, '', 'An uncaptured before side must not acquire an invented line number.');
   }
   assert.ok(await evaluate(`${shadow}.querySelector('.rf-context-label').textContent.includes('Captured source outside the diff')`));
+  const sourceFolds = await evaluate(`(() => {
+    const folds = [...${shadow}.querySelectorAll('.rf-fold:not([open])')];
+    const count = selector => folds.reduce((sum, fold) => sum + fold.querySelectorAll(selector).length, 0);
+    return { github: count('tr:not([data-outside-diff]):not(.rf-code-marker)'), outside: count('tr[data-outside-diff]'), caption: Number(/· (\\d+) lines? folded here$/.exec(${shadow}.querySelector('.rf-section-coverage').textContent)?.[1] ?? 0) };
+  })()`);
+  assert.ok(sourceFolds.outside > 0, 'Folds here also hold source outside GitHub’s diff.');
+  assert.equal(sourceFolds.caption, sourceFolds.github, 'The folded count covers only lines GitHub’s diff would show, not captured source outside it.');
   assert.ok(!initialLayout.visibleActions.includes('Settings') && !initialLayout.visibleActions.includes('Run fresh review'));
   await evaluate(`${shadow}.querySelector('.rf-menu > summary').focus()`);
   await page('Input.dispatchKeyEvent', {type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
@@ -1348,7 +1364,7 @@ try {
   await page('Page.navigate', { url: prUrl + '/changes' });
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('Ready to analyze')`), 'generated review fixture');
   await click('Analyze PR');
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-generated-notice')?.textContent.includes('1 generated file was skipped by AI') && !${shadow}.querySelector('.rf-analyze').disabled`), 'final result excluding generated file');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-coverage')?.textContent.includes('1 generated file not analyzed (shown in Full diff') && !${shadow}.querySelector('.rf-analyze').disabled`), 'final result excluding generated file');
   const defaultRequests = (await modelRequests()).slice(beforeGenerated);
   assert.equal(defaultRequests.length, 3, 'Only the two ordinary files and their PR review invoke Codex.');
   assert.equal(defaultRequests.some(request => request.evidence.files.some(file => file.path === changes.paths[0])), false);
@@ -1387,7 +1403,7 @@ try {
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-result').checkVisibility()`), false, 'The failed replacement must not present the old summary as current.');
   await writeFile(modeFile, 'generated-review');
   await click('Retry review decisions');
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && !${shadow}?.querySelector('.rf-generated-notice') && document.querySelectorAll('.review-focus-file-progress[data-state=complete]').length === 3 && !${shadow}?.querySelector('.rf-analyze')?.disabled`), 'forced generated file followed by an updated PR review');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && !${shadow}?.querySelector('.rf-coverage').textContent.includes('generated') && document.querySelectorAll('.review-focus-file-progress[data-state=complete]').length === 3 && !${shadow}?.querySelector('.rf-analyze')?.disabled`), 'forced generated file followed by an updated PR review');
   const forcedRequests = (await modelRequests()).slice(beforeOptIn);
   assert.equal(forcedRequests.length, 2, 'Opt-in runs only the chosen file’s classification and a new PR review.');
   assert.deepEqual(forcedRequests[0].evidence.files.map(file => file.path), [changes.paths[0]]);
@@ -1450,8 +1466,18 @@ try {
   await page('Page.navigate', { url: prUrl + '/files' });
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-status')?.textContent.includes('with Claude Code')`), 'Claude-ready PR');
   assert.equal((await modelRequests()).length, beforeProviderSettings, 'Selecting Claude and opening a PR must not start analysis.');
+  const pageTitle = 'Apply font variation settings · Pull Request #200000';
+  await evaluate(`document.title = ${JSON.stringify(pageTitle)}`);
+  await evaluateExtension(`Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })`);
   await click('Analyze PR');
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '1 review decision' && !${shadow}?.querySelector('.rf-analyze')?.disabled`), 'Claude classification followed by the PR review');
+  assert.equal(await evaluate('document.title'), `✓ Ready · ${pageTitle}`, 'A review finished in a hidden tab marks the tab title.');
+  await evaluate(`document.title = 'Changed by GitHub navigation'`);
+  await waitFor(() => evaluate(`document.title === '✓ Ready · Changed by GitHub navigation'`), 'the ready mark following GitHub’s own title change once');
+  await evaluateExtension('delete document.hidden');
+  await evaluate(`document.dispatchEvent(new Event('visibilitychange'))`);
+  await waitFor(() => evaluate(`document.title === 'Changed by GitHub navigation'`), 'the ready mark cleared when the tab is visible');
+  await evaluate(`document.title = ${JSON.stringify(pageTitle)}`);
   const claudeRequests = (await modelRequests()).slice(beforeProviderSettings);
   assert.equal(claudeRequests.length, 2);
   const afterClaude = (await modelRequests()).length;
@@ -1736,6 +1762,12 @@ try {
     await click('All files');
     const actionPath = await evaluate(`${shadow}.querySelector('.rf-file-progress-row[data-state="${state}"]').dataset.path`);
     await evaluateExtension(`window.fixtureAwaitAcknowledgement = ${JSON.stringify(actionPath)}`);
+    await evaluateExtension(`window.fixtureReviewMessage({type:'progress',stage:'checking',phase:'writing',startedAt:Date.now()-125000,kinds:[['behavior',5]]})`);
+    assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-steps li')[1].title`), 'Labelled blocks: 5 behavior');
+    assert.equal(await evaluate(`${shadow}.querySelector('.rf-elapsed').textContent`), '2:05');
+    await evaluateExtension(`window.fixtureReviewMessage({type:'progress',stage:'checking',phase:'checking',startedAt:Date.now(),kinds:[['behavior',5]]})`);
+    assert.equal(await evaluate(`${shadow}.querySelector('.rf-steps li[aria-current=step]').firstChild.textContent`), 'Check');
+    assert.equal(await evaluate(`${shadow}.querySelector('.rf-elapsed').textContent`), '0:00', 'Check measures time from its own phase start.');
     const immediateFeedback = await evaluate(`(() => {
       const root = ${shadow};
       [...root.querySelectorAll('.rf-file-progress-row button')].find(button => button.textContent === ${JSON.stringify(action)}).click();
@@ -1744,6 +1776,7 @@ try {
     })()`);
     const actionMessage = `${state === 'failed' ? 'Retrying' : 'Analyzing'} ${actionPath}…`;
     assert.deepEqual(immediateFeedback, {text:actionMessage,visible:true,role:'status'}, 'File actions must provide visible accessible feedback synchronously, before worker acknowledgement.');
+    assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-steps li')[1].title`), '', 'File retries and Review anyway clear the previous review’s labelled blocks before worker acknowledgement.');
     await evaluateExtension(`window.fixtureReviewMessage({type:'progress',stage:'files',message:'An unrelated progress update.'})`);
     await evaluate('new Promise(resolve => setTimeout(resolve, 200))');
     assert.equal(await evaluate(`${shadow}.querySelector('.rf-status').textContent`), actionMessage, 'Unrelated progress must not erase pending file-action feedback.');
@@ -1783,7 +1816,7 @@ try {
   await page('Page.navigate', {url:'about:blank'});
   await send('Runtime.evaluate', {expression:'globalThis.setInterval = globalThis.originalInterval; delete globalThis.originalInterval;'}, worker);
   // Waiting-file states need fewer classification slots than the five fixture files.
-  await send('Runtime.evaluate', {expression:'chrome.storage.local.set({classificationConcurrency:3})', awaitPromise:true}, worker);
+  await send('Runtime.evaluate', {expression:'chrome.storage.local.set({classificationConcurrency:3, analysisDurations:[1, 2, 3].map(seconds => ({provider:"claude", model:"claude-fixture-model", seconds:seconds * 20, lines:10}))})', awaitPromise:true}, worker);
   changesMode = 'many-decisions';
   await writeFile(modeFile, 'many-decisions');
   await writeFile(uxGate, 'waiting');
@@ -1820,8 +1853,22 @@ try {
   await writeFile('/tmp/review-focus-extension-progress.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
   await evaluate(`${shadow}.querySelector('.rf-progress-toggle').click()`);
   assert.ok(await evaluate(`${shadow}.querySelector('.rf-status').textContent.includes('1 of 5 files classified')`), 'Live progress describes classified files without duplicate visible status.');
+  const progressSteps = `Array.from(${shadow}.querySelectorAll('.rf-steps li'), step => [step.firstChild.textContent, step.dataset.state])`;
+  assert.deepEqual(await evaluate(progressSteps), [['Copy', 'done'], ['Label 1/5', 'current'], ['Write review', 'pending'], ['Check', 'pending']], 'The step tracker marks labelling as current.');
+  await waitFor(() => evaluate(`/^Labelling change-\\d\\.ts 1\\/1 · change-\\d\\.ts 1\\/1 · change-\\d\\.ts 1\\/1$/.test(${shadow}.querySelector('.rf-progress-detail').textContent)`), 'labelled blocks reported for each running file');
+  assert.ok(await evaluate(`${shadow}.querySelector('.rf-progress-line').getBoundingClientRect().height < 24 && ${shadow}.querySelector('.rf-toolbar').contains(${shadow}.querySelector('.rf-progress-line'))`), 'Progress stays on one toolbar line on wide screens.');
   await writeFile(uxGate, 'continue');
-  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-progress-detail').textContent.includes('Every file is classified')`), 'every file classified before the PR review');
+  const sectionProgress = `2/5 blocks · Section 5: Check ${changes.paths[4]}`;
+  await waitFor(() => evaluate(`${shadow}.querySelector('.rf-progress-detail').textContent === ${JSON.stringify(sectionProgress)}`), 'section titles reported while the PR review is written');
+  assert.deepEqual(await evaluate(progressSteps), [['Copy', 'done'], ['Label 5/5', 'done'], ['Write review', 'current'], ['Check', 'pending']]);
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-progress-detail').childElementCount`), 0, 'Model text is rendered as text only.');
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-progress-detail').title`), ['2/5 blocks labelled in the answer', ...changes.paths.slice(0, 5).map((path, index) => `${index + 1}. Check ${path}`)].join('\n'), 'Every section written so far stays available in full.');
+  assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-steps li')[1].title`), 'Labelled blocks: 5 behavior', 'The labelling summary stays in the step tooltip.');
+  assert.match(await evaluate(`${shadow}.querySelector('.rf-estimate')?.textContent ?? ''`), /^ \/ ~\d+ (?:s|min)$/, 'Three earlier reviews with this model ground an estimate.');
+  assert.match(await evaluate(`${shadow}.querySelectorAll('.rf-steps li')[2].title`), /^Usually about \d+ (?:s|min) with this model/);
+  await evaluateExtension('window.realNow = Date.now; Date.now = () => window.realNow() + 125000');
+  await waitFor(() => evaluate(`/^2:[01]\\d$/.test(${shadow}.querySelector('.rf-elapsed').textContent)`), 'the step timer counting from the background start time');
+  await evaluateExtension('Date.now = window.realNow');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-progress').hidden`), true, 'Progress updates must not reopen a list the user collapsed.');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-file-progress[data-state=classified]").length'), 3, 'The fixture only mounts three of the five classified files.');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0, 'Native code stays available before the whole-PR review decisions arrive.');
@@ -1829,7 +1876,7 @@ try {
   await page('Page.navigate', {url:prUrl + '/checks'});
   await waitFor(() => evaluateExtension('location.pathname.endsWith("/checks")').catch(() => false), 'Checks while the PR review runs');
   await page('Page.navigate', {url:prUrl + '/changes'});
-  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-phase')?.textContent === 'Choosing review decisions' && ${shadow}.querySelectorAll('.rf-file-progress-row[data-state=classified]').length === 5`), 'the same PR review reconnected with classified files');
+  await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-steps li[aria-current=step]')?.firstChild.textContent === 'Write review' && ${shadow}.querySelector('.rf-progress-detail').textContent === ${JSON.stringify(sectionProgress)} && ${shadow}.querySelectorAll('.rf-file-progress-row[data-state=classified]').length === 5`), 'the same PR review reconnected with classified files');
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length'), 0, 'Reconnecting before the PR review finishes must leave native code available.');
   await page('Page.navigate', {url:prUrl});
   await waitFor(() => evaluateExtension('location.pathname === new URL(' + JSON.stringify(prUrl) + ').pathname').catch(() => false), 'Conversation while analysis remains in the background');
@@ -2160,6 +2207,35 @@ try {
   assert.deepEqual(await evaluate(`[...${shadow}.querySelectorAll('.rf-section-link')].map(button=>[button.dataset.topicId,button.querySelector('.rf-priority').textContent])`), [['supporting','Supporting'],['contract','Review'],['validation','Review'],['unknown','Supporting']], 'Supporting prerequisites precede their uses while overview priorities remain explicit.');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting');
   assert.equal(await evaluate(`${shadow}.querySelectorAll('.rf-guide-file').length`), 3);
+  assert.equal(await evaluate(`${shadow}.querySelector('.rf-coverage').textContent`), 'Guide covers 5 of 6 files. 1 generated file not analyzed (shown in Full diff; open the file list to choose Review anyway).');
+  const coverageCaption = `${shadow}.querySelector('.rf-section-coverage').textContent`;
+  const sectionCoverage = [];
+  for (const id of ['supporting', 'contract', 'validation', 'unknown']) {
+    await chooseSection(id);
+    const [, shown, files, owned, total] = /^(\d+) of (\d+) files · (\d+) of (\d+) changed lines/.exec(await evaluate(coverageCaption));
+    assert.equal(Number(shown), await evaluate(`${shadow}.querySelectorAll('.rf-guide-file').length`));
+    sectionCoverage.push([Number(files), Number(owned), Number(total)]);
+  }
+  assert.ok(sectionCoverage.every(([files, , total]) => files === 6 && total === sectionCoverage[0][2]), 'Every section compares against the whole PR.');
+  assert.equal(sectionCoverage.reduce((sum, [, owned]) => sum + owned, 0), sectionCoverage[0][2], 'Sections own every changed line GitHub shows exactly once; the file GitHub collapses as generated is not counted.');
+  assert.equal(sectionCoverage[1][1], 2, 'The contract section owns one deleted and one added line.');
+  await chooseSection('supporting');
+  const foldedLines = () => evaluate(`Number(/· (\\d+) lines? folded here$/.exec(${coverageCaption})?.[1] ?? 0)`);
+  const [closedFolds, outsideRows] = await evaluate(`(() => {
+    const folds = [...${shadow}.querySelectorAll('.rf-fold:not([open])')];
+    return [folds.reduce((sum, fold) => sum + fold.querySelectorAll('tr:not([data-outside-diff]):not(.rf-code-marker)').length, 0), folds.reduce((sum, fold) => sum + fold.querySelectorAll('tr[data-outside-diff]').length, 0)];
+  })()`);
+  assert.ok(closedFolds > 0);
+  assert.equal(outsideRows, 0);
+  assert.equal(await foldedLines(), closedFolds, 'The caption counts lines inside closed folds.');
+  const firstFoldLines = await evaluate(`(() => { const fold = ${shadow}.querySelector('.rf-fold'); fold.open = true; return Number(fold.dataset.githubLines); })()`);
+  await waitFor(async () => await foldedLines() === closedFolds - firstFoldLines, 'the folded count following an opened fold');
+  await evaluate(`(() => { const fold = ${shadow}.querySelector('.rf-fold'); fold.open = false; })()`);
+  await waitFor(async () => await foldedLines() === closedFolds, 'the folded count restored when the fold closes');
+  await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
+  assert.doesNotMatch(await evaluate(coverageCaption), /folded/, 'Nothing is folded when Fold other code is off.');
+  await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
+  assert.equal(await foldedLines(), closedFolds);
   assert.equal(await evaluate('document.querySelector("[data-testid=progressive-diffs-list]").children[1].id'), 'fixture-list-control');
   assert.ok(await evaluate('window.originalGuideFiles.every(file=>file.isConnected)'));
   assert.equal((await modelRequests()).length - beforeGuide, 6, 'Guide adds no model call beyond the existing file classifications and single assessment.');

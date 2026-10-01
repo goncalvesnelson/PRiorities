@@ -10,6 +10,7 @@ const littleEndian = endianness() === 'LE';
 const provider = process.argv[2];
 const executablePath = process.argv[3];
 const providerName = provider === 'claude' ? 'Claude Code' : 'Codex';
+const tooLarge = `${providerName} returned a result too large for Chrome. Try a smaller pull request.`;
 const loginCommand = provider === 'claude' ? 'claude auth login' : 'codex login';
 const statusCommand = provider === 'claude' ? 'claude auth status' : 'codex login status';
 const childEnvironment = Object.fromEntries([
@@ -26,22 +27,41 @@ let disconnected = false;
 let activeChild;
 let temporaryDirectory;
 let requestTimer;
+let progressTimer;
+let progressSentAt = 0;
+let pendingProgress;
 
 class HelperError extends Error {}
 
 function cleanup() {
   clearTimeout(requestTimer);
+  clearTimeout(progressTimer);
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
+}
+
+function frame(body) {
+  const header = Buffer.alloc(4);
+  if (littleEndian) header.writeUInt32LE(body.length);
+  else header.writeUInt32BE(body.length);
+  return Buffer.concat([header, body]);
 }
 
 function send(message) {
   let body = Buffer.from(JSON.stringify(message));
-  if (body.length > maxOutputBytes) body = Buffer.from(JSON.stringify({ type: 'error', message: `${providerName} returned a result too large for Chrome. Try a smaller pull request.` }));
-  const header = Buffer.alloc(4);
-  if (littleEndian) header.writeUInt32LE(body.length);
-  else header.writeUInt32BE(body.length);
+  if (body.length > maxOutputBytes) body = Buffer.from(JSON.stringify({ type: 'error', message: tooLarge }));
   process.stdin.destroy();
-  process.stdout.end(Buffer.concat([header, body]), () => process.exit(0));
+  process.stdout.end(frame(body), () => process.exit(0));
+}
+
+function reportProgress(progress) {
+  pendingProgress = progress;
+  if (progressTimer) return;
+  progressTimer = setTimeout(() => {
+    progressTimer = undefined;
+    if (finished || disconnected) return;
+    progressSentAt = Date.now();
+    process.stdout.write(frame(Buffer.from(JSON.stringify(pendingProgress))));
+  }, Math.max(0, progressSentAt + 1000 - Date.now()));
 }
 
 function complete(message) {
@@ -84,7 +104,7 @@ function validRequest(request) {
   return true;
 }
 
-function runCli(args, inputText = '', outputLimit = 0) {
+function runCli(args, inputText = '', outputLimit = 0, readLine) {
   return new Promise((resolve, reject) => {
     const child = spawn(executablePath, args, {
       cwd: temporaryDirectory, env: childEnvironment, detached: true,
@@ -95,14 +115,28 @@ function runCli(args, inputText = '', outputLimit = 0) {
     const errors = [];
     let outputBytes = 0;
     let errorBytes = 0;
-    function collect(chunk) {
-      if (finished) return;
+    let line = Buffer.alloc(0);
+    function keep(chunk) {
       outputBytes += chunk.length;
       if (outputBytes > outputLimit) {
-        void stop(`${providerName} returned a result too large for Chrome. Try a smaller pull request.`);
+        void stop(tooLarge);
         return;
       }
       output.push(chunk);
+    }
+    function collect(chunk) {
+      if (finished) return;
+      if (!readLine) {
+        keep(chunk);
+        return;
+      }
+      line = Buffer.concat([line, chunk]);
+      let newline;
+      while (!finished && (newline = line.indexOf(10)) >= 0) {
+        keep(Buffer.from(readLine(line.subarray(0, newline + 1).toString('utf8'))));
+        line = line.subarray(newline + 1);
+      }
+      if (line.length > outputLimit) void stop(tooLarge);
     }
     child.stdout?.on('data', collect);
     child.stderr?.on('data', chunk => {
@@ -116,6 +150,7 @@ function runCli(args, inputText = '', outputLimit = 0) {
     child.once('error', () => reject(new HelperError(`${providerName} could not be started. Reinstall the helper after installing ${providerName}.`)));
     child.once('close', code => {
       activeChild = undefined;
+      if (readLine && line.length && !finished) keep(Buffer.from(readLine(line.toString('utf8'))));
       resolve({ code, output: Buffer.concat(output).toString('utf8'), errorOutput: Buffer.concat(errors).toString('utf8') });
     });
     child.stdin.end(inputText);
@@ -179,13 +214,97 @@ function loginStatus({ code, output, errorOutput }) {
   throw new HelperError(`${providerName} returned an unreadable login status. Run ${statusCommand} in Terminal and update the CLI before checking again.`);
 }
 
+// Tolerates truncated or malformed JSON: only complete strings at known positions count.
+function answerScanner(progress) {
+  let containers = [];
+  let text;
+  let escaped = false;
+  function finishString() {
+    const top = containers.at(-1);
+    if (top && !top.array && top.expectingKey) {
+      top.key = text;
+      return false;
+    }
+    const [root, list, item] = containers;
+    if (containers.length !== 3 || root.array || !list.array || item.array) return false;
+    if (list.name === 'topics' && item.key === 'title' && progress.sections.length < 50) {
+      let title;
+      try { title = JSON.parse(`"${text}"`); } catch { return false; }
+      title = [...title.replace(/[\s\p{Cc}\p{Cf}]+/gu, ' ')].slice(0, 200).join('').trim();
+      if (title) progress.sections.push(title);
+      return Boolean(title);
+    }
+    if (['classifications', 'edits'].includes(list.name) && item.key === 'editId') {
+      progress.labelled++;
+      return true;
+    }
+    return false;
+  }
+  return delta => {
+    let changed = false;
+    for (const character of delta) {
+      if (!containers) break;
+      if (text !== undefined) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') {
+          changed = finishString() || changed;
+          text = undefined;
+          continue;
+        }
+        if (text.length < 1000) text += character;
+        continue;
+      }
+      const top = containers.at(-1);
+      if (character === '"') text = '';
+      else if (character === '{') containers.push({ array: false, expectingKey: true });
+      else if (character === '[') containers.push({ array: true, name: top?.key });
+      else if (character === ':' && top && !top.array) top.expectingKey = false;
+      else if (character === ',' && top && !top.array) Object.assign(top, { expectingKey: true, key: undefined });
+      else if (character === '}' || character === ']') {
+        if (!top || top.array !== (character === ']')) containers = undefined;
+        else containers.pop();
+      }
+    }
+    return changed;
+  };
+}
+
+function analysisReader() {
+  const progress = { phase: '', sections: [], labelled: 0 };
+  let scan;
+  const report = phase => {
+    progress.phase = phase;
+    reportProgress({ type: 'progress', phase, sections: [...progress.sections], labelled: progress.labelled });
+  };
+  return line => {
+    let event;
+    try { event = JSON.parse(line); } catch { return line; }
+    if (provider === 'codex') {
+      if (event?.type === 'turn.started') report('reasoning');
+      return line;
+    }
+    if (event?.type === 'result') return line;
+    const stream = event?.type === 'stream_event' ? event.event : undefined;
+    const block = stream?.type === 'content_block_start' ? stream.content_block?.type : undefined;
+    if (block === 'thinking') report('reasoning');
+    if (block === 'tool_use') {
+      Object.assign(progress, { sections: [], labelled: 0 });
+      scan = answerScanner(progress);
+      report('writing');
+    }
+    if (scan && stream?.type === 'content_block_delta' && typeof stream.delta?.partial_json === 'string' && scan(stream.delta.partial_json)) report(progress.phase);
+    return '';
+  };
+}
+
 function analysisArguments(request) {
   const schemaPath = join(temporaryDirectory, 'schema.json');
   const instructionsPath = join(temporaryDirectory, 'instructions.txt');
   const outputPath = join(temporaryDirectory, 'result.json');
   writeFileSync(instructionsPath, `${request.prompt.system}\n\nAnalyze only the supplied evidence. Do not use tools, read local files, run commands, or browse. Return only the requested JSON.`, { mode: 0o600 });
   if (provider === 'claude') {
-    const args = ['--safe-mode', '--setting-sources', '', '--print', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands', '--no-chrome', '--no-session-persistence', '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--output-format', 'json', '--json-schema', JSON.stringify(request.schema), '--system-prompt-file', instructionsPath];
+    const args = ['--safe-mode', '--setting-sources', '', '--print', '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands', '--no-chrome', '--no-session-persistence', '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--json-schema', JSON.stringify(request.schema), '--system-prompt-file', instructionsPath];
     if (request.model) args.push('--model', request.model);
     if (request.effort) args.push('--effort', request.effort);
     return { args };
@@ -317,7 +436,7 @@ async function handle(request) {
       throw new HelperError('The local helper could not prepare its analysis files. Check local disk space and temporary-folder permissions.');
     }
     const { args, outputPath } = analysis;
-    const cliResult = await runCli(args, request.prompt.user, 4 * 1024 * 1024);
+    const cliResult = await runCli(args, request.prompt.user, 4 * 1024 * 1024, analysisReader());
     if (finished) return;
     const { code, output: analysisOutput, errorOutput } = cliResult;
     const failure = provider === 'codex' ? codexFailure(cliResult, args) : cliFailure(`${errorOutput}\n${analysisOutput}`);
@@ -329,7 +448,7 @@ async function handle(request) {
     if (outputPath) {
       try {
         if (statSync(outputPath).size > maxOutputBytes - 128) {
-          complete({ type: 'error', message: `${providerName} returned a result too large for Chrome. Try a smaller pull request.` });
+          complete({ type: 'error', message: tooLarge });
           return;
         }
         resultText = readFileSync(outputPath, 'utf8');
