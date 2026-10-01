@@ -33,13 +33,16 @@
       <label for="effort">Reasoning effort</label>
       <select id="effort" name="effort" aria-describedby="effort-help" disabled></select>
       <p id="effort-help" class="hint">Choose how much reasoning the model should use.</p>
+      <label for="concurrency">Files classified at once</label>
+      <input id="concurrency" name="concurrency" type="number" min="1" max="10" step="1" value="6" required disabled aria-describedby="concurrency-help">
+      <p id="concurrency-help" class="hint">Default: 6. Each file runs its own CLI process. Choose fewer if the CLI reports rate limits. You can choose 1–10.</p>
 
       <div class="privacy">
         <strong>Code is sent only when you start analysis.</strong>
         <p id="provider-privacy">Analyze PR sends the included diffs and captured context through your selected local CLI.</p>
         <details>
           <summary>How reviews run</summary>
-          <p>Up to three files are reviewed at once, then related changes are checked together. Generated files stay out of analysis until you choose Review anyway.</p>
+          <p>Files are classified in parallel, up to the number you choose above, then related changes are checked together. Generated files stay out of analysis until you choose Review anyway.</p>
           <p>Files are classified from code alone; the PR description and linked issues are used only when choosing review decisions.</p>
           <p>Your login stays with the CLI. No API key or local repository checkout is needed.</p>
         </details>

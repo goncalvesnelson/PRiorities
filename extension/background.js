@@ -34,7 +34,11 @@ async function readSettings(provider) {
   }
   const key = `${provider}Settings`;
   const stored = await chrome.storage.local.get(key);
-  return { provider, model: validModel(stored[key]?.model) ? stored[key].model : '', effort: validEffort(stored[key]?.effort) ? stored[key].effort : '' };
+  const { classificationConcurrency } = await chrome.storage.local.get('classificationConcurrency');
+  return {
+    provider, model: validModel(stored[key]?.model) ? stored[key].model : '', effort: validEffort(stored[key]?.effort) ? stored[key].effort : '',
+    concurrency: validConcurrency(classificationConcurrency) ? classificationConcurrency : 6
+  };
 }
 
 function validModel(model) {
@@ -43,6 +47,10 @@ function validModel(model) {
 
 function validEffort(effort) {
   return typeof effort === 'string' && /^(?:[a-z][a-z0-9_-]{0,29})?$/.test(effort);
+}
+
+function validConcurrency(concurrency) {
+  return Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 10;
 }
 
 async function readReviewPreferences() {
@@ -127,17 +135,21 @@ async function handleMessage(message, sender) {
   if (message?.type === 'clear-cache') return clearCache();
   if (message?.type === 'set-cache-limit') return setCacheLimit(message.limitMB);
   if (message?.type === 'save-settings') {
-    if (Object.keys(message).some(key => !['type', 'provider', 'model', 'effort'].includes(key))) {
-      throw new Error('Only provider, model and effort preferences can be saved. Sign in through the selected CLI.');
+    if (Object.keys(message).some(key => !['type', 'provider', 'model', 'effort', 'concurrency'].includes(key))) {
+      throw new Error('Only provider, model, effort and concurrency preferences can be saved. Sign in through the selected CLI.');
     }
     if (!['codex', 'claude'].includes(message.provider)) throw new Error('Choose Codex or Claude Code.');
     if (!validModel(message.model)) {
       throw new Error('Enter a valid model ID, or leave it blank to use the selected CLI’s default.');
     }
     if (!validEffort(message.effort)) throw new Error('Choose a valid reasoning effort.');
+    if (!validConcurrency(message.concurrency)) throw new Error('Choose a whole number from 1 to 10 files to classify at once.');
     await storageReady;
-    const settings = { provider: message.provider, model: message.model, effort: message.effort };
-    await chrome.storage.local.set({ reviewProvider: settings.provider, [`${settings.provider}Settings`]: { model: settings.model, effort: settings.effort } });
+    const settings = { provider: message.provider, model: message.model, effort: message.effort, concurrency: message.concurrency };
+    await chrome.storage.local.set({
+      reviewProvider: settings.provider, [`${settings.provider}Settings`]: { model: settings.model, effort: settings.effort },
+      classificationConcurrency: settings.concurrency
+    });
     return publicSettings(settings, true);
   }
   throw new Error('Unknown PRiorities request.');
@@ -356,7 +368,7 @@ function createSession(tabId, url, port) {
     if (session.disposed || session.checking || session.restoring || !session.settings || !session.initialized) return;
     if (!session.cancelled) {
       for (const entry of session.files.values()) {
-        if (session.active === 3) break;
+        if (session.active === session.settings.concurrency) break;
         if (entry.state !== 'queued') continue;
         session.active++;
         void classifyFile(session, entry);
