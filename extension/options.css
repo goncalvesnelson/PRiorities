@@ -47,7 +47,7 @@ a:hover { text-decoration: underline; }
 .prompt-settings button { margin-top: 8px; }
 #review-preferences-status { font-size: 13px; min-height: 1.6em; }
 #review-preferences-status[data-error="true"] { color: #a23137; }
-#cache-limit { max-width: 140px; }
+#cache-limit, #concurrency { max-width: 140px; }
 #cache-usage-bar { width: 100%; height: 8px; accent-color: #2459b7; margin-bottom: 20px; }
 #cache-status { min-height: 1.6em; font-size: 13px; color: #22623e; margin-bottom: 0; }
 #cache-status[data-error="true"] { color: #a23137; }

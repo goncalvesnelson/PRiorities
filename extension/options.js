@@ -6,6 +6,7 @@ const model = document.querySelector('#model');
 const customModel = document.querySelector('#custom-model');
 const customField = document.querySelector('#custom-model-field');
 const effort = document.querySelector('#effort');
+const concurrency = document.querySelector('#concurrency');
 const saveButton = document.querySelector('#save');
 const checkButton = document.querySelector('#check-connection');
 const connectionStatus = document.querySelector('#connection-status');
@@ -31,6 +32,7 @@ function setLoading(value) {
   model.disabled = value;
   customModel.disabled = value || customField.hidden;
   effort.disabled = value || effort.options.length < 2;
+  concurrency.disabled = value;
   saveButton.disabled = value;
   checkButton.disabled = value;
 }
@@ -93,6 +95,8 @@ async function loadSettings(selectionProvider) {
     if (version !== requestVersion) return;
     selectedProvider = settings.provider;
     provider.value = selectedProvider;
+    // Provider switches and connection checks keep an unsaved concurrency edit.
+    if (!selectionProvider) concurrency.value = settings.concurrency;
     renderProvider();
     renderConnection(settings);
     document.querySelector('#model-help').textContent = 'Loading models from your local CLI…';
@@ -127,7 +131,7 @@ form.addEventListener('submit', async event => {
   setLoading(true);
   provider.disabled = true;
   try {
-    const settings = await request({ type: 'save-settings', provider: selectedProvider, ...chosen });
+    const settings = await request({ type: 'save-settings', provider: selectedProvider, ...chosen, concurrency: Number(concurrency.value) });
     if (version !== requestVersion) return;
     drafts.set(selectedProvider, { model: settings.model, effort: settings.effort });
     renderConnection(settings);

@@ -25,6 +25,36 @@ function disclosure(label, className = '') {
   return node;
 }
 
+function appendInline(parent, text) {
+  let index = 0;
+  for (const match of text.matchAll(/`([^`\n]+)`|\*\*([^*\n]+)\*\*/g)) {
+    parent.append(text.slice(index, match.index));
+    if (match[1] === undefined) parent.append(appendInline(element('strong'), match[2]));
+    else parent.append(element('code', '', match[1]));
+    index = match.index + match[0].length;
+  }
+  parent.append(text.slice(index));
+  return parent;
+}
+
+function richText(tag, className, text) {
+  const node = element(tag, `rf-rich ${className}`.trim());
+  let block;
+  for (const line of text.trim().split('\n')) {
+    const item = /^\s*[-*]\s+(.*)/.exec(line);
+    if (!line.trim()) block = undefined;
+    else if (item) {
+      if (block?.tagName !== 'UL') node.append(block = element('ul'));
+      block.append(appendInline(element('li'), item[1].trim()));
+    } else {
+      if (block?.tagName === 'P') block.append(element('br'));
+      else node.append(block = element('p'));
+      appendInline(block, line.trim());
+    }
+  }
+  return node;
+}
+
 function isDiffPage() {
   return /^\/[^/]+\/[^/]+\/pull\/\d+\/(?:(?:files|changes)(?:\/|$)|commits\/[a-f0-9]{40}(?:\/|$))/.test(location.pathname);
 }
@@ -38,6 +68,31 @@ function rowSelected(row, excerpts) {
     const line = excerpt.side === 'before' ? row.oldLine : row.newLine;
     return line !== null && line >= excerpt.startLine && line <= excerpt.endLine;
   });
+}
+
+// Notes attach at the start of a changed block so removals and additions stay together.
+function noteAnchors(rows, excerpts) {
+  const blockEdge = (index, step) => {
+    while (rows[index].editId && rows[index + step]?.editId === rows[index].editId) index += step;
+    return index;
+  };
+  const spans = excerpts.map(excerpt => ({ excerpt, first: rows.findIndex(row => rowSelected(row, [excerpt])), last: rows.findLastIndex(row => rowSelected(row, [excerpt])) }))
+    .filter(span => span.first >= 0)
+    .map(span => ({ ...span, first: blockEdge(span.first, -1), last: blockEdge(span.last, 1) }))
+    .sort((a, b) => a.first - b.first);
+  const anchors = new Map();
+  let run;
+  for (const span of spans) {
+    if (run && span.first <= run.last) {
+      run.last = Math.max(run.last, span.last);
+      run.excerpts.push(span.excerpt);
+      continue;
+    }
+    run = { last: span.last, excerpts: [span.excerpt] };
+    anchors.set(rows[span.first], run.excerpts);
+  }
+  for (const notes of anchors.values()) notes.sort((a, b) => excerpts.indexOf(a) - excerpts.indexOf(b));
+  return anchors;
 }
 
 function guideFileRows(snapshot, file) {
@@ -158,6 +213,7 @@ export function startReviewUI() {
   const observedReviews = new Map();
   let reviewControls = new Map();
   const expanded = new Set();
+  const openedReviewedFiles = new Set();
   const hiddenSurfaces = new Set();
   let selectedTopicId;
   let selectedFile;
@@ -438,6 +494,7 @@ export function startReviewUI() {
     fileFilter = 'all';
     fileStates.clear();
     expanded.clear();
+    openedReviewedFiles.clear();
     removeFilePanels();
     fileProgress.hidden = true;
     fileListOpen = false;
@@ -581,6 +638,7 @@ export function startReviewUI() {
       readReviewControls();
       renderFileProgress();
     });
+    label.dataset.path = path;
     label.append(input, element('span', '', 'Reviewed by you'), element('span', 'rf-review-unavailable'));
     updateReviewToggle(label, path);
     return label;
@@ -635,13 +693,21 @@ export function startReviewUI() {
       const replacement = focused.tagName === 'INPUT' ? row?.querySelector('input') : [...row?.querySelectorAll('button') ?? []].find(button => button.textContent === focused.textContent);
       (replacement ?? filters.querySelector('[aria-pressed="true"]')).focus({ preventScroll: true });
     }
-    for (const node of result.querySelectorAll('.rf-reviewed-toggle')) updateReviewToggle(node, node.closest('.rf-guide-file').dataset.path);
+    for (const node of result.querySelectorAll('.rf-reviewed-toggle')) updateReviewToggle(node, node.dataset.path);
+    for (const card of result.querySelectorAll('.rf-guide-file')) updateGuideFile(card);
     renderFilePanels();
   }
 
   function editLocations() {
     const classifications = new Map(analysis.classifications.map(entry => [entry.editId, entry]));
     return new Map(snapshot.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit').map(edit => [edit.id, { file, edit, classification: classifications.get(edit.id) }]))));
+  }
+
+  function changeDelta(path, topic, locations) {
+    const rows = [...locations.values()].filter(entry => entry.file.path === path && (!topic || topic.editIds.includes(entry.edit.id))).flatMap(entry => entry.edit.rows);
+    if (!rows.length) return 'cited evidence';
+    const count = type => rows.filter(row => row.type === type).length;
+    return `+${count('add')} −${count('delete')}`;
   }
 
   function removeFilePanels() {
@@ -999,9 +1065,18 @@ export function startReviewUI() {
     renderAnalysis();
     updateSurface();
     renderControls();
-    const target = path ? [...result.querySelectorAll('.rf-guide-file')].find(file => file.dataset.path === path) : result.querySelector('.rf-section-title');
-    target?.focus({ preventScroll: true });
-    target?.scrollIntoView({ block: 'start', behavior: 'auto' });
+    if (path) {
+      revealGuideFile(path);
+      return;
+    }
+    result.querySelector('.rf-section-title')?.focus({ preventScroll: true });
+    result.querySelector('.rf-guide-section')?.scrollIntoView({ block: 'start', behavior: 'auto' });
+  }
+
+  function revealGuideFile(path) {
+    const card = [...result.querySelectorAll('.rf-guide-file')].find(file => file.dataset.path === path);
+    card?.focus({ preventScroll: true });
+    card?.scrollIntoView({ block: 'start', behavior: 'auto' });
   }
 
   function selectFile(path) {
@@ -1071,7 +1146,7 @@ export function startReviewUI() {
     return link;
   }
 
-  function blockContent(path, rows, topic, locations) {
+  function blockContent(path, rows, topic, locations, notes) {
     const content = element('div', 'rf-code-run');
     const id = rows[0].editId;
     const owner = id && analysis.topics.find(entry => entry.editIds.includes(id));
@@ -1090,9 +1165,23 @@ export function startReviewUI() {
       content.append(label);
     } else if (!id && protectedFile) content.append(element('div', 'rf-context-label', 'Protected context'));
     if (rows[0].outsideDiff) content.append(element('div', 'rf-context-label', 'Captured source outside the diff'));
-    if (classification?.uncertainty) content.append(element('p', 'rf-uncertainty', classification.uncertainty));
+    if (classification?.uncertainty) content.append(richText('div', 'rf-uncertainty', classification.uncertainty));
+    for (const excerpt of notes) content.append(richText('div', 'rf-code-note', excerpt.note));
     content.append(renderRows(rows, path));
     return content;
+  }
+
+  function updateGuideFile(card) {
+    const path = card.dataset.path;
+    const reviewed = observedReviews.get(path) === true;
+    if (!reviewed) openedReviewedFiles.delete(path);
+    const collapsed = reviewed && !openedReviewedFiles.has(path);
+    card.dataset.collapsed = String(collapsed);
+    card.querySelector('.rf-guide-file-body').hidden = collapsed;
+    const toggle = card.querySelector('.rf-collapse-toggle');
+    toggle.hidden = !reviewed;
+    toggle.textContent = collapsed ? 'Show code' : 'Hide code';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
   }
 
   function renderGuideFile(file, topic, locations) {
@@ -1100,56 +1189,82 @@ export function startReviewUI() {
     card.dataset.path = file.path;
     card.tabIndex = -1;
     const heading = element('div', 'rf-guide-file-heading');
-    heading.append(element('strong', '', file.path), reviewToggle(file.path));
-    const links = element('div', 'rf-file-links');
+    const collapse = button('', () => {
+      if (openedReviewedFiles.has(file.path)) openedReviewedFiles.delete(file.path);
+      else openedReviewedFiles.add(file.path);
+      updateGuideFile(card);
+    }, 'rf-link-button rf-collapse-toggle');
+    const name = element('span', 'rf-file-title');
+    name.title = file.path;
+    name.append(element('strong', 'rf-file-name', file.path.split('/').at(-1)));
+    if (file.path.includes('/')) name.append(' ', element('span', 'rf-file-dir', file.path.slice(0, file.path.lastIndexOf('/') + 1)));
+    const links = element('span', 'rf-file-links');
     const excerpts = topic?.excerpts.filter(excerpt => excerpt.path === file.path) ?? [];
     links.append(button('Show in diff', () => void showNativeFile(file.path, excerpts[0]), 'rf-link-button'));
     const edits = file.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit'));
     const capturedRows = file.hunks.flatMap(hunk => hunk.items.flatMap(item => item.type === 'edit' ? item.rows : [item]));
     for (const [side, key] of [['before', 'oldLine'], ['after', 'newLine']]) {
       const first = capturedRows.find(row => row[key] !== null);
-      if (first) links.append(sourceAnchor(file.path, side, first[key], `Open ${side} source at this commit`));
+      if (!first) continue;
+      const source = sourceAnchor(file.path, side, first[key], side === 'before' ? 'Before' : 'After');
+      source.title = `Open ${side} source at this commit`;
+      source.setAttribute('aria-label', source.title);
+      links.append(source);
     }
-    card.append(heading, links);
+    heading.append(name, element('span', 'rf-file-delta', changeDelta(file.path, topic, locations)), reviewToggle(file.path), collapse, links);
+    const body = element('div', 'rf-guide-file-body');
+    card.append(heading, body);
+    updateGuideFile(card);
     let rows;
     try { rows = guideFileRows(snapshot, file); }
     catch (failure) {
-      card.append(element('p', 'rf-error', failure.message));
+      body.append(element('p', 'rf-error', failure.message));
       return card;
     }
-    if (!rows.length) card.append(element('p', 'rf-caption', 'No text rows were captured for this file. Use Full diff to inspect it.'));
+    if (!rows.length) body.append(element('p', 'rf-caption', 'No text rows were captured for this file. Use Full diff to inspect it.'));
     const protectedFile = isProtectedPath(file.path, reviewPreferences?.protectedPaths ?? []);
     const visibleEdits = new Set(edits.filter(edit => !topic || topic.editIds.includes(edit.id) || edit.rows.some(row => rowSelected(row, excerpts)) || locations.get(edit.id)?.classification?.kinds.some(kind => kind === 'unknown' || reviewPreferences?.alwaysShow.includes(kind))).map(edit => edit.id));
     const kept = row => !topic || !foldOtherCode || protectedFile || (row.editId ? visibleEdits.has(row.editId) : rowSelected(row, excerpts));
+    const notes = noteAnchors(rows, excerpts);
     let hidden = [];
     function appendRuns(parent, source) {
       for (let index = 0; index < source.length;) {
         const first = source[index];
         const run = [first];
         index++;
-        while (index < source.length && source[index].editId === first.editId && source[index].outsideDiff === first.outsideDiff) run.push(source[index++]);
-        parent.append(blockContent(file.path, run, topic, locations));
+        while (index < source.length && source[index].editId === first.editId && source[index].outsideDiff === first.outsideDiff && !notes.has(source[index])) run.push(source[index++]);
+        parent.append(blockContent(file.path, run, topic, locations, notes.get(first) ?? []));
       }
     }
     function flushHidden() {
       if (!hidden.length) return;
-      const key = JSON.stringify([topic?.id, file.path, rowKey(hidden[0]), rowKey(hidden.at(-1))]);
-      const fold = disclosure(`${hidden.length} other lines`, 'rf-fold');
       const owners = analysis.topics.filter(entry => hidden.some(row => row.editId && entry.editIds.includes(row.editId)));
-      const references = element('div', 'rf-fold-sections');
-      for (const owner of owners) references.append(button(owner.title, () => selectTopic(owner.id, file.path), 'rf-link-button'));
-      fold.querySelector('summary').append(document.createTextNode(owners.length ? ` · ${owners.map(owner => owner.title).join('; ')}` : ' · surrounding context'));
+      // A fold row costs as much space as the few context lines it would hide.
+      if (!owners.length && hidden.length <= 3) {
+        appendRuns(body, hidden);
+        hidden = [];
+        return;
+      }
+      const key = JSON.stringify([topic?.id, file.path, rowKey(hidden[0]), rowKey(hidden.at(-1))]);
+      const fold = disclosure(`${hidden.length} ${owners.length ? 'other' : 'unchanged'} ${hidden.length === 1 ? 'line' : 'lines'}`, 'rf-fold');
       appendRuns(fold, hidden);
       fold.open = expanded.has(key);
       fold.addEventListener('toggle', () => { if (fold.open) expanded.add(key); else expanded.delete(key); });
-      card.append(references, fold);
+      const group = element('div', 'rf-fold-group');
+      group.append(fold);
+      if (owners.length) {
+        const references = element('span', 'rf-fold-sections', 'Changes from');
+        for (const owner of owners) references.append(button(owner.title, () => selectTopic(owner.id, file.path), 'rf-link-button'));
+        group.append(references);
+      }
+      body.append(group);
       hidden = [];
     }
     for (let index = 0; index < rows.length;) {
       const row = rows[index];
       if (row.type === 'marker' && !row.editId) {
         flushHidden();
-        card.append(element('div', 'rf-hunk-header', row.text));
+        body.append(element('div', 'rf-hunk-header', row.text));
         index++;
       } else if (!kept(row)) {
         hidden.push(row);
@@ -1159,7 +1274,7 @@ export function startReviewUI() {
         const run = [row];
         index++;
         while (index < rows.length && (rows[index].type !== 'marker' || rows[index].editId) && kept(rows[index]) && rows[index].editId === row.editId && rows[index].outsideDiff === row.outsideDiff) run.push(rows[index++]);
-        appendRuns(card, run);
+        appendRuns(body, run);
       }
     }
     flushHidden();
@@ -1172,7 +1287,7 @@ export function startReviewUI() {
     const summary = element('div', 'rf-overview');
     const reviews = analysis.topics.filter(topic => topic.priority === 'review').length;
     summary.append(element('h2', 'rf-overview-title', `${reviews} review ${reviews === 1 ? 'decision' : 'decisions'}`));
-    summary.append(element('p', 'rf-summary', analysis.summary));
+    summary.append(richText('div', 'rf-summary', analysis.summary));
     summary.append(element('p', 'rf-caption', 'Mark each file Reviewed by you when you finish it. Comments, draft reviews and approval stay in Full diff.'));
     if (!reviews) summary.append(element('p', 'rf-caption', 'All sections are supporting. You can inspect every captured change.'));
     const excluded = generatedCount();
@@ -1185,33 +1300,67 @@ export function startReviewUI() {
     }
     const nav = element('nav', 'rf-section-overview');
     nav.setAttribute('aria-label', 'Guide sections');
+    const sections = element('ol', 'rf-section-list');
     for (const [index, topic] of analysis.topics.entries()) {
-      const control = button(`${index + 1}. ${topic.title}`, () => selectTopic(topic.id), 'rf-section-link');
+      const control = button('', () => selectTopic(topic.id), 'rf-section-link');
       control.dataset.topicId = topic.id;
       control.setAttribute('aria-current', String(!selectedFile && topic.id === selectedTopicId));
-      control.append(element('span', 'rf-priority', topic.priority === 'review' ? 'Review' : 'Supporting'));
-      nav.append(control);
+      control.append(appendInline(element('span', 'rf-section-name', `${index + 1}. `), topic.title), element('span', 'rf-priority', topic.priority === 'review' ? 'Review' : 'Supporting'));
+      const item = element('li');
+      item.append(control);
+      sections.append(item);
     }
+    nav.append(sections);
     const topic = selectedFile ? null : analysis.topics.find(topic => topic.id === selectedTopicId) ?? analysis.topics[0];
+    const index = analysis.topics.indexOf(topic);
+    const position = index < 0 ? 'Not analyzed' : `Section ${index + 1} of ${analysis.topics.length}`;
+    const step = (label, offset) => {
+      const control = button(label, () => selectTopic(analysis.topics[index + offset].id));
+      control.disabled = index < 0 || !analysis.topics[index + offset];
+      return control;
+    };
+    const locations = editLocations();
+    const paths = selectedFile ? [selectedFile] : topic ? [...new Set([...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)])] : [];
     const section = element('section', 'rf-guide-section');
     if (topic) section.dataset.topicId = topic.id;
     const explanation = element('div', 'rf-guide-explanation');
-    const title = element('h2', 'rf-section-title', topic?.title ?? 'Captured changes · not analyzed');
+    const sectionNav = element('nav', 'rf-section-nav');
+    sectionNav.setAttribute('aria-label', 'Section navigation');
+    sectionNav.append(element('span', 'rf-caption', position), step('Previous', -1), step('Next', 1), button('Full diff', () => { setMode('full'); full.focus(); }));
+    const title = appendInline(element('h2', 'rf-section-title'), topic?.title ?? 'Captured changes · not analyzed');
     title.tabIndex = -1;
-    explanation.append(title);
+    explanation.append(sectionNav, title);
     if (topic) {
-      for (const [field, label] of [['before', 'Before'], ['after', 'After'], ['reason', 'Why it matters'], ['question', 'Review question'], ['uncertainty', 'Evidence limits'], ['evidenceSummary', 'Where to look']]) {
-        if (!topic[field]) continue;
-        explanation.append(element('h3', '', label), element('p', `rf-${field === 'after' ? 'change-explanation' : field}`, topic[field]));
+      const files = element('ul', 'rf-section-files');
+      for (const path of paths) {
+        const jump = button(path.split('/').at(-1), () => revealGuideFile(path), 'rf-link-button');
+        jump.title = path;
+        jump.setAttribute('aria-label', path);
+        const item = element('li');
+        item.append(jump, element('span', 'rf-file-delta', changeDelta(path, topic, locations)), reviewToggle(path));
+        files.append(item);
+      }
+      explanation.append(element('h3', '', 'Files in this section'), files);
+      for (const [field, label] of [['before', 'Before'], ['after', 'After'], ['reason', 'Why it matters']]) {
+        explanation.append(element('h3', '', label), richText('div', `rf-${field === 'after' ? 'change-explanation' : field}`, topic[field]));
+      }
+      if (topic.questions.length) {
+        const questions = element('ul', 'rf-questions');
+        for (const question of topic.questions) questions.append(richText('li', '', question));
+        explanation.append(element('h3', '', 'Review questions'), questions);
+      }
+      if (topic.uncertainty) {
+        const limits = disclosure('Evidence limits', 'rf-limits');
+        limits.append(richText('div', 'rf-uncertainty', topic.uncertainty));
+        explanation.append(limits);
       }
       const details = disclosure('Change classifications', 'rf-evidence');
-      const locations = editLocations();
       for (const id of topic.editIds) {
         const entry = locations.get(id);
         const detail = element('div', 'rf-edit');
         detail.dataset.editId = id;
-        detail.append(element('strong', '', entry.file.path), element('p', 'rf-change-kind', `Change type: ${entry.classification.kinds.join(', ')}`), element('p', '', entry.classification.reason));
-        if (entry.classification.uncertainty) detail.append(element('p', 'rf-uncertainty', entry.classification.uncertainty));
+        detail.append(element('strong', '', entry.file.path), element('p', 'rf-change-kind', `Change type: ${entry.classification.kinds.join(', ')}`), richText('div', '', entry.classification.reason));
+        if (entry.classification.uncertainty) detail.append(richText('div', 'rf-uncertainty', entry.classification.uncertainty));
         details.append(detail);
       }
       explanation.append(details);
@@ -1228,24 +1377,16 @@ export function startReviewUI() {
     });
     foldLabel.append(foldInput, document.createTextNode('Fold other code'));
     code.append(foldLabel);
-    const locations = editLocations();
-    const paths = selectedFile ? [selectedFile] : topic ? [...new Set([...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)])] : [];
     for (const path of paths) code.append(renderGuideFile(snapshot.files.find(file => file.path === path), topic, locations));
     section.append(explanation, code);
     const sequence = element('div', 'rf-section-sequence');
-    const index = analysis.topics.indexOf(topic);
-    const previous = button('Previous section', () => selectTopic(analysis.topics[index - 1].id));
-    const next = button('Next section', () => selectTopic(analysis.topics[index + 1].id));
-    previous.disabled = index <= 0;
-    next.disabled = index < 0 || index === analysis.topics.length - 1;
-    sequence.append(previous, element('span', 'rf-caption', index < 0 ? 'Not analyzed' : `Section ${index + 1} of ${analysis.topics.length}`), next);
+    sequence.append(step('Previous section', -1), element('span', 'rf-caption', position), step('Next section', 1));
     const details = disclosure('Analysis details', 'rf-review-details');
     if (cacheMessage) details.append(element('p', 'rf-cache-detail', cacheMessage));
     details.append(element('p', 'rf-provenance', `Analyzed ${snapshot.baseSha.slice(0, 8)}…${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}, effort: ${reviewEffort || 'model default'}.`));
     for (const warning of snapshot.warnings ?? []) details.append(element('p', '', warning));
     result.append(summary, nav, section, sequence, details);
   }
-
 
   function mount() {
     if (!isDiffPage()) return;

@@ -58,6 +58,6 @@ export const changes = {
   page(value = route, unified = false) {
     const data = { payload: { pullRequestsChangesRoute: value, userViewSettings: { splitPreference: 'split' } } };
     const files = (unified ? unifiedTables : splitTables).replaceAll('<section', '<div class="fixture-diff-entry"><section').replaceAll('</section>', '</section></div>');
-    return `<!doctype html><title>Synthetic Changes route fixture</title><meta name="fetch-nonce" content="${fetchNonce}"><meta name="release" content="${release}"><main><h1 class="js-issue-title">Synthetic Changes route fixture</h1><div data-testid="diff-content"><div data-testid="progressive-diffs-list">${files}</div></div></main><script type="application/json" data-target="react-app.embeddedData">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`;
+    return `<!doctype html><title>Synthetic Changes route fixture</title><meta name="fetch-nonce" content="${fetchNonce}"><meta name="release" content="${release}"><style>.d-flex{display:flex!important}</style><main><h1 class="js-issue-title">Synthetic Changes route fixture</h1><div data-testid="diff-content"><div data-testid="progressive-diffs-list" class="d-flex flex-column">${files}</div></div></main><script type="application/json" data-target="react-app.embeddedData">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`;
   }
 };

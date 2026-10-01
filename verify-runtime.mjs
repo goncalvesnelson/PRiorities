@@ -22,9 +22,9 @@ const assessment = {
   topics: [{
     id: 'missing-account', priority: 'review', title: 'Handle the new null return',
     reason: 'The guard changes the missing-account result.', before: 'Missing account throws.',
-    after: 'Missing account returns null.', question: 'Do callers accept null?',
-    uncertainty: 'Caller source is not provided.', evidenceSummary: 'The new guard introduces a null return.',
-    editIds: ['1-1-1'], excerpts: [{ path: 'account.js', side: 'after', startLine: 1, endLine: 1 }]
+    after: 'Missing account returns null.', questions: ['Do callers accept null?'],
+    uncertainty: 'Caller source is not provided.',
+    editIds: ['1-1-1'], excerpts: [{ path: 'account.js', side: 'after', startLine: 1, endLine: 1, note: 'The new guard returns null.' }]
   }]
 };
 const classifications = { edits: [{
@@ -275,26 +275,33 @@ try {
   await import('./extension/background.js');
   assert.equal(accessLevel, 'TRUSTED_CONTEXTS');
   nativeHandler = () => ({ type: 'status', authenticated: true });
-  assert.deepEqual(await sendMessage({ type: 'get-settings' }, contentSender), { configured: true, provider: 'codex', model: '', effort: '' });
-  assert.ok(storageReads.every(key => ['reviewProvider', 'codexSettings'].includes(key)), 'Only provider and model preferences are read.');
-  assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '' }, contentSender)).error, /Only the settings page/);
+  assert.deepEqual(await sendMessage({ type: 'get-settings' }, contentSender), { configured: true, provider: 'codex', model: '', effort: '', concurrency: 6 });
+  assert.ok(storageReads.every(key => ['reviewProvider', 'codexSettings', 'classificationConcurrency'].includes(key)), 'Only provider, model and concurrency preferences are read.');
+  assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6 }, contentSender)).error, /Only the settings page/);
   assert.match((await sendMessage({ type: 'get-settings' }, { ...contentSender, frameId: 1 })).error, /cannot use PRiorities/);
   assert.match((await sendMessage({ type: 'get-settings' }, { ...contentSender, url: 'https://github.com.attacker.example/example/repository/pull/7' })).error, /cannot use PRiorities/);
-  assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', apiKey: 'rejected-credential', model: '', effort: '' })).error, /Only provider, model and effort preferences/);
+  assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', apiKey: 'rejected-credential', model: '', effort: '' })).error, /Only provider, model, effort and concurrency preferences/);
   assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: 'model; echo bad', effort: '' })).error, /valid model/);
+  for (const concurrency of [0, 11, 2.5, '6', null, undefined]) {
+    assert.match((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency })).error, /whole number from 1 to 10/);
+  }
+  assert.deepEqual(storage, {}, 'Rejected settings must not be stored.');
   assert.match((await sendMessage({ type: 'delete-key' })).error, /Unknown/);
-  assert.equal((await sendMessage({ type: 'save-settings', provider: 'codex', model: 'openai/codex-test-model', effort: '' })).configured, true);
+  assert.equal((await sendMessage({ type: 'save-settings', provider: 'codex', model: 'openai/codex-test-model', effort: '', concurrency: 6 })).configured, true);
   assert.deepEqual(storage.codexSettings, { model: 'openai/codex-test-model', effort: '' });
   assert.equal((await sendMessage({ type: 'get-settings' }, contentSender)).model, 'openai/codex-test-model', 'Model IDs accepted by the native helper must survive saving and reading settings.');
-  assert.equal((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '' })).configured, true);
-  assert.deepEqual(storage, { reviewProvider: 'codex', codexSettings: { model: '', effort: '' } });
+  assert.equal((await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6 })).configured, true);
+  assert.deepEqual(storage, { reviewProvider: 'codex', codexSettings: { model: '', effort: '' }, classificationConcurrency: 6 });
+  storage.classificationConcurrency = 0;
+  assert.equal((await sendMessage({ type: 'get-settings' }, contentSender)).concurrency, 6, 'An invalid stored limit falls back to the default.');
+  storage.classificationConcurrency = 6;
   assert.match((await sendMessage({ type: 'get-settings', provider: 'claude' }, contentSender)).error, /Only the settings page/);
   for (const invalid of ['', 'anthropic', '../claude', null]) {
     assert.match((await sendMessage({ type: 'get-settings', provider: invalid })).error, /Choose Codex or Claude Code/);
     assert.match((await sendMessage({ type: 'save-settings', provider: invalid, model: '', effort: '' })).error, /Choose Codex or Claude Code/);
   }
   const preview = await sendMessage({ type: 'get-settings', provider: 'claude' });
-  assert.deepEqual(preview, { configured: true, provider: 'claude', model: '', effort: '' });
+  assert.deepEqual(preview, { configured: true, provider: 'claude', model: '', effort: '', concurrency: 6 });
   assert.equal(storage.reviewProvider, 'codex', 'Previewing a connection must not switch new reviews.');
   assert.equal(nativePorts.at(-1).name, 'com.review_focus.claude');
   nativeHandler = (_request, helper) => helper.hostDisconnect('Specified native messaging host not found.');
@@ -302,7 +309,7 @@ try {
   assert.equal(missingHelper.configured, false);
   assert.match(missingHelper.connectionError, /helper is not installed/);
   nativeHandler = () => ({ type: 'status', authenticated: false, message: 'Run codex login.' });
-  assert.deepEqual(await sendMessage({ type: 'get-settings' }), { configured: false, provider: 'codex', model: '', effort: '', connectionError: 'Run codex login.' });
+  assert.deepEqual(await sendMessage({ type: 'get-settings' }), { configured: false, provider: 'codex', model: '', effort: '', concurrency: 6, connectionError: 'Run codex login.' });
   await sendMessage({ type: 'open-settings' }, contentSender);
   await onClicked.emit();
   assert.equal(optionsOpened, 2);
@@ -337,7 +344,7 @@ try {
 
     storage.codexSettings = { model: 'codex-new-preference', effort: '' };
     connectionClock.tick(59_999);
-    assert.deepEqual(await sendMessage({ type: 'get-settings', refreshConnection: false }, otherTab), { provider: 'codex', model: 'codex-new-preference', effort: '', configured: true });
+    assert.deepEqual(await sendMessage({ type: 'get-settings', refreshConnection: false }, otherTab), { provider: 'codex', model: 'codex-new-preference', effort: '', concurrency: 6, configured: true });
     assert.equal(statusCalls(), beforeInvalidRefresh + 1, 'Cached status must use the latest model without launching a helper.');
     nativeHandler = () => ({ type: 'status', authenticated: true });
     connectionClock.tick(1);
@@ -353,16 +360,16 @@ try {
     nativeHandler = () => ({ type: 'status', authenticated: true });
     assert.equal((await sendMessage({ type: 'get-settings', refreshConnection: false })).configured, true);
     assert.equal(statusCalls(), beforeInvalidRefresh + 4, 'Settings checks must bypass the cooldown.');
-    await sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-saved-latest', effort: '' });
+    await sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-saved-latest', effort: '', concurrency: 6 });
     assert.equal(statusCalls(), beforeInvalidRefresh + 5, 'Saving settings must check the connection again.');
 
     storage.reviewProvider = 'claude';
     storage.claudeSettings = { model: 'claude-current-model', effort: '' };
     nativeHandler = () => ({ type: 'status', authenticated: false, message: 'Claude needs login.' });
-    assert.deepEqual(await sendMessage({ type: 'get-settings' }, otherTab), { provider: 'claude', model: 'claude-current-model', effort: '', configured: false, connectionError: 'Claude needs login.' });
+    assert.deepEqual(await sendMessage({ type: 'get-settings' }, otherTab), { provider: 'claude', model: 'claude-current-model', effort: '', concurrency: 6, configured: false, connectionError: 'Claude needs login.' });
     assert.equal(nativePorts.at(-1).name, 'com.review_focus.claude');
     storage.reviewProvider = 'codex';
-    assert.deepEqual(await sendMessage({ type: 'get-settings' }, contentSender), { provider: 'codex', model: 'codex-saved-latest', effort: '', configured: true });
+    assert.deepEqual(await sendMessage({ type: 'get-settings' }, contentSender), { provider: 'codex', model: 'codex-saved-latest', effort: '', concurrency: 6, configured: true });
     assert.equal(statusCalls(), beforeInvalidRefresh + 6, 'Changing providers must not mix or discard their independent status caches.');
 
     nativeHandler = (_request, helper) => helper.hostDisconnect('Specified native messaging host not found.');
@@ -396,7 +403,7 @@ try {
       const firstUncachedTab = sendMessage({ type: 'get-settings' }, contentSender);
       const secondUncachedTab = sendMessage({ type: 'get-settings' }, otherTab);
       await until(() => uncachedStatus, 'Unavailable session storage must still permit a connection check.');
-      const savingWithoutCache = sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-without-cooldown-cache', effort: '' });
+      const savingWithoutCache = sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-without-cooldown-cache', effort: '', concurrency: 6 });
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(statusCalls(), beforeUncachedStatus + 1, 'Unavailable cooldown storage must preserve shared in-flight checks.');
       await uncachedStatus.onMessage.emit({ type: 'status', authenticated: true });
@@ -405,7 +412,7 @@ try {
       assert.deepEqual(storage.codexSettings, { model: 'codex-without-cooldown-cache', effort: '' });
       nativeHandler = () => ({ type: 'status', authenticated: false, message: 'Please sign in again.' });
       assert.deepEqual(await sendMessage({ type: 'get-settings', refreshConnection: true }, contentSender), {
-        provider: 'codex', model: 'codex-without-cooldown-cache', effort: '', configured: false, connectionError: 'Please sign in again.'
+        provider: 'codex', model: 'codex-without-cooldown-cache', effort: '', concurrency: 6, configured: false, connectionError: 'Please sign in again.'
       }, 'A cache write failure must not replace the actual CLI connection result.');
     } finally {
       chrome.storage.session.get = savedSessionGet;
@@ -498,8 +505,8 @@ try {
     ],
     topics: [{ ...assessment.topics[0], id: 'services-bump', priority: 'supporting', title: 'Update the services dependency',
       reason: 'The import and declared module version match. The external implementation remains unavailable.',
-      before: 'The client uses services v109.', after: 'The client uses services v118.', question: '',
-      uncertainty: 'The external services implementation is not supplied.', evidenceSummary: 'client.go and go.mod both use services/v118.',
+      before: 'The client uses services v109.', after: 'The client uses services v118.', questions: [],
+      uncertainty: 'The external services implementation is not supplied.',
       editIds: dependencyInventory.edits.map(edit => edit.editId), excerpts: []
     }]
   };
@@ -599,12 +606,23 @@ try {
   const largeAssessment = { summary: 'Check missing-account handling across related callers.', topics: largeSnapshot.files.map((file, index) => ({
     ...assessment.topics[0], id: `account-decision-${index}`,
     editIds: [file.hunks[0].items[0].id],
-    excerpts: [{ path: file.path, side: 'after', startLine: 1, endLine: 3 }]
+    excerpts: [{ path: file.path, side: 'after', startLine: 1, endLine: 3, note: 'The guard and its caller.' }]
   })) };
   const largeResponse = stagedResponses(largeClassifications, largeAssessment);
-  nativeHandler = largeResponse;
+  delete storage.classificationConcurrency;
+  const largePending = [];
+  nativeHandler = (request, helper) => { largePending.push({ request, helper }); };
   const beforeLargeReview = requests.length;
   const largeReview = await beginReview(largeSnapshot);
+  await until(() => largePending.length === 6, 'Six independent helpers should start by default.');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length - beforeLargeReview, 6, 'Only six file classifications may be active by default.');
+  assert.equal(nativePorts.filter(helper => !helper.disconnected).length, 6);
+  await largePending[0].helper.onMessage.emit(largeResponse(largePending[0].request));
+  await until(() => largePending.length === 7, 'A classified file must release one of the six default slots.');
+  assert.equal(nativePorts.filter(helper => !helper.disconnected).length, 6);
+  nativeHandler = largeResponse;
+  for (const held of largePending.filter(item => !item.helper.disconnected)) await held.helper.onMessage.emit(largeResponse(held.request));
   await waitForSettlement(largeReview);
   assert.equal(largeReview.messages.filter(message => message.state === 'classified').length, 30);
   const largeResult = largeReview.messages.at(-1);
@@ -615,8 +633,8 @@ try {
 
   const wideSnapshot = { ...snapshot, context: [{ path: 'account.js', side: 'after', text: Array.from({ length: 80 }, (_, index) => `supplied context ${index}`).join('\n') }] };
   const wideAssessment = { ...assessment, topics: [{ ...assessment.topics[0], excerpts: [
-    { path: 'account.js', side: 'after', startLine: 1, endLine: 40 },
-    ...Array.from({ length: 8 }, (_, index) => ({ path: 'account.js', side: 'after', startLine: 41 + index * 5, endLine: 45 + index * 5 }))
+    { path: 'account.js', side: 'after', startLine: 1, endLine: 40, note: 'The guard and its surrounding context.' },
+    ...Array.from({ length: 8 }, (_, index) => ({ path: 'account.js', side: 'after', startLine: 41 + index * 5, endLine: 45 + index * 5, note: `Supplied context ${index}.` }))
   ] }] };
   nativeHandler = stagedResponses(classifications, wideAssessment);
   const wideReview = await beginReview(wideSnapshot);
@@ -645,21 +663,25 @@ try {
   manyDecisions.context = consequentialChanges.map(([path, , after]) => ({ path, side: 'after', text: `${after}\n` }));
   manyDecisions.files.push({ path: 'logo.png', hunks: [] });
   const completeReview = { summary: 'Five independent contracts need attention.', topics: consequentialChanges.map(([path, before, after, question], index) => ({
-    ...assessment.topics[0], id: `decision-${index}`, title: question, before, after, question,
-    editIds: [`${index}-0-0`], excerpts: [{ path, side: 'after', startLine: 1, endLine: 1 }]
+    ...assessment.topics[0], id: `decision-${index}`, title: question, before, after, questions: [question],
+    editIds: [`${index}-0-0`], excerpts: [{ path, side: 'after', startLine: 1, endLine: 1, note: `The new ${path} behavior.` }]
   })) };
   const manyClassifications = { edits: consequentialChanges.map(([_path, before, after], index) => ({
     editId: `${index}-0-0`, kinds: ['behavior'], reason: `${before} becomes ${after}`, uncertainty: ''
   })) };
   const normalResponse = stagedResponses(manyClassifications, completeReview);
   const pending = [];
-  nativeHandler = (request, helper) => { pending.push({ request, helper }); };
+  nativeHandler = (request, helper) => {
+    if (request.type === 'status') return { type: 'status', authenticated: true };
+    pending.push({ request, helper });
+  };
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 2 });
   const beforeParallel = requests.length;
   const parallel = await beginReview(manyDecisions);
-  await until(() => pending.length === 3, 'Three independent helpers should start concurrently.');
+  await until(() => pending.length === 2, 'The saved limit of two helpers should start concurrently.');
   assert.deepEqual(parallel.messages.slice(0, 6).map(message => message.state), ['queued', 'queued', 'queued', 'queued', 'queued', 'skipped']);
-  assert.equal(nativePorts.filter(helper => !helper.disconnected).length, 3);
-  assert.equal(requests.length - beforeParallel, 3, 'Only three file classifications may be active.');
+  assert.equal(nativePorts.filter(helper => !helper.disconnected).length, 2);
+  assert.equal(requests.length - beforeParallel, 2, 'Only the saved two file classifications may be active.');
   for (const { request } of pending) {
     const evidence = JSON.parse(request.prompt.user);
     assert.equal(evidence.files.length, 1, 'File prompts must not repeat the entire PR.');
@@ -670,11 +692,15 @@ try {
     assert.equal(evidence.baseSha, manyDecisions.baseSha);
     assert.equal(evidence.headSha, manyDecisions.headSha);
   }
+  // The queue tests below keep this saved limit of three.
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 3 });
   const second = pending[1];
   await second.helper.onMessage.emit(normalResponse(second.request));
-  await until(() => pending.length === 4, 'A classified file must release a queue slot.');
-  assert.equal(JSON.parse(pending[3].request.prompt.user).files[0].path, 'retry.js');
-  assert.equal(nativePorts.filter(helper => !helper.disconnected).length, 3);
+  await until(() => pending.length >= 3, 'A classified file must release a queue slot.');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 3, 'A limit saved mid-analysis must not change the running session.');
+  assert.equal(JSON.parse(pending[2].request.prompt.user).files[0].path, 'tokens.js');
+  assert.equal(nativePorts.filter(helper => !helper.disconnected).length, 2);
   assert.deepEqual(parallel.messages.filter(message => message.state === 'classified').map(message => message.path), ['payments.js'], 'An out-of-order classification must be published immediately.');
   assert.equal(fileStates(parallel, 'authorization.js').at(-1), 'classifying');
   assert.equal(fileStates(parallel, 'consent.js').at(-1), 'queued');
@@ -683,7 +709,7 @@ try {
   await waitForSettlement(parallel);
   assert.equal(parallel.messages.at(-1).type, 'result');
   assert.equal(parallel.messages.at(-1).analysis.topics.filter(topic => topic.priority === 'review').length, 5, 'The display budget must not demote a fifth concern.');
-  assert.equal(requests.length - beforeParallel, 6, 'Five files require one classification each and one PR review; no-text files require none.');
+  assert.equal(requests.slice(beforeParallel).filter(request => request.type === 'analyze').length, 6, 'Five files require one classification each and one PR review; no-text files require none.');
   assert.deepEqual(fileStates(parallel, 'logo.png'), ['skipped']);
   assert.equal(JSON.parse(requests.at(-1).prompt.user).files.length, 6, 'The PR review must receive the full captured inventory.');
 
@@ -768,6 +794,9 @@ try {
     ['missing evidence', review => { review.topics[0].excerpts = []; }, /does not cite its changed code/],
     ['unread source', review => { review.topics[0].excerpts[0].startLine = 99; review.topics[0].excerpts[0].endLine = 99; }, /source that was not read/],
     ['unexplained deferral', review => { review.topics[0].priority = 'supporting'; review.topics[0].reason = ' '; }, /did not explain/],
+    ['review topic without questions', review => { review.topics[0].questions = []; }, /did not explain a review decision/],
+    ['blank review question', review => { review.topics[0].questions = [' ']; }, /invalid review questions/],
+    ['excerpt without note', review => { review.topics[0].excerpts[0].note = ' '; }, /missing its note/],
     ['invented edit', review => { review.topics[0].editIds = ['invented-edit']; }, /map each edit exactly once/],
     ['duplicate topics', review => { review.topics.push(structuredClone(review.topics[0])); }, /invalid review topics/],
     ['reversed excerpt', review => { review.topics[0].excerpts[0].startLine = 2; }, /invalid source excerpt/],
@@ -1309,8 +1338,8 @@ try {
   }
 
   nativeHandler = () => ({ type: 'status', authenticated: true });
-  await sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-saved-model', effort: '' });
-  assert.deepEqual(await sendMessage({ type: 'save-settings', provider: 'claude', model: 'claude-saved-model', effort: '' }), { configured: true, provider: 'claude', model: 'claude-saved-model', effort: '' });
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: 'codex-saved-model', effort: '', concurrency: 6 });
+  assert.deepEqual(await sendMessage({ type: 'save-settings', provider: 'claude', model: 'claude-saved-model', effort: '', concurrency: 6 }), { configured: true, provider: 'claude', model: 'claude-saved-model', effort: '', concurrency: 6 });
   assert.deepEqual(storage.codexSettings, { model: 'codex-saved-model', effort: '' });
   assert.deepEqual(storage.claudeSettings, { model: 'claude-saved-model', effort: '' });
   assert.equal((await sendMessage({ type: 'get-settings' }, contentSender)).provider, 'claude');
@@ -1336,7 +1365,7 @@ try {
   assert.match((await sendMessage({type:'save-review-preferences',preferences:{...customPreferences,classificationPrompt:'x'.repeat(12001)}})).error, /12,000/);
   assert.deepEqual((await sendMessage({type:'save-review-preferences',preferences:customPreferences})).preferences, customPreferences);
   assert.deepEqual((await sendMessage({type:'get-review-preferences'})).preferences, customPreferences);
-  await sendMessage({type:'save-settings',provider:'claude',model:'claude-saved-model',effort:'high'});
+  await sendMessage({type:'save-settings',provider:'claude',model:'claude-saved-model',effort:'high',concurrency:6});
 
   const beforePinnedProvider = nativePorts.length;
   let heldClaude;
@@ -1347,7 +1376,7 @@ try {
   const pinnedProviderReview = await beginReview(generatedSnapshot);
   await until(() => heldClaude, 'The chosen Claude provider should start the first file.');
   await sendMessage({type:'save-review-preferences',preferences:{...customPreferences,focus:'thorough',classificationPrompt:'Changed instructions.',prioritizationPrompt:'Changed priorities.'}});
-  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '' });
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 6 });
   await heldClaude.helper.onMessage.emit({ type: 'error', message: 'Synthetic classification failure.' });
   await waitForSettlement(pinnedProviderReview);
   assert.equal(fileStates(pinnedProviderReview, 'authorization.js').at(-1), 'failed');
@@ -1741,7 +1770,7 @@ try {
   }
   assert.ok(nativePorts.every(helper => helper.disconnected), 'Every native request must be cleaned up.');
   assert.ok(!JSON.stringify(requests).includes('apiKey'), 'No provider credentials belong in the native protocol.');
-  console.log('Runtime verified: shared per-provider connection cooldowns and optional storage failures, explicit refresh and worker restart persistence, saved-review failure reporting and recovery, three concurrent file classifications followed by one PR review, generated-file exclusion and explicit review, scoped PR reviews, late and concurrent opt-in, superseded check cancellation, isolated failure and retry, per-file timeouts, navigation and reload reconnection without repeated calls, detached completion and retained unsaved results, tab-close cleanup during initialization and active work, idle session heartbeats, pinned evidence, trusted settings and native cleanup. No live Codex calls.');
+  console.log('Runtime verified: shared per-provider connection cooldowns and optional storage failures, explicit refresh and worker restart persistence, saved-review failure reporting and recovery, six default and saved-limit concurrent file classifications followed by one PR review, generated-file exclusion and explicit review, scoped PR reviews, late and concurrent opt-in, superseded check cancellation, isolated failure and retry, per-file timeouts, navigation and reload reconnection without repeated calls, detached completion and retained unsaved results, tab-close cleanup during initialization and active work, idle session heartbeats, pinned evidence, trusted settings and native cleanup. No live Codex calls.');
 } finally {
   await Promise.all(reviewPorts.map(closeTab));
   globalThis.fetch = savedFetch;

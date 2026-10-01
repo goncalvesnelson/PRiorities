@@ -26,8 +26,8 @@ export const classificationSchema = {
 
 const excerptSchema = {
   type: 'object', additionalProperties: false,
-  required: ['path', 'side', 'startLine', 'endLine'],
-  properties: { path: textField, side: { type: 'string', enum: ['before', 'after'] }, startLine: { type: 'integer' }, endLine: { type: 'integer' } }
+  required: ['path', 'side', 'startLine', 'endLine', 'note'],
+  properties: { path: textField, side: { type: 'string', enum: ['before', 'after'] }, startLine: { type: 'integer' }, endLine: { type: 'integer' }, note: textField }
 };
 
 export const analysisSchema = {
@@ -38,11 +38,11 @@ export const analysisSchema = {
     topics: {
       type: 'array', items: {
         type: 'object', additionalProperties: false,
-        required: ['id', 'priority', 'title', 'reason', 'before', 'after', 'question', 'uncertainty', 'evidenceSummary', 'editIds', 'excerpts'],
+        required: ['id', 'priority', 'title', 'reason', 'before', 'after', 'questions', 'uncertainty', 'editIds', 'excerpts'],
         properties: {
           id: textField, priority: { type: 'string', enum: ['review', 'supporting'] },
           title: textField, reason: textField, before: textField, after: textField,
-          question: textField, uncertainty: textField, evidenceSummary: textField,
+          questions: { type: 'array', items: textField }, uncertainty: textField,
           editIds: { type: 'array', items: textField }, excerpts: { type: 'array', items: excerptSchema }
         }
       }
@@ -163,11 +163,12 @@ export function validateAnalysis(input, snapshot, initialClassifications = [], a
   const assigned = new Set();
   const topicIds = new Set();
   const topics = input.topics.map(topic => {
-    const fields = ['id', 'title', 'reason', 'before', 'after', 'question', 'uncertainty', 'evidenceSummary'];
+    const fields = ['id', 'title', 'reason', 'before', 'after', 'uncertainty'];
     if (!record(topic) || fields.some(field => typeof topic[field] !== 'string' || topic[field].length > 5000) || !/^[\w-]{1,100}$/.test(topic.id) || topicIds.has(topic.id)) throw new Error('The model returned invalid review topics. Try analyzing again.');
     topicIds.add(topic.id);
     if (!['review', 'supporting'].includes(topic.priority) || !Array.isArray(topic.editIds) || !topic.editIds.length || !Array.isArray(topic.excerpts)) throw new Error('The model returned invalid topic evidence. Try analyzing again.');
-    if (['title', 'reason', 'before', 'after', 'evidenceSummary'].some(field => !topic[field].trim()) || topic.priority === 'review' && !topic.question.trim()) throw new Error('The assessment did not explain a review decision. Try analyzing again.');
+    if (!Array.isArray(topic.questions) || topic.questions.some(question => typeof question !== 'string' || !question.trim() || question.length > 1000)) throw new Error('The model returned invalid review questions. Try analyzing again.');
+    if (['title', 'reason', 'before', 'after'].some(field => !topic[field].trim()) || topic.priority === 'review' && !topic.questions.length) throw new Error('The assessment did not explain a review decision. Try analyzing again.');
     let changedLines = 0;
     for (const id of topic.editIds) {
       if (typeof id !== 'string' || !edits.has(id) || assigned.has(id)) throw new Error('The assessment does not map each edit exactly once. Try analyzing again.');
@@ -176,6 +177,7 @@ export function validateAnalysis(input, snapshot, initialClassifications = [], a
     }
     const excerpts = topic.excerpts.map(excerpt => {
       if (!record(excerpt) || !validPath(excerpt.path) || !['before', 'after'].includes(excerpt.side) || !Number.isSafeInteger(excerpt.startLine) || !Number.isSafeInteger(excerpt.endLine) || excerpt.startLine < 1 || excerpt.endLine < excerpt.startLine) throw new Error('The model returned an invalid source excerpt. Try analyzing again.');
+      if (typeof excerpt.note !== 'string' || !excerpt.note.trim() || excerpt.note.length > 500) throw new Error('A source excerpt is missing its note. Try analyzing again.');
       const rows = sourceRows(snapshot, excerpt);
       return { ...excerpt, rows };
     });

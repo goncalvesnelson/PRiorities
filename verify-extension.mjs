@@ -39,8 +39,8 @@ const issuePage = `<h1 data-testid="issue-title">Suggestion font parity</h1><div
   ${'Bounded issue evidence. '.repeat(250)}NOT_INCLUDED_PAST_ISSUE_BUDGET</div></div>
   <div class="comment-body">NOT_INCLUDED_ISSUE_COMMENT</div>`;
 const assessment = {
-  summary: 'Confirm the suggestion widget follows editor font variation settings.',
-  topics: [{ id: 'font-settings', priority: 'review', title: 'Check both suggestion rendering paths', reason: 'Both rendering paths must match the editor typography; missing one leaves suggestions inconsistent.', before: 'The widget did not set font variation settings.', after: 'Each path applies the configured variation settings.', question: 'Do both paths receive the intended font setting?', uncertainty: 'No application tests were run.', evidenceSummary: 'Two assignments update the suggestion widget.', editIds: ['0-0-3', '0-1-3'], excerpts: [{ path: sourcePath, side: 'after', startLine: 137, endLine: 137 }] }]
+  summary: 'Confirm the suggestion widget follows editor font variation settings.\n- Applies `fontVariationSettings` to **both** rendering paths.\n- Keeps <img src=x onerror=alert(1)> and a `dangling **marker as text.',
+  topics: [{ id: 'font-settings', priority: 'review', title: 'Check both suggestion rendering paths', reason: 'Both rendering paths must match the editor typography; missing one leaves suggestions inconsistent.', before: 'The widget did not set font variation settings.', after: 'Each path applies the configured variation settings.', questions: ['Do both paths receive the intended font setting?', 'Should **other** widgets apply `fontVariationSettings` too?'], uncertainty: 'No application tests were run.', editIds: ['0-0-3', '0-1-3'], excerpts: [{ path: sourcePath, side: 'after', startLine: 137, endLine: 137, note: 'The label element receives `fontVariationSettings`.' }] }]
 };
 const classifications = ['0-0-3', '0-1-3'].map(editId => ({ editId, kinds: ['behavior'], reason: 'The assignment applies a font variation setting.', uncertainty: '' }));
 const profile = await mkdtemp(join(tmpdir(), 'review-focus-extension-'));
@@ -98,8 +98,8 @@ if (mode === 'guide-sections') {
     const topic = (id, title, priority, editIds, excerpts = []) => ({...review.topics[0], id, title, priority, editIds, excerpts});
     review.topics = [
       topic('supporting', 'Supporting setup', 'supporting', [...ids(0), ...ids(4), ids(2)[0]]),
-      topic('contract', 'Check the contract and its implementation', 'review', [ids(2)[1]], [{path:evidence.files[2].path,side:'after',startLine:3,endLine:3},{path:evidence.files[4].path,side:'before',startLine:1,endLine:1}]),
-      topic('validation', 'Check the separate validation path', 'review', ids(3), [{path:evidence.files[3].path,side:'after',startLine:1,endLine:1}]),
+      topic('contract', 'Check the contract and its implementation', 'review', [ids(2)[1]], [{path:evidence.files[2].path,side:'after',startLine:3,endLine:3,note:'The contract changes here.'},{path:evidence.files[4].path,side:'before',startLine:1,endLine:1,note:'The implementation read the old contract.'},{path:evidence.files[2].path,side:'after',startLine:2,endLine:4,note:'Surrounding context keeps the contract readable.'}]),
+      topic('validation', 'Check the separate validation path', 'review', ids(3), [{path:evidence.files[3].path,side:'after',startLine:1,endLine:1,note:'Validation reads the new value.'}]),
       {...topic('unknown', 'External caller contract', 'supporting', [...ids(1), ids(2)[2]]), uncertainty:'The external caller contract is unavailable.'}
     ];
   }
@@ -111,8 +111,8 @@ if (mode === 'many-decisions') {
       id: item.id, priority: 'review', title: 'Check ' + file.path,
       reason: 'Verify the replacement value before consumers receive the changed content.',
       before: 'The fixture returned its previous value.', after: 'The fixture returns the replacement value.',
-      question: 'Does the replacement match the intended change?', uncertainty: '', evidenceSummary: 'One value is replaced.',
-      editIds: [item.id], excerpts: [{path:file.path,side:'after',startLine:1,endLine:1}]
+      questions: ['Does the replacement match the intended change?'], uncertainty: '',
+      editIds: [item.id], excerpts: [{path:file.path,side:'after',startLine:1,endLine:1,note:'The replacement value.'}]
     }))))
   };
   const initialFile = evidence.files.length === 1 && evidence.files[0].path === 'tests/change-1.ts';
@@ -528,6 +528,7 @@ try {
   await page('Page.navigate', { url: `chrome-extension://${extensionId}/options.html` });
   await waitFor(() => evaluate('document.querySelector("#connection-status")?.textContent.includes("Connected to Codex") && !document.querySelector("#model").disabled'), 'native Codex connection');
   assert.equal(await evaluate('document.querySelector("#api-key")'), null);
+  assert.equal(await evaluate('document.querySelector("#concurrency").value'), '6', 'Six files are classified at once by default.');
   await evaluate('document.querySelector("#model").value="fixture-model"; document.querySelector("#settings-form").requestSubmit()');
   await waitFor(() => evaluate('document.querySelector("#status")?.textContent.includes("Settings saved")'), 'saving the model');
   assert.equal(await evaluate('document.querySelector("#model").tagName'), 'SELECT');
@@ -723,11 +724,37 @@ try {
       panels: overview.querySelectorAll('.rf-guide-file').length,
       change: overview.querySelector('.rf-change-explanation').textContent,
       rationale: overview.querySelector('.rf-reason').textContent,
-      limits: overview.querySelector('.rf-uncertainty').textContent,
-      question: overview.querySelector('.rf-question').textContent,
+      headings: [...overview.querySelectorAll('.rf-guide-explanation h3')].map(node => node.textContent),
+      limits: [overview.querySelector('.rf-limits > summary').textContent, overview.querySelector('.rf-limits .rf-uncertainty').textContent, overview.querySelector('.rf-limits').open, overview.querySelector('.rf-evidence').open],
+      questions: [...overview.querySelectorAll('.rf-questions > li')].map(node => node.textContent),
+      questionCode: [...overview.querySelectorAll('.rf-questions code, .rf-questions strong')].map(node => [node.tagName, node.textContent]),
+      summary: {
+        items: [...overview.querySelectorAll('.rf-summary li')].map(node => node.textContent),
+        markup: [...overview.querySelectorAll('.rf-summary code, .rf-summary strong')].map(node => [node.tagName, node.textContent]),
+        elements: [...overview.querySelectorAll('.rf-summary *')].map(node => node.tagName)
+      },
+      note: (() => {
+        const note = overview.querySelector('.rf-guide-file .rf-code-note');
+        const table = note.nextElementSibling;
+        const cited = table.querySelector('tr[data-new-line="137"]');
+        return [note.textContent, note.querySelector('code').textContent, table.matches('.rf-code-scroll'), Boolean(cited), table.querySelector('tr').dataset.editId === cited?.dataset.editId, overview.querySelectorAll('.rf-code-note').length];
+      })(),
+      sectionFiles: [...overview.querySelectorAll('.rf-section-files li')].map(item => [item.querySelector('button').textContent, item.querySelector('.rf-file-delta').textContent]),
+      fileHeading: (() => {
+        const heading = overview.querySelector('.rf-guide-file-heading');
+        const parts = [...heading.children].filter(node => node.checkVisibility());
+        const top = parts[0].getBoundingClientRect().top;
+        return {
+          text: [heading.querySelector('.rf-file-name').textContent, heading.querySelector('.rf-file-dir').textContent, heading.querySelector('.rf-file-delta').textContent],
+          actions: [...heading.querySelectorAll('.rf-file-links > *')].map(node => node.getAttribute('aria-label') ?? node.textContent),
+          oneRow: parts.every(node => Math.abs(node.getBoundingClientRect().top - top) < 12)
+        };
+      })(),
+      changedRows: ['add', 'delete'].map(type => overview.querySelectorAll('.rf-guide-file tr.rf-code-' + type + '[data-edit-id]').length),
       visibleActions: [...overview.querySelectorAll('button')].filter(node => node.checkVisibility()).map(node => node.textContent),
       nativeExplanation: ${fileShadow}.querySelector('.rf-change-explanation'),
-      visibleCode: [...overview.querySelectorAll('.rf-code')].filter(node => node.checkVisibility()).length
+      visibleCode: [...overview.querySelectorAll('.rf-code')].filter(node => node.checkVisibility()).length,
+      folds: [...overview.querySelectorAll('.rf-fold > summary')].map(node => node.textContent)
     };
   })()`);
   assert.equal(initialLayout.filesOpen, false);
@@ -735,10 +762,21 @@ try {
   assert.equal(initialLayout.panels, 1, 'A section combines each file’s before and after in one panel.');
   assert.equal(initialLayout.change, assessment.topics[0].after);
   assert.equal(initialLayout.rationale, assessment.topics[0].reason);
-  assert.equal(initialLayout.limits, assessment.topics[0].uncertainty);
-  assert.equal(initialLayout.question, assessment.topics[0].question);
+  assert.deepEqual(initialLayout.headings, ['Files in this section', 'Before', 'After', 'Why it matters', 'Review questions'], 'The section’s files lead the pinned column; review questions follow the explanation.');
+  assert.deepEqual(initialLayout.limits, ['Evidence limits', assessment.topics[0].uncertainty, false, false], 'Evidence limits and change classifications start collapsed.');
+  assert.deepEqual(initialLayout.questions, ['Do both paths receive the intended font setting?', 'Should other widgets apply fontVariationSettings too?'], 'Each review question is a list item.');
+  assert.deepEqual(initialLayout.questionCode, [['STRONG', 'other'], ['CODE', 'fontVariationSettings']]);
+  assert.deepEqual(initialLayout.summary.items, ['Applies fontVariationSettings to both rendering paths.', 'Keeps <img src=x onerror=alert(1)> and a `dangling **marker as text.'], 'Model markup renders as a list while hostile HTML and unbalanced markers stay literal text.');
+  assert.deepEqual(initialLayout.summary.markup, [['CODE', 'fontVariationSettings'], ['STRONG', 'both']]);
+  assert.deepEqual(initialLayout.summary.elements, ['P', 'UL', 'LI', 'CODE', 'STRONG', 'LI'], 'Rich text creates only paragraphs, lists, code and strong elements.');
+  assert.deepEqual(initialLayout.note, ['The label element receives fontVariationSettings.', 'fontVariationSettings', true, true, true, 1], 'The excerpt note heads the changed block containing its first cited line.');
+  assert.deepEqual(initialLayout.sectionFiles, [['suggestWidgetRenderer.ts', `+${initialLayout.changedRows[0]} −${initialLayout.changedRows[1]}`]], 'The pinned file list shows the section’s own changed lines.');
+  assert.deepEqual(initialLayout.fileHeading.text, ['suggestWidgetRenderer.ts', 'src/vs/editor/contrib/suggest/browser/', initialLayout.sectionFiles[0][1]], 'The file header leads with the file name, then its directory and the section’s changed lines.');
+  assert.deepEqual(initialLayout.fileHeading.actions, ['Show in diff', 'Open before source at this commit', 'Open after source at this commit']);
+  assert.equal(initialLayout.fileHeading.oneRow, true, 'On a wide screen the file name, Reviewed control and file actions share one header row.');
   assert.equal(initialLayout.nativeExplanation, null, 'Native files retain status only; explanations belong to Guide.');
   assert.ok(initialLayout.visibleCode > 0, 'The Guide keeps evidence beside its explanation.');
+  assert.ok(initialLayout.folds.length && initialLayout.folds.every(text => /^\d+ unchanged lines$/.test(text)), 'Folds that hide only uncited context read as unchanged lines.');
   const sourceOnlyRows = await evaluate(`[...${shadow}.querySelectorAll('tr[data-outside-diff]')].map(row=>({oldLine:row.dataset.oldLine,newLine:Number(row.dataset.newLine),text:row.querySelector('.rf-code-text').textContent}))`);
   assert.ok(sourceOnlyRows.length > 0, 'Captured full-file context remains reachable beyond the patch.');
   for (const row of sourceOnlyRows) {
@@ -771,19 +809,76 @@ try {
   await click('Guide');
   assert.ok(await evaluate('document.querySelectorAll(".review-focus-native-surface-hidden").length > 0'));
   assert.equal(await evaluate('document.querySelectorAll(".review-focus-native-hidden, .review-focus-native-fold").length'), 0, 'Guide never mutates individual native rows.');
+  await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
+  const pinned = await evaluate(`(async () => {
+    const root = ${shadow};
+    const code = root.querySelector('.rf-guide-code').getBoundingClientRect();
+    window.scrollTo({ top: scrollY + code.bottom - innerHeight - 40, behavior: 'instant' });
+    await new Promise(requestAnimationFrame);
+    const inView = node => {
+      const box = node.getBoundingClientRect();
+      return node.checkVisibility() && box.top >= 0 && box.bottom <= innerHeight;
+    };
+    const nav = root.querySelector('.rf-section-nav');
+    return {
+      position: getComputedStyle(root.querySelector('.rf-guide-explanation')).position,
+      codeHeight: code.height,
+      scrolledPast: root.querySelector('.rf-guide-code').getBoundingClientRect().top < 0,
+      caption: [nav.querySelector('.rf-caption').textContent, inView(nav.querySelector('.rf-caption'))],
+      controls: [...nav.querySelectorAll('button')].map(node => [node.textContent, inView(node)]),
+      files: inView(root.querySelector('.rf-section-files')),
+      fileHeading: [root.querySelector('.rf-guide-file-heading').getBoundingClientRect().top, inView(root.querySelector('.rf-guide-file-heading .rf-file-name')), inView(root.querySelector('.rf-guide-file-heading .rf-reviewed-toggle input'))],
+      sequence: root.querySelector('.rf-section-sequence').checkVisibility()
+    };
+  })()`);
+  assert.equal(pinned.position, 'sticky', 'The explanation column is pinned on wide screens.');
+  assert.ok(pinned.codeHeight > 2000 && pinned.scrolledPast, 'The fixture scrolls deep into a long file.');
+  assert.deepEqual(pinned.caption, ['Section 1 of 1', true]);
+  assert.deepEqual(pinned.controls, [['Previous', true], ['Next', true], ['Full diff', true]], 'Section navigation and Full diff stay reachable beside a long file.');
+  assert.equal(pinned.files, true, 'The section’s file list stays in the pinned column beside a long file.');
+  assert.deepEqual(pinned.fileHeading, [60, true, true], 'Deep in a long file, its name and Reviewed control stay pinned below GitHub’s toolbar.');
+  assert.equal(pinned.sequence, true, 'The end of a section offers the next section on wide screens too.');
+  await evaluate(`${shadow}.querySelector('.rf-section-files button').click()`);
+  assert.deepEqual(await evaluate(`(() => {
+    const card = ${shadow}.querySelector('.rf-guide-file');
+    const top = card.getBoundingClientRect().top;
+    return [${shadow}.activeElement === card, top >= 0 && top < innerHeight / 2];
+  })()`), [true, true], 'The section file list jumps to its file panel.');
+  await evaluate(`${shadow}.querySelector('.rf-section-nav').lastElementChild.click()`);
+  assert.deepEqual(await evaluate(`[${shadow}.querySelector('.rf-view-toggle [aria-pressed=true]').textContent, ${shadow}.activeElement?.textContent, document.querySelectorAll('.review-focus-native-surface-hidden').length]`), ['Full diff', 'Full diff', 0], 'The pinned Full diff control restores GitHub’s diff and moves focus to the view switch.');
+  await click('Guide');
+  await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
   await evaluate('window.scrollTo(0,0)');
   await writeFile('/tmp/review-focus-extension-installed.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
   await page('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
   const mobileLayout = await evaluate(`({
     width:document.querySelector('#review-focus-extension').getBoundingClientRect().width,
     actionOverflow:${shadow}.querySelector('.rf-actions').scrollWidth > ${shadow}.querySelector('.rf-actions').clientWidth,
-    explanationWidth:${shadow}.querySelector('.rf-guide-explanation').getBoundingClientRect().width,
+    explanationWidth:${shadow}.querySelector('.rf-section-title').getBoundingClientRect().width,
+    explanationPosition:getComputedStyle(${shadow}.querySelector('.rf-guide-explanation')).position,
+    navPosition:getComputedStyle(${shadow}.querySelector('.rf-section-nav')).position,
+    pageOverflow:document.documentElement.scrollWidth > innerWidth,
     panelOverflow:${shadow}.querySelector('.rf-panel').scrollWidth > ${shadow}.querySelector('.rf-panel').clientWidth
   })`);
   assert.ok(mobileLayout.width <= 390);
   assert.equal(mobileLayout.actionOverflow, false);
   assert.ok(mobileLayout.explanationWidth <= 390);
   assert.equal(mobileLayout.panelOverflow, false, 'Long code scrolls within its panel on narrow screens.');
+  assert.equal(mobileLayout.explanationPosition, 'static', 'Narrow screens stack the explanation above the code.');
+  assert.equal(mobileLayout.navPosition, 'sticky');
+  assert.equal(mobileLayout.pageOverflow, false);
+  await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
+  assert.deepEqual(await evaluate(`(async () => {
+    const root = ${shadow};
+    const code = root.querySelector('.rf-guide-code').getBoundingClientRect();
+    window.scrollTo({ top: scrollY + code.bottom - innerHeight - 40, behavior: 'instant' });
+    await new Promise(requestAnimationFrame);
+    const nav = root.querySelector('.rf-section-nav').getBoundingClientRect();
+    const heading = root.querySelector('.rf-guide-file-heading').getBoundingClientRect();
+    return [Math.round(nav.top), Math.round(heading.top), [...root.querySelectorAll('.rf-section-nav button')].map(node => node.textContent)];
+  })()`), [60, 104, ['Previous', 'Next', 'Full diff']], 'Deep in a long file on a narrow screen, section navigation and the file header stay pinned below GitHub’s toolbar.');
+  await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
+  await evaluate('window.scrollTo(0,0)');
   await writeFile('/tmp/review-focus-extension-mobile.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
   await page('Emulation.setDeviceMetricsOverride', { width: 1512, height: 1080, deviceScaleFactor: 1, mobile: false });
   await evaluate(`(() => {
@@ -826,7 +921,7 @@ try {
 
   const humanReviewInputs = `[...${shadow}.querySelectorAll('.rf-reviewed-toggle input')]`;
   assert.equal(await evaluate(`${fileShadow}.querySelector('input[type=checkbox]')`), null, 'The diff panel must not duplicate GitHub’s Viewed checkbox.');
-  assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => [input.checked, input.indeterminate])`), [[false, false], [false, false]], 'AI completion must not mark a file reviewed by the user in the file list or Guide header.');
+  assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => [input.checked, input.indeterminate])`), [[false, false], [false, false], [false, false]], 'AI completion must not mark a file reviewed by the user in the file list, section file list or Guide header.');
   assert.equal(await evaluate('window.fixtureViewedClicks'), 0);
   await evaluate(`(() => {
     const root = ${shadow};
@@ -908,7 +1003,7 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'exact-input cached review restored');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-file-progress').hidden`), true, 'Restoring a completed review keeps file progress collapsed.');
   assert.equal((await modelRequests()).length, initialRequestCount, 'Opening the saved review must not invoke either CLI for analysis.');
-  assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => input.checked)`), [true, true], 'Reload and cached AI restoration must read the native saved Viewed state.');
+  assert.deepEqual(await evaluate(`${humanReviewInputs}.map(input => input.checked)`), [true, true, true], 'Reload and cached AI restoration must read the native saved Viewed state.');
   await openFiles();
   await evaluate(`${shadow}.querySelector('.rf-reviewed-toggle input').click()`);
   await waitFor(() => evaluate(`${humanReviewInputs}.every(input => !input.checked && input.getAttribute('aria-disabled') === 'false')`), 'saved Viewed state can be undone after reload');
@@ -1321,8 +1416,9 @@ try {
   assert.equal(await evaluate('document.querySelector("#model").value'), 'claude-fixture-model', 'Claude picks its own catalog default rather than inheriting Codex.');
   assert.equal(await evaluate('document.querySelector("#login-command").textContent'), 'claude auth login');
   assert.ok(await evaluate('document.querySelector("#provider-privacy").textContent.includes("Anthropic")'));
-  await evaluate('document.querySelector("#model").value="claude-fixture-model"; document.querySelector("#settings-form").requestSubmit()');
+  await evaluate('document.querySelector("#model").value="claude-fixture-model"; document.querySelector("#concurrency").value="4"; document.querySelector("#settings-form").requestSubmit()');
   await waitFor(() => evaluate('document.querySelector("#status")?.textContent.includes("Settings saved")'), 'saving Claude selection');
+  assert.equal(await evaluate('chrome.storage.local.get("classificationConcurrency").then(value=>value.classificationConcurrency)'), 4);
   await evaluate('document.querySelector("#provider").value="codex"; document.querySelector("#provider").dispatchEvent(new Event("change"))');
   await waitFor(() => evaluate('document.querySelector("#connection-status")?.textContent.includes("Connected to Codex") && !document.querySelector("#model").disabled'), 'preview Codex without switching the saved provider');
   assert.equal(await evaluate('document.querySelector("#model").value'), 'fixture-model');
@@ -1340,6 +1436,8 @@ try {
   await page('Page.navigate', { url: `chrome-extension://${extensionId}/options.html` });
   await waitFor(() => evaluate('document.querySelector("#connection-status")?.textContent.includes("Connected to Claude Code") && !document.querySelector("#model").disabled'), 'restoring saved Claude settings');
   assert.equal(await evaluate('document.querySelector("#provider").value'), 'claude');
+  assert.equal(await evaluate('document.querySelector("#concurrency").value'), '4', 'The saved concurrency survives reopening Settings.');
+  await evaluate('chrome.storage.local.remove("classificationConcurrency")');
   assert.equal(await evaluate('document.querySelector("#model").value'), 'claude-fixture-model');
   await evaluate('document.querySelector("#model").value="claude-fixture-older"; document.querySelector("#model").dispatchEvent(new Event("change"))');
   assert.deepEqual(await evaluate('Array.from(document.querySelector("#effort").options,option=>option.value)'), ['low','high'], 'Changing models must update supported effort choices.');
@@ -1684,6 +1782,8 @@ try {
   }
   await page('Page.navigate', {url:'about:blank'});
   await send('Runtime.evaluate', {expression:'globalThis.setInterval = globalThis.originalInterval; delete globalThis.originalInterval;'}, worker);
+  // Waiting-file states need fewer classification slots than the five fixture files.
+  await send('Runtime.evaluate', {expression:'chrome.storage.local.set({classificationConcurrency:3})', awaitPromise:true}, worker);
   changesMode = 'many-decisions';
   await writeFile(modeFile, 'many-decisions');
   await writeFile(uxGate, 'waiting');
@@ -2052,6 +2152,7 @@ try {
   await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'comprehension-ordered Guide complete');
   assert.deepEqual(await openedView(), {view:'Full diff', guide:false, hidden:0}, 'A multi-section review opens in Full diff.');
   await click('Guide');
+  assert.equal(await evaluate('document.querySelector("[data-testid=progressive-diffs-list]").checkVisibility()'), false, 'Guide hides GitHub’s diff list even when a Primer display utility marks it important.');
   await openFiles();
   assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,3), 'Guide never reorders native GitHub files.');
   assert.deepEqual(await evaluate(`Array.from(${shadow}.querySelectorAll('.rf-file-progress-row'), row => row.dataset.path)`), changes.paths.slice(0,6), 'The file list retains captured order.');
@@ -2067,6 +2168,15 @@ try {
   assert.deepEqual(await evaluate(`${sharedBlocks}.map(row=>row.checkVisibility())`), [true,false,true], 'The section’s block and unresolved foreign block remain open; the other review section’s block folds.');
   assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-foreign-edit')].some(label=>label.checkVisibility() && label.textContent.includes('External caller contract') && label.textContent.includes('unresolved evidence'))`));
   assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-fold-sections button')].some(button=>button.textContent==='Check the contract and its implementation')`), 'Hidden foreign changes link to their section.');
+  assert.deepEqual(await evaluate(`(() => {
+    const group = [...${sharedCard}.querySelectorAll('.rf-fold-group')].find(group => group.querySelector('.rf-fold-sections'));
+    const fold = group.querySelector('.rf-fold');
+    const closed = [/^\\d+ other lines?$/.test(fold.querySelector('summary').textContent), group.querySelector('.rf-fold-sections').checkVisibility()];
+    fold.open = true;
+    const opened = [group.querySelector('.rf-fold-sections').checkVisibility(), [...fold.querySelectorAll('.rf-foreign-edit')].some(label => label.checkVisibility())];
+    fold.open = false;
+    return [closed, opened];
+  })()`), [[true, true], [false, true]], 'A closed fold names the section its changes come from; opened, each foreign block labels its owner instead.');
   assert.deepEqual(await evaluate(`[...${shadow}.querySelector('.rf-file-progress-row[data-path="${sharedPath}"]').querySelectorAll('.rf-file-sections button')].map(button=>button.textContent)`), ['Supporting setup','Check the contract and its implementation','External caller contract']);
   for (const id of blockIds) {
     assert.deepEqual(await evaluate(`[...${sharedCard}.querySelectorAll('tr[data-edit-id="${id}"]')].map(row=>row.className)`), ['rf-code-delete','rf-code-add'], 'Each changed block shows its removals and additions together.');
@@ -2076,14 +2186,26 @@ try {
   await evaluate(`window.focusedReviewed = ${sharedReviewed}; window.focusedReviewed.focus(); window.focusedReviewed.click()`);
   await waitFor(() => evaluate(`${sharedNative}.getAttribute('aria-pressed') === 'true' && !${sharedNative}.disabled && ${sharedReviewed}.checked && ${sharedReviewed}.getAttribute('aria-disabled') === 'false'`), 'Guide header Reviewed forwarded to GitHub Viewed');
   assert.equal(await evaluate(`${shadow}.activeElement === window.focusedReviewed`), true, 'The Guide header checkbox keeps keyboard focus while GitHub saves Viewed.');
-  await click('Next section');
+  const sharedCollapse = `${sharedCard}.querySelector('.rf-collapse-toggle')`;
+  const sharedCodeState = `[${sharedCard}.querySelector('.rf-guide-file-body').checkVisibility(), ${sharedCollapse}.checkVisibility() && ${sharedCollapse}.textContent, ${sharedCollapse}.getAttribute('aria-expanded')]`;
+  assert.deepEqual(await evaluate(sharedCodeState), [false, 'Show code', 'false'], 'A reviewed file collapses to its header.');
+  await evaluate(`${sharedCollapse}.click()`);
+  assert.deepEqual(await evaluate(sharedCodeState), [true, 'Hide code', 'true']);
+  assert.deepEqual(await evaluate(`${sharedBlocks}.map(row=>row.checkVisibility())`), [true,false,true], 'Expanding a reviewed file restores its unresolved foreign block.');
+  await evaluate(`${sharedCollapse}.click()`);
+  assert.deepEqual(await evaluate(sharedCodeState), [false, 'Show code', 'false']);
+  assert.deepEqual(await evaluate(`[${sharedNative}.getAttribute('aria-pressed'), window.fixtureViewedClicks]`), ['true', 1], 'Collapsing and expanding never touch GitHub Viewed.');
+  await click('Next');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'contract');
   assert.equal(await evaluate(`${sharedReviewed}.checked`), true, 'Every section’s header shows the same file-level Viewed state.');
   const evidenceCard = `${shadow}.querySelector('.rf-guide-file[data-path="${changes.paths[4]}"]')`;
   assert.deepEqual(await evaluate(`[...${evidenceCard}.querySelectorAll('tr[data-edit-id]')].map(row=>row.className)`), ['rf-code-delete','rf-code-add'], 'A before-only excerpt includes its entire removed-and-added block.');
   assert.ok(await evaluate(`${evidenceCard}.querySelector('.rf-foreign-edit').textContent.includes('selected evidence')`));
+  assert.deepEqual(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-code-note')].map(note => [note.textContent, note.parentElement.querySelector('tr').dataset.newLine])`), [['The contract changes here.', '2'], ['Surrounding context keeps the contract readable.', '2']], 'Overlapping excerpts show each note once, in excerpt order, above their merged run.');
+  assert.deepEqual(await evaluate(`[...${evidenceCard}.querySelectorAll('.rf-code-note')].map(note => [note.textContent, note.parentElement.querySelector('tr').className])`), [['The implementation read the old contract.', 'rf-code-delete']], 'A note heads its cited block on the matching side.');
   await evaluate(`${sharedNative}.click()`);
   await waitFor(() => evaluate(`!${sharedReviewed}.checked && ${sharedReviewed}.getAttribute('aria-disabled') === 'false'`), 'native Viewed uncheck mirrored in the Guide header');
+  assert.deepEqual(await evaluate(`[${sharedCard}.querySelector('.rf-guide-file-body').checkVisibility(), ${sharedCollapse}.checkVisibility()]`), [true, false], 'Unchecking Reviewed shows the file again.');
   assert.equal(await evaluate('window.fixtureViewedClicks'), 2, 'Only the user’s two Viewed actions reached GitHub.');
   await evaluate(`${sharedReviewed}.click()`);
   await waitFor(() => evaluate(`${sharedNative}.getAttribute('aria-pressed') === 'true' && !${sharedNative}.disabled`), 'Viewed saved before reload');
@@ -2136,10 +2258,11 @@ try {
   await waitFor(() => evaluate(`document.getElementById('diff-${changes.entries[0].pathDigest}').querySelectorAll('[data-fixture-context]').length === 201`), 'native context expansion remains available');
   assert.deepEqual(await evaluate(nativePaths), changes.paths.slice(0,6));
   await click('Guide');
+  await evaluate(`${sharedCollapse}.click()`);
   await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
   assert.ok(await evaluate(`${sharedBlocks}.every(row=>row.checkVisibility())`), 'Turning off folding shows every captured block in the section’s files.');
   await evaluate(`${shadow}.querySelector('.rf-fold-other input').click()`);
-  await click('Previous section');
+  await click('Previous');
   assert.equal(await evaluate(`${shadow}.querySelector('.rf-guide-section').dataset.topicId`), 'supporting');
   await openFiles();
   await evaluate(`${shadow}.querySelector('.rf-file-progress-row[data-path="${changes.paths[5]}"] .rf-file-path').click()`);
@@ -2168,10 +2291,11 @@ try {
     await click('Analyze PR');
     await waitFor(() => evaluate(`${shadow}?.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !${shadow}.querySelector('.rf-analyze').disabled`), 'visibility override assessment completed');
     await click('Guide');
+    await evaluate(`${sharedCollapse}.click()`);
     assert.ok(await evaluate(`${sharedBlocks}.every(row=>row.checkVisibility())`), 'User visibility rules keep foreign section changes open.');
     const reason = override === 'protected' ? 'protected file' : 'your always-visible types: behavior';
     assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-foreign-edit')].some(label=>label.checkVisibility() && label.textContent.includes('Check the contract and its implementation') && label.textContent.includes(${JSON.stringify(reason)}))`), 'Foreign changes state their owner and the concrete visibility override.');
-    assert.equal(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-code-context')].every(row=>row.checkVisibility())`), override === 'protected', 'Only protected paths keep uncited surrounding context open.');
+    assert.ok(await evaluate(`[...${sharedCard}.querySelectorAll('.rf-code-context')].every(row=>row.checkVisibility()) && !${sharedCard}.querySelector('.rf-fold')`), 'Two uncited context lines stay inline rather than behind a fold row.');
     assert.equal((await modelRequests()).length - beforeOverride, 6);
   }
   assert.ok(workers.length > 0);
