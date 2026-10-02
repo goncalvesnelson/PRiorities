@@ -617,5 +617,3 @@ chrome.runtime.onConnect.addListener(port => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => jobs.get(tabId)?.dispose());
-
-chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());

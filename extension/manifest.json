@@ -13,18 +13,21 @@
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxcyNMpFz5MUQAbsGiZ1maM8IBtSBYoZVEus4yX+biLJe1u7XZ3v955uZh+KhUiaQpP4Ie4K2t2y+2+Emk4MeGZfqcrXPKYInv2wM4vAxz15nMkUbi5Rt0d9d+rMYM+49DWobugxGu7lpCkgFHO7PuizW2zfSwUYNXHEX1riPHuaw2GPkLw4BVF1oOjW/OW2Dt9tsORM8krCsf2RkeYtfEWCf41LJ8hylzedcN/cOJgmxqgSHv79GuqQgp8UsRKebCdwsbVpoAHhmGE1mGk5zETmrIDQhs1QvA+ipnkpsxfQ75ca9t83x64oJXRbrAR8rfYOczW1TJolgDgoSiaAe9wIDAQAB",
   "permissions": [
     "storage",
-    "nativeMessaging"
+    "nativeMessaging",
+    "sidePanel",
+    "activeTab"
   ],
   "background": {
     "service_worker": "background.bundle.js",
     "type": "module"
   },
   "action": {
-    "default_title": "PRiorities settings",
+    "default_title": "PRiorities",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
-    }
+    },
+    "default_popup": "popup.html"
   },
   "options_ui": {
     "page": "options.html",
@@ -38,14 +41,16 @@
       "js": [
         "content.js"
       ],
-      "css": ["review.css"],
+      "css": [
+        "review.css"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
       "resources": [
-        "review-ui.js",
+        "page-agent.js",
         "github.js",
         "review-data.js",
         "review-preferences.js",

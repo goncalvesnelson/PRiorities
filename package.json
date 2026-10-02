@@ -7,7 +7,8 @@
     "verify": "npm run verify:extension",
     "build:extension": "node build-extension.mjs",
     "install:cli-host": "node install-native-host.mjs",
-    "verify:extension": "node build-extension.mjs && node verify-native-host.mjs && node verify-runtime.mjs && node verify-extension.mjs"
+    "verify:extension": "node build-extension.mjs && node verify-native-host.mjs && node verify-runtime.mjs && node verify-extension.mjs",
+    "preview": "node build-extension.mjs && node preview-extension.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2"
