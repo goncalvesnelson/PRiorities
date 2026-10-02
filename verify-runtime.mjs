@@ -323,8 +323,7 @@ try {
   nativeHandler = () => ({ type: 'status', authenticated: false, message: 'Run codex login.' });
   assert.deepEqual(await sendMessage({ type: 'get-settings' }), { configured: false, provider: 'codex', model: '', effort: '', concurrency: 6, fileLimit: 100, listDeletedFiles: false, connectionError: 'Run codex login.' });
   await sendMessage({ type: 'open-settings' }, contentSender);
-  await onClicked.emit();
-  assert.equal(optionsOpened, 2);
+  assert.equal(optionsOpened, 1);
 
   const connectionClock = fakeClock();
   const beforeConnectionSettings = structuredClone(storage);

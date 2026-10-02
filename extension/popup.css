@@ -1,0 +1,32 @@
+/* Same Uphold dark tokens as the side panel (panel.css). */
+:root {
+  --rf-background: #0c1118; --rf-hover: #1e2533; --rf-text: #f3f3f3; --rf-muted: #9aa3b2;
+  --rf-border: #222a37; --rf-input: #55657f; --rf-primary: #84fb7f; --rf-primary-ink: #090d14;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+/* Chrome's extension-page stylesheet sets body text to 75%, so the font is set on body. */
+body {
+  width: 260px; margin: 0; padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  background: var(--rf-background); color: var(--rf-text);
+  font: 14px/1.5 proxima-nova, "Proxima Nova", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+header { display: flex; align-items: center; height: 28px; }
+.brand { display: inline-flex; align-items: center; gap: 8px; font-size: 15px; line-height: 1; font-weight: 700; }
+.brand::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--rf-primary); }
+button {
+  display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 34px; padding: 0 14px;
+  font: inherit; font-weight: 600; line-height: 1; cursor: pointer;
+  border: 1px solid var(--rf-input); border-radius: 20px; background: transparent; color: var(--rf-text);
+  transition: background-color .15s, filter .15s, transform .15s;
+}
+button:hover { background: var(--rf-hover); }
+button:active:not(:disabled) { transform: scale(.97); }
+button:disabled { cursor: default; opacity: .5; }
+button:focus-visible { outline: 2px solid var(--rf-primary); outline-offset: 2px; }
+.primary { border-color: var(--rf-primary); background: var(--rf-primary); color: var(--rf-primary-ink); }
+.primary:hover { background: var(--rf-primary); filter: brightness(1.06); }
+.hint { margin: 0; color: var(--rf-muted); font-size: 12px; }
+.hint:empty { display: none; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
