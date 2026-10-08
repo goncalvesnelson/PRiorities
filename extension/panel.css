@@ -123,7 +123,7 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-file-progress-row:last-child { border-bottom: 0; }
 .rf-file-progress-row > .rf-file-path { flex: 1 1 100%; }
 .rf-file-progress-row > .rf-caption { flex-basis: 100%; }
-.rf-file-path { padding: 0; border: 0; border-radius: 0; color: var(--rf-accent); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.rf-file-path { justify-content: flex-start; min-width: 0; max-width: 100%; height: auto; padding: 0; border: 0; border-radius: 0; color: var(--rf-accent); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: left; }
 .rf-file-path:hover { background: transparent; text-decoration: underline; }
 .rf-file-state { display: inline-flex; align-items: center; gap: 6px; color: var(--rf-muted); font-size: 12px; }
 .rf-file-state::before { content: ""; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--rf-subtle); }
@@ -135,7 +135,8 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-reviewed-toggle { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; line-height: 16px; color: var(--rf-muted); font-size: 12px; cursor: pointer; }
 .rf-reviewed-toggle input { margin: 0; accent-color: var(--rf-primary); cursor: inherit; }
 .rf-reviewed-toggle[data-reviewed="true"] { color: var(--rf-accent); }
-.rf-review-unavailable { flex-basis: 100%; color: var(--rf-subtle); font-size: 11px; }
+.rf-reviewed-toggle[data-unavailable="true"] { opacity: .45; cursor: default; }
+.rf-review-unavailable { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* Result */
 .rf-result { padding: 8px 20px 40px; }
@@ -172,7 +173,12 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-panel .rf-topic-summary { display: block; padding: 14px 16px; color: var(--rf-text); cursor: pointer; list-style: none; border-radius: 12px; transition: background-color .15s, border-radius .2s; }
 .rf-topic-summary::-webkit-details-marker { display: none; }
 .rf-topic-summary:hover { background: var(--rf-hover); }
-.rf-topic[open] > .rf-topic-summary { border-bottom: 1px solid var(--rf-border); border-radius: 12px 12px 0 0; }
+/* An open section keeps its number, title and gist pinned under the toolbar while you read it. */
+.rf-topic[open] > .rf-topic-summary {
+  position: sticky; top: var(--rf-toolbar-height, 60px); z-index: 2;
+  border-bottom: 1px solid var(--rf-border); border-radius: 12px 12px 0 0; background: var(--rf-card);
+}
+.rf-topic[open] > .rf-topic-summary:hover { background: var(--rf-hover); }
 /* Number, title, pill and chevron share one 20px first line, so they centre on it even when the title wraps. */
 .rf-topic-heading { display: flex; align-items: flex-start; gap: 8px; }
 .rf-topic-number { flex-shrink: 0; min-width: 20px; height: 20px; color: var(--rf-muted); font-variant-numeric: tabular-nums; font-weight: 700; line-height: 20px; }
@@ -196,21 +202,26 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-compare-before { --rf-compare-tint: rgba(255, 143, 133, .045); --rf-compare-border: rgba(255, 143, 133, .16); --rf-compare-label: #c98880; }
 .rf-compare-after { --rf-compare-tint: rgba(132, 251, 127, .04); --rf-compare-border: rgba(132, 251, 127, .15); --rf-compare-label: #80b67e; }
 .rf-questions { margin: 0; }
-.rf-questions > li + li, .rf-code-refs > li + li { margin-top: 10px; }
+.rf-questions > li + li { margin-top: 10px; }
 .rf-code-refs { margin: 0; list-style: none; padding-left: 0; }
 .rf-code-note { margin-top: 4px; color: var(--rf-muted) !important; font-size: 14px !important; line-height: 1.6 !important; }
 
 /* A reference to code: a dotted underline that scrolls GitHub's diff to the cited lines. */
-.rf-ref { display: inline; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-decoration: underline dotted var(--rf-accent); text-decoration-thickness: 2px; text-underline-offset: 3px; border-radius: 3px; transition: color .15s, background-color .15s, text-underline-offset .15s; }
+.rf-ref { display: inline-flex; max-width: 100%; vertical-align: bottom; text-align: left; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-decoration: underline dotted var(--rf-accent); text-decoration-thickness: 2px; text-underline-offset: 3px; border-radius: 3px; transition: color .15s, background-color .15s, text-underline-offset .15s; }
 .rf-ref:hover { background: var(--rf-hover); text-underline-offset: 4px; }
 .rf-ref:hover { color: var(--rf-accent); text-decoration-style: solid; }
 .rf-code-refs .rf-ref { font: 600 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--rf-accent); }
 
 .rf-section-files { list-style: none; margin: 0; padding: 0; font-size: 12px; }
-.rf-section-files li { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.rf-section-file { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.rf-code-refs > li + li { margin-top: 12px; }
+.rf-code-quote { margin: 2px 0 0; padding-left: 12px; }
+.rf-code-quote + .rf-code-quote { margin-top: 8px; }
 .rf-section-files .rf-link-button { flex: 1 1 auto; min-width: 0; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .rf-section-files .rf-reviewed-toggle > span:not(.rf-review-unavailable) { display: none; }
 .rf-file-delta { color: var(--rf-muted); font-size: 11px; white-space: nowrap; }
+.rf-delta-add { color: var(--rf-primary); }
+.rf-delta-delete { color: var(--rf-danger); }
 .rf-topic-body details, .rf-review-details { margin-top: 12px; font-size: 12px; }
 .rf-panel summary { cursor: pointer; color: var(--rf-muted); }
 .rf-panel summary:hover { color: var(--rf-accent); }
@@ -232,3 +243,9 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
   .rf-panel { scroll-behavior: auto; }
   *, *::before, *::after, ::details-content { animation: none !important; transition: none !important; }
 }
+
+/* Middle ellipsis: the start shrinks first; the end (file name, last segment) stays whole. */
+.rf-truncate { display: inline-flex; min-width: 0; max-width: 100%; white-space: nowrap; vertical-align: bottom; }
+.rf-truncate-start { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rf-truncate-end { flex: none; }
+.rf-link-button .rf-truncate, .rf-file-path .rf-truncate { max-width: 100%; }

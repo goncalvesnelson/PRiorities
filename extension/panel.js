@@ -96,6 +96,23 @@ function sourceLink(snapshot, excerpt) {
   return `https://github.com/${parts[0]}/${parts[1]}/blob/${revision}/${path}#L${excerpt.startLine}-L${excerpt.endLine}`;
 }
 
+// Long names cut in the middle so their end (a file name, a package) stays readable; the start
+// shrinks to an ellipsis only when space runs out. Callers put the full name in a tooltip.
+function middleEllipsis(text, tag = 'span') {
+  const node = element(tag, 'rf-truncate');
+  const slash = text.lastIndexOf('/');
+  const split = slash > 0 && text.length - slash <= 48 ? slash : Math.max(0, text.length - Math.min(12, Math.ceil(text.length * .4)));
+  node.append(element('span', 'rf-truncate-start', text.slice(0, split)), element('span', 'rf-truncate-end', text.slice(split)));
+  return node;
+}
+
+function pathButton(path, label, action, className) {
+  const node = button('', action, className);
+  node.append(middleEllipsis(label));
+  node.title = path;
+  return node;
+}
+
 function lineRange(target) {
   return `L${target.startLine}${target.endLine > target.startLine ? `–${target.endLine}` : ''}`;
 }
@@ -163,6 +180,8 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   let clock;
 
   const header = element('div', 'rf-toolbar');
+  // Open sections stick just below the toolbar, whose height grows if its buttons wrap.
+  new ResizeObserver(() => panel.style.setProperty('--rf-toolbar-height', `${header.offsetHeight}px`)).observe(header);
   const brand = element('strong', 'rf-brand', 'PRiorities');
   const progressToggle = button('', () => { fileListOpen = !fileListOpen; renderFileProgress(); }, 'rf-progress-toggle');
   progressToggle.setAttribute('aria-controls', 'rf-file-progress');
@@ -566,9 +585,30 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     progressToggle.setAttribute('aria-expanded', String(fileListOpen));
   }
 
+  // GitHub disables its Viewed button while it saves, and redraws it as files scroll in. A button
+  // that was usable moments ago keeps its last state, so the panel doesn't flash "unavailable".
+  const settleMs = 1500;
+  const lastUsable = new Map();
+  let settleTimer;
   function readReviewControls() {
+    const now = Date.now();
     const controls = new Map(pageState?.reviews ?? []);
-    for (const [path, { reviewed }] of controls) observedReviews.set(path, reviewed);
+    let settling = false;
+    for (const [path, state] of controls) {
+      observedReviews.set(path, state.reviewed);
+      if (!state.disabled) lastUsable.set(path, now);
+      else if (now - (lastUsable.get(path) ?? -Infinity) < settleMs) {
+        controls.set(path, { ...state, disabled: false });
+        settling = true;
+      }
+    }
+    for (const [path, at] of lastUsable) {
+      if (controls.has(path) || now - at >= settleMs || !reviewControls.has(path)) continue;
+      controls.set(path, reviewControls.get(path));
+      settling = true;
+    }
+    clearTimeout(settleTimer);
+    if (settling) settleTimer = setTimeout(() => { if (readReviewControls()) renderFileProgress(); }, settleMs);
     const changed = controls.size !== reviewControls.size || [...controls].some(([path, state]) => {
       const previous = reviewControls.get(path);
       return !previous || state.reviewed !== previous.reviewed || state.disabled !== previous.disabled;
@@ -587,9 +627,13 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     input.setAttribute('aria-disabled', String(!control || control.disabled));
     label.dataset.reviewed = reviewed === undefined ? 'unknown' : String(reviewed);
     const hint = label.querySelector('.rf-review-unavailable');
-    hint.hidden = Boolean(control && !control.disabled);
-    hint.textContent = control ? 'Unavailable in this view' : reviewed === undefined ? 'Status unavailable' : 'Load file to update';
-    label.title = control && !control.disabled ? 'Uses GitHub’s Viewed checkbox. AI analysis never changes your checkmark.' : 'Load this file in GitHub’s diff to read or change its Viewed status.';
+    // Unavailability is shown by dimming, and explained in the tooltip, so GitHub's brief
+    // save and redraw states never push a sentence in and out of the layout.
+    const unavailable = !control || control.disabled;
+    label.dataset.unavailable = String(unavailable);
+    hint.textContent = !unavailable ? '' : control ? 'Unavailable in this view' : reviewed === undefined ? 'Status unavailable' : 'Load file to update';
+    label.title = !unavailable ? 'Uses GitHub’s Viewed checkbox. AI analysis never changes your checkmark.'
+      : control ? 'GitHub’s Viewed checkbox is unavailable in this view.' : 'Load this file in GitHub’s diff to read or change its Viewed status.';
   }
 
   function reviewToggle(path) {
@@ -647,7 +691,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       row.dataset.path = path;
       const label = element('span', 'rf-file-state', fileLabel(file));
       label.dataset.state = file.state;
-      row.append(button(path, () => void revealFile(path), 'rf-file-path'), label, reviewToggle(path));
+      row.append(pathButton(path, path, () => void revealFile(path), 'rf-file-path'), label, reviewToggle(path));
       if (finalResult && file.state !== 'deleted') {
         const owners = fileTopics(path);
         const references = analysis.topics.filter(topic => !owners.includes(topic) && topic.excerpts.some(excerpt => excerpt.path === path));
@@ -677,11 +721,26 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     return new Map(snapshot.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit').map(edit => [edit.id, { file, edit, classification: classifications.get(edit.id) }]))));
   }
 
+  // Lines this section adds and removes in a file, coloured like a diff.
   function changeDelta(path, topic, locations) {
     const rows = [...locations.values()].filter(entry => entry.file.path === path && (!topic || topic.editIds.includes(entry.edit.id))).flatMap(entry => entry.edit.rows);
-    if (!rows.length) return 'cited evidence';
+    const delta = element('span', 'rf-file-delta');
+    if (!rows.length) {
+      delta.textContent = 'cited evidence';
+      return delta;
+    }
     const count = type => rows.filter(row => row.type === type).length;
-    return `+${count('add')} −${count('delete')}`;
+    delta.append(element('span', 'rf-delta-add', `+${count('add')}`), ' ', element('span', 'rf-delta-delete', `−${count('delete')}`));
+    return delta;
+  }
+
+  function sectionFileRow(path, topic, locations) {
+    const jump = pathButton(path, path.split('/').at(-1), () => void revealFile(path, topic), 'rf-link-button');
+    jump.title = `${path} · show its changes in the diff`;
+    jump.setAttribute('aria-label', path);
+    const row = element('div', 'rf-section-file');
+    row.append(jump, changeDelta(path, topic, locations), reviewToggle(path));
+    return row;
   }
 
   function finishFailure(message, request) {
@@ -1026,7 +1085,9 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       const target = targets.find(entry => entry.text.includes(identifier));
       if (!target) return null;
       const note = target.note.length > 280 ? `${target.note.slice(0, 279)}…` : target.note;
-      return reference(element('code', '', identifier), target, note);
+      const node = reference(middleEllipsis(identifier, 'code'), target, note);
+      node.title = `${identifier}\n${node.title}`;
+      return node;
     };
   }
 
@@ -1067,27 +1128,33 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       for (const question of topic.questions) questions.append(richText('li', '', question, link));
       body.append(element('h3', '', 'Review questions'), questions);
     }
-    if (topic.excerpts.length) {
-      const list = element('ul', 'rf-code-refs');
-      for (const excerpt of topic.excerpts) {
+    // Files the section quotes come first, each with its quoted lines; files it only changes follow.
+    const cited = [...new Set(topic.excerpts.map(excerpt => excerpt.path))];
+    const changedOnly = [...new Set(topic.editIds.map(id => locations.get(id).file.path))].filter(path => !cited.includes(path));
+    if (cited.length) {
+      const list = element('ul', 'rf-section-files rf-code-refs');
+      for (const path of cited) {
         const item = element('li');
-        const label = `${excerpt.path.split('/').at(-1)}${excerpt.side === 'before' ? ' (before)' : ''} ${lineRange(excerpt)}`;
-        item.append(reference(document.createTextNode(label), excerpt, excerpt.note), richText('div', 'rf-code-note', excerpt.note, link));
+        item.append(sectionFileRow(path, topic, locations));
+        for (const excerpt of topic.excerpts.filter(entry => entry.path === path)) {
+          const quote = element('div', 'rf-code-quote');
+          const label = `${lineRange(excerpt)}${excerpt.side === 'before' ? ' (before)' : ''}`;
+          quote.append(reference(document.createTextNode(label), excerpt, excerpt.note), richText('div', 'rf-code-note', excerpt.note, link));
+          item.append(quote);
+        }
         list.append(item);
       }
       body.append(element('h3', '', 'In the code'), list);
     }
-    const paths = [...new Set([...topic.editIds.map(id => locations.get(id).file.path), ...topic.excerpts.map(excerpt => excerpt.path)])];
-    const files = element('ul', 'rf-section-files');
-    for (const path of paths) {
-      const jump = button(path.split('/').at(-1), () => void revealFile(path, topic), 'rf-link-button');
-      jump.title = `${path} · show its changes in the diff`;
-      jump.setAttribute('aria-label', path);
-      const item = element('li');
-      item.append(jump, element('span', 'rf-file-delta', changeDelta(path, topic, locations)), reviewToggle(path));
-      files.append(item);
+    if (changedOnly.length) {
+      const list = element('ul', 'rf-section-files');
+      for (const path of changedOnly) {
+        const item = element('li');
+        item.append(sectionFileRow(path, topic, locations));
+        list.append(item);
+      }
+      body.append(element('h3', '', cited.length ? 'Also changed in this section' : 'Files in this section'), list);
     }
-    body.append(element('h3', '', 'Files in this section'), files);
     if (topic.uncertainty) {
       const limits = disclosure('Evidence limits', 'rf-limits');
       limits.append(richText('div', 'rf-uncertainty', topic.uncertainty, link));
@@ -1142,7 +1209,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       const list = element('ul');
       for (const file of deletedFiles) {
         const item = element('li');
-        item.append(button(file.path, () => void revealCode({ path: file.path, side: 'before', startLine: 1, endLine: 0 }), 'rf-link-button'), element('span', 'rf-file-delta', `−${file.deletions.toLocaleString()}`));
+        item.append(pathButton(file.path, file.path, () => void revealCode({ path: file.path, side: 'before', startLine: 1, endLine: 0 }), 'rf-link-button'), element('span', 'rf-file-delta', `−${file.deletions.toLocaleString()}`));
         list.append(item);
       }
       group.append(list);

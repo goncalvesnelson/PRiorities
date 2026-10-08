@@ -35,6 +35,12 @@ label { display: block; color: var(--rf-text); font-weight: 600; margin: 0 0 8px
 #connection-title { color: var(--rf-text); }
 input, select, textarea { width: 100%; font: inherit; padding: 10px 12px; border: 1px solid var(--rf-input); border-radius: 8px; background: var(--rf-background); color: var(--rf-text); transition: border-color .15s; }
 input:hover, select:hover, textarea:hover { border-color: var(--rf-muted); }
+/* A drawn chevron with room around it; the native one sits against the border. */
+select {
+  appearance: none; padding-right: 40px; cursor: pointer;
+  background: var(--rf-background) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%239aa3b2' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 14px center / 16px 16px;
+}
+select:disabled { cursor: default; opacity: .6; }
 input, select, button, a, summary { outline-offset: 3px; }
 :focus-visible { outline: 2px solid var(--rf-primary); }
 input[type="checkbox"] { accent-color: var(--rf-primary); }

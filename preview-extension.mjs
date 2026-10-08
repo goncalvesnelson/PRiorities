@@ -147,7 +147,7 @@ try {
   // Opens the side panel the way the toolbar's Analyze this PR does; a user gesture is required.
   const helper = await send('Target.createTarget', { url: `chrome-extension://${extensionId}/popup.html` });
   const { sessionId: helperSession } = await send('Target.attachToTarget', { targetId: helper.targetId, flatten: true });
-  await waitFor(async () => (await send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, helperSession)).result?.value === 'complete', 'helper page');
+  await waitFor(async () => (await send('Runtime.evaluate', { expression: 'document.readyState === "complete" && typeof chrome.tabs?.getCurrent === "function"', returnByValue: true }, helperSession)).result?.value === true, 'helper page');
   await send('Runtime.evaluate', { userGesture: true, awaitPromise: true, expression: `(async () => {
     const helper = await chrome.tabs.getCurrent();
     const [tab] = (await chrome.tabs.query({})).filter(entry => entry.id !== helper.id);
