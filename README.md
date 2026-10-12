@@ -4,13 +4,55 @@ Focus GitHub code reviews on the changes that need your judgment.
 
 PRiorities is a Chrome extension that uses your local Codex or Claude Code login to explain changes in Chrome’s side panel while you review GitHub’s own diff. It classifies each file separately, with up to six files in parallel by default, then reviews the whole PR to choose what needs attention.
 
-- Read numbered, expandable sections in comprehension order, with prerequisites first. Each section explains before/after behavior, why it matters and its review questions. File names, cited line ranges and linked code identifiers jump to the matching code in GitHub.
+- Read numbered, expandable sections in plain language, each following one changed flow with its implementation, callers and tests together. Each section explains before/after behavior, why it matters and its review questions. When a changed definition and its use still land in different sections, both sections link to each other by symbol name. File names, cited line ranges and linked code identifiers jump to the matching code in GitHub.
 - Fold supporting changes and unchanged context behind green markers in GitHub’s Unified diff. Review decisions, their cited evidence, unresolved edits and your always-visible types and paths stay open. Expand any fold or turn folding off; GitHub’s comments and review controls stay in place. Split view stays unchanged.
 - Choose review focus, custom analysis prompts, your CLI model and reasoning effort in Settings. Analyze the full PR or the commit range selected in GitHub, with source context and saved reviews matched to those commits.
 - Skip generated and machine-maintained files by default, with **Review anyway** in the file list. Analyze up to 100 changed files by default, configurable from 1–300; optionally list deleted files without sending their contents to the AI or counting them toward that limit.
 - Follow analysis steps, elapsed time and file progress in the panel. Retry individual files or the whole-PR review without repeating completed classifications. Once capture finishes, analysis continues across panel closure, GitHub navigation and page reloads in the same browser tab.
 - Mark files with GitHub’s **Viewed** checkbox or **Reviewed** in the panel’s section and progress lists. Your review progress stays separate from AI analysis.
 - Reopen completed reviews from a local cache: 100 MB by default, customizable in Settings. Commit or context changes require a fresh review; the cache evicts the least recently used entries when full.
+
+## How it works
+
+```mermaid
+---
+config:
+  flowchart:
+    wrappingWidth: 420
+---
+flowchart TD
+  start(["🔍 <b>Analyze this PR</b>"])
+  copy["📥 <b>Copy the PR</b><br/>diff, key source files, description"]
+
+  perFile["<b>① Read each file on its own</b> · up to 6 at once<br/>labels every change:<br/>its kind, what it defines, what it uses"]
+
+  whole["<b>② Read the whole PR</b><br/>checks the labels against all the code,<br/>groups related changes into sections,<br/>each helper with the code that calls it"]
+
+  check["<b>③ Check</b><br/>every change covered, every quote real code<br/><i>if not, retry</i>"]
+
+  panel["📋 <b>Side panel</b><br/>sections with before, after,<br/>why it matters and questions<br/>⚠️ changes it couldn’t verify,<br/>linked to their code"]
+  folds["🟩 <b>GitHub's diff</b><br/>less important code<br/>folded away,<br/>unverified changes kept open"]
+  cache[("💾 <b>Saved</b><br/>reopens with no<br/>new AI calls")]
+
+  start --> copy
+  copy -- "sends one file at a time,<br/>without the description" --> perFile
+  copy -- "sends every file<br/>and the description" --> whole
+  perFile -- "passes its labels" --> whole
+  whole --> check
+  check --> panel & folds & cache
+  perFile -. "passes defines and uses unchanged<br/>to link split sections" .-> panel
+
+  classDef you fill:#fef3c7,stroke:#d97706,color:#451a03
+  classDef ai fill:#ede9fe,stroke:#7c3aed,color:#2e1065
+  classDef gate fill:#dcfce7,stroke:#16a34a,color:#052e16
+  classDef out fill:#e0f2fe,stroke:#0284c7,color:#082f49
+  class start,copy you
+  class perFile,whole ai
+  class check gate
+  class panel,folds,cache out
+```
+
+The grouping follows code-review research on keeping related changes together ([notes](review-literature-research.md)). Whether it helps reviewers catch more defects is still untested.
 
 ## Install
 
