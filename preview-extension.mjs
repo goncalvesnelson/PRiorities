@@ -28,8 +28,8 @@ const filesPage = `<!doctype html><html data-color-mode="${dark ? 'dark' : 'ligh
 const discussionPage = '<main><div id="issue-1"><div class="js-comment-body">Apply editor font variation settings to suggestion labels, so suggestions match the editor when a variable font is configured.</div></div></main>';
 
 const classifications = [
-  { editId: '0-0-3', kinds: ['behavior'], reason: 'Reads `fontVariationSettings` from the editor font info so the renderer can apply it.', uncertainty: '' },
-  { editId: '0-1-3', kinds: ['behavior'], reason: 'Applies the variation settings to the label element style.', uncertainty: '' }
+  { editId: '0-0-3', kinds: ['behavior'], reason: 'Reads `fontVariationSettings` from the editor font info so the renderer can apply it.', uncertainty: '', defines: ['fontVariationSettings'], uses: ['fontInfo'] },
+  { editId: '0-1-3', kinds: ['behavior'], reason: 'Applies the variation settings to the label element style.', uncertainty: '', defines: [], uses: ['main', 'fontVariationSettings'] }
 ];
 const assessment = {
   summary: 'The author reports that suggestion labels ignore the editor’s font variation settings. The change reads `fontVariationSettings` from the editor font info and applies it to each label’s style.',

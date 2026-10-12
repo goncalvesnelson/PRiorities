@@ -148,7 +148,7 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-rich p, .rf-rich ul { margin: 10px 0 0; }
 .rf-rich > :first-child { margin-top: 0; }
 .rf-rich ul, .rf-questions, .rf-code-refs { padding-left: 20px; }
-.rf-rich code, .rf-gist code, .rf-ref code { padding: 1px 5px; border: 1px solid var(--rf-border); border-radius: 4px; background: var(--rf-muted-background); font-size: .87em; }
+.rf-rich code, .rf-gist code, .rf-ref code, .rf-section-links code { padding: 1px 5px; border: 1px solid var(--rf-border); border-radius: 4px; background: var(--rf-muted-background); font-size: .87em; }
 .rf-fold-control { margin: 16px 0 10px; padding: 12px 14px; border: 1px solid var(--rf-border); border-radius: 12px; background: var(--rf-muted-background); }
 .rf-fold-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; line-height: 16px; font-weight: 600; cursor: pointer; }
 .rf-fold-toggle input { width: 14px; height: 14px; margin: 0; flex-shrink: 0; accent-color: var(--rf-primary); }
@@ -213,6 +213,7 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-code-refs .rf-ref { font: 600 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--rf-accent); }
 
 .rf-section-files { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.rf-section-links { list-style: none; margin: 0; padding: 0; font-size: 12px; overflow-wrap: anywhere; }
 .rf-section-file { display: flex; align-items: center; gap: 8px; min-height: 28px; }
 .rf-code-refs > li + li { margin-top: 12px; }
 .rf-code-quote { margin: 2px 0 0; padding-left: 12px; }

@@ -1,6 +1,6 @@
 // The PRiorities side panel: Chrome shows it beside the GitHub tab it was opened for. Everything
 // that reads or changes GitHub's page goes through the page agent in that tab (page-agent.js).
-import { isGeneratedFile } from './review-data.js';
+import { isGeneratedFile, sectionLinks } from './review-data.js';
 
 const readyMark = '✓ Ready · ';
 const attentionMark = '⚠ Needs attention · ';
@@ -1101,7 +1101,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     card.querySelector('summary').focus({ preventScroll: true });
   }
 
-  function renderTopic(topic, index, locations) {
+  function renderTopic(topic, index, locations, links) {
     const card = element('details', 'rf-topic');
     card.dataset.topicId = topic.id;
     card.dataset.priority = topic.priority;
@@ -1112,7 +1112,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     const heading = element('span', 'rf-topic-heading');
     heading.append(element('span', 'rf-topic-number', String(index + 1)), appendInline(element('span', 'rf-topic-title'), topic.title), element('span', 'rf-priority', topic.priority === 'review' ? 'Review' : 'Supporting'));
     summary.append(heading);
-    if (topic.gist) summary.append(gistLine('span', topic.gist));
+    summary.append(gistLine('span', topic.gist));
     card.append(summary);
     const body = element('div', 'rf-topic-body');
     const link = identifierLinker(topic, locations);
@@ -1154,6 +1154,17 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
         list.append(item);
       }
       body.append(element('h3', '', cited.length ? 'Also changed in this section' : 'Files in this section'), list);
+    }
+    const related = [...links.filter(link => link.usedIn === topic.id).map(link => [link.symbol, 'is changed in', link.definedIn]), ...links.filter(link => link.definedIn === topic.id).map(link => [link.symbol, 'is used in', link.usedIn])];
+    if (related.length) {
+      const list = element('ul', 'rf-section-links');
+      for (const [symbol, relation, id] of related) {
+        const number = analysis.topics.findIndex(other => other.id === id) + 1;
+        const item = element('li');
+        item.append(element('code', '', symbol), ` ${relation} `, button(`section ${number}`, () => openTopic(id), 'rf-link-button'));
+        list.append(item);
+      }
+      body.append(element('h3', '', 'Related sections'), list);
     }
     if (topic.uncertainty) {
       const limits = disclosure('Evidence limits', 'rf-limits');
@@ -1224,7 +1235,8 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     const sections = element('section', 'rf-sections');
     sections.setAttribute('aria-label', 'Sections');
     sections.append(element('h2', 'rf-sections-title', `Sections · ${analysis.topics.length}`));
-    for (const [index, topic] of analysis.topics.entries()) sections.append(renderTopic(topic, index, locations));
+    const links = sectionLinks(analysis);
+    for (const [index, topic] of analysis.topics.entries()) sections.append(renderTopic(topic, index, locations, links));
     const details = disclosure('Analysis details', 'rf-review-details');
     if (cacheMessage) details.append(element('p', 'rf-cache-detail', cacheMessage));
     details.append(element('p', 'rf-provenance', `Analyzed ${snapshot.baseSha.slice(0, 8)}…${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}, effort: ${reviewEffort || 'model default'}.`));
