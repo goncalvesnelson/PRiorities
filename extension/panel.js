@@ -1228,8 +1228,19 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     }
     const unresolved = analysis.classifications.filter(entry => entry.kinds.includes('unknown'));
     if (unresolved.length) {
-      const notice = element('div', 'rf-unresolved', `${unresolved.length} ${unresolved.length === 1 ? 'edit has' : 'edits have'} unresolved evidence. `);
-      for (const topic of analysis.topics.filter(topic => unresolved.some(entry => topic.editIds.includes(entry.editId)))) notice.append(button(topic.title, () => openTopic(topic.id), 'rf-link-button'));
+      const notice = element('div', 'rf-unresolved', `${unresolved.length} ${unresolved.length === 1 ? 'change' : 'changes'} could not be fully checked from the captured code. Review ${unresolved.length === 1 ? 'it' : 'them'} yourself:`);
+      const list = element('ul', 'rf-unresolved-list');
+      for (const classification of unresolved) {
+        const { file, edit } = locations.get(classification.editId);
+        const changedType = edit.rows.some(row => row.type === 'add') ? 'add' : 'delete';
+        const lines = edit.rows.filter(row => row.type === changedType).map(row => changedType === 'add' ? row.newLine : row.oldLine);
+        const target = { path: file.path, side: changedType === 'add' ? 'after' : 'before', startLine: Math.min(...lines), endLine: Math.max(...lines) };
+        const topicIndex = analysis.topics.findIndex(topic => topic.editIds.includes(classification.editId));
+        const item = element('li');
+        item.append(reference(element('code', '', `${file.path} ${lineRange(target)}`), target, classification.uncertainty), ' in ', button(`section ${topicIndex + 1}`, () => openTopic(analysis.topics[topicIndex].id), 'rf-link-button'));
+        list.append(item);
+      }
+      notice.append(list);
       summary.append(notice);
     }
     const sections = element('section', 'rf-sections');
