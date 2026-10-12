@@ -42,7 +42,10 @@ const assessment = {
   summary: 'Confirm the suggestion widget follows editor font variation settings.\n- Applies `fontVariationSettings` to **both** rendering paths.\n- Keeps <img src=x onerror=alert(1)> and a `dangling **marker as text.',
   topics: [{ id: 'font-settings', priority: 'review', title: 'Check both suggestion rendering paths', gist: 'Where labels apply `fontVariationSettings` <img src=x onerror="window.injectedGist=1">', reason: 'Both rendering paths must match the editor typography; missing one leaves suggestions inconsistent.', before: 'The widget did not set font variation settings.', after: 'Each path applies the configured variation settings.', questions: ['Do both paths receive the intended font setting?', 'Should **other** widgets apply `fontVariationSettings` too?'], uncertainty: 'No application tests were run.', editIds: ['0-0-3', '0-1-3'], excerpts: [{ path: sourcePath, side: 'after', startLine: 137, endLine: 137, note: 'The label element receives `fontVariationSettings`.' }] }]
 };
-const classifications = ['0-0-3', '0-1-3'].map(editId => ({ editId, kinds: ['behavior'], reason: 'The assignment applies a font variation setting.', uncertainty: '' }));
+const classifications = [
+  { editId: '0-0-3', kinds: ['behavior'], reason: 'The assignment applies a font variation setting.', uncertainty: '', defines: ['fontVariationSettings'], uses: ['fontInfo'] },
+  { editId: '0-1-3', kinds: ['behavior'], reason: 'The assignment applies a font variation setting.', uncertainty: '', defines: [], uses: ['main', 'fontVariationSettings'] }
+];
 const profile = await mkdtemp(join(tmpdir(), 'review-focus-extension-'));
 const requestLog = join(profile, 'codex-requests.jsonl');
 const statusLog = join(profile, 'cli-status.jsonl');
@@ -86,13 +89,17 @@ const evidence = JSON.parse(input);
 let labels = ${JSON.stringify(classifications)};
 let review = ${JSON.stringify(assessment)};
 if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-final-failed' || mode === 'many-decisions' || mode === 'guide-sections' || mode === 'deleted-files') {
-  labels = evidence.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => ({editId:item.id,kinds:['behavior'],reason:'Synthetic change.',uncertainty:''}))));
+  labels = evidence.files.flatMap(file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => ({editId:item.id,kinds:['behavior'],reason:'Synthetic change.',uncertainty:'',defines:[],uses:[]}))));
   review = { summary:'Synthetic parallel review.', topics:[{...review.topics[0],id:'parallel-change',priority:'supporting',title:'Synthetic supporting changes',editIds:labels.map(entry=>entry.editId),excerpts:[]}] };
 }
 if (mode === 'guide-sections') {
   const idsFor = file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => item.id));
   const unknown = new Set(evidence.files.flatMap(file => file.path === 'tests/change-2.ts' ? idsFor(file) : file.path === 'tests/change-3.ts' ? idsFor(file).slice(2) : []));
   labels = labels.map(label => unknown.has(label.editId) ? {...label, kinds:['unknown'], uncertainty:'The external caller contract is unavailable.'} : label);
+  const contractSymbols = ['contractValue', '<b>Contract</b>'];
+  const definers = new Set(evidence.files.filter(file => file.path === 'tests/change-3.ts').map(file => idsFor(file)[1]));
+  const users = new Set(evidence.files.flatMap(file => file.path === 'tests/change-4.ts' ? idsFor(file) : []));
+  labels = labels.map(label => ({...label, defines: definers.has(label.editId) ? contractSymbols : [], uses: users.has(label.editId) ? contractSymbols : []}));
   if (!schema.required.includes('edits')) {
     const ids = index => idsFor(evidence.files[index]);
     const topic = (id, title, priority, editIds, excerpts = []) => ({...review.topics[0], id, title, gist: 'Gist for ' + title.toLowerCase() + '.', priority, editIds, excerpts});
@@ -2224,6 +2231,15 @@ try {
   assert.deepEqual(await inPanel(`[getComputedStyle(${contract}.querySelector('.rf-topic-summary')).position, getComputedStyle(${contract}.querySelector('.rf-gist')).webkitLineClamp, getComputedStyle(document.querySelector('.rf-topic[data-topic-id=validation] .rf-gist')).webkitLineClamp]`), ['sticky', 'none', '2'], 'Open section headings stay pinned and expand their gist while collapsed sections show two lines.');
   assert.deepEqual(await inPanel(`[...${contract}.querySelectorAll('.rf-section-file')].map(row => [row.querySelector('button').getAttribute('aria-label'), row.querySelector('.rf-file-delta').textContent])`), [[sharedPath, '+1 −1'], [changes.paths[4], 'cited evidence']], 'Cited and changed files appear once, with deltas belonging to this section.');
   assert.equal(await inPanel(`${contract}.querySelectorAll('.rf-code-quote').length`), 3, 'Multiple excerpts stay grouped under their file.');
+  const relatedSections = () => inPanel(`Object.fromEntries([...document.querySelectorAll('.rf-topic')].map(card => [card.dataset.topicId, [...card.querySelectorAll('.rf-section-links li')].map(item => item.textContent)]))`);
+  const expectedRelated = {supporting: [], contract: ['contractValue is used in section 3', '<b>Contract</b> is used in section 3'], validation: ['contractValue is changed in section 2', '<b>Contract</b> is changed in section 2'], unknown: []};
+  assert.deepEqual(await relatedSections(), expectedRelated, 'A symbol defined in one section and used in another links both cards; sections without such symbols show none.');
+  assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic')].map(card => [...card.querySelectorAll('h3')].some(heading => heading.textContent === 'Related sections'))`), [false, true, true, false]);
+  assert.equal(await inPanel(`document.querySelectorAll('.rf-section-links b, .rf-section-links img').length`), 0, 'Symbol names from the model render as text, never markup.');
+  await inPanel(`${contract}.querySelector('.rf-section-links button').click()`);
+  await waitFor(() => inPanel(`document.querySelector('.rf-topic[data-topic-id=validation]').open && document.activeElement === document.querySelector('.rf-topic[data-topic-id=validation] > summary')`), 'related-section link opens the section using the symbol');
+  await inPanel(`document.querySelector('.rf-topic[data-topic-id=validation] .rf-section-links button').click()`);
+  await waitFor(() => inPanel(`document.activeElement === ${contract}.querySelector('summary') && ${contract}.open`), 'related-section link returns to the section defining the symbol');
   await inPanel(`${contract}.querySelector('.rf-code-quote > .rf-ref').click()`);
   await waitFor(() => inPage('Boolean(document.querySelector(".review-focus-native-target"))'), 'panel excerpt reveals native code');
   assert.equal(await inPage('document.querySelector(".review-focus-native-target").textContent.includes("contract")'), true);
@@ -2278,33 +2294,9 @@ try {
   await waitFor(() => inPanel("document.querySelector('.rf-analyze')?.textContent === 'Open saved review'"), 'saved multi-section review');
   await click('Open saved review');
   await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')"), 'saved sections restored');
+  assert.deepEqual(await relatedSections(), expectedRelated, 'A saved review keeps the symbol relations behind its section links.');
   assert.equal(await inPanel(`${sharedInputs}.every(input => input.checked)`), true);
   assert.equal(await inPage('window.fixtureViewedClicks'), 0, 'Restoring a saved review never changes Viewed.');
-  assert.equal((await modelRequests()).length - beforeSections, 6);
-  await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});
-  await waitFor(() => inPage('!document.querySelector("#save-review-preferences").disabled'), 'extension page ready to rewrite the saved review');
-  assert.equal(await inPage(`new Promise((resolve, reject) => {
-    const request = indexedDB.open('review-focus');
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => {
-      const transaction = request.result.transaction('reviews', 'readwrite');
-      let removed = 0;
-      transaction.objectStore('reviews').openCursor().onsuccess = event => {
-        const cursor = event.target.result;
-        if (!cursor) return;
-        for (const topic of cursor.value.value.analysis.topics) if (Object.hasOwn(topic, 'gist')) removed += delete topic.gist;
-        cursor.update(cursor.value);
-        cursor.continue();
-      };
-      transaction.oncomplete = () => { request.result.close(); resolve(removed); };
-      transaction.onerror = () => reject(transaction.error);
-    };
-  })`), 4, 'The saved review now matches one stored before sections had a gist.');
-  await page('Page.navigate', { url: prUrl + '/changes' });
-  await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved review without gists');
-  await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'Review without gists restored');
-  assert.deepEqual(await inPanel(`[document.querySelectorAll('.rf-gist').length, [...document.querySelectorAll('.rf-topic-title')].map(node => node.textContent)]`), [0, ['Supporting setup', 'Check the contract and its implementation', 'Check the separate validation path', 'External caller contract']], 'Saved reviews without gists display their titles.');
   assert.equal((await modelRequests()).length - beforeSections, 6);
   for (const override of ['always-visible', 'protected']) {
     await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});

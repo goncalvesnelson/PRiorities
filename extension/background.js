@@ -419,7 +419,7 @@ function createSession(tabId, url, port) {
     if ([...session.files].some(([path, entry]) => entry.included && entry.state !== 'skipped' && !restored.has(path))) return false;
     const included = session.snapshot.files.filter(file => restored.has(file.path) || session.files.get(file.path).included && session.files.get(file.path).state === 'skipped');
     const snapshot = { ...session.snapshot, files: included, context: session.snapshot.context.filter(source => included.some(file => file.path === source.path)) };
-    const analysis = validateAnalysis(cached.analysis, snapshot, { saved: true });
+    const analysis = validateAnalysis(cached.analysis, snapshot, { initialClassifications: cached.analysis.classifications });
     session.initialized = true;
     session.restoring = false;
     for (const path of restored) {
