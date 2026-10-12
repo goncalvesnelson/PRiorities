@@ -369,6 +369,7 @@ export function startPageAgent(port, queued = []) {
       try {
         return await capturePullRequest({ ...options, signal: controller.signal, onProgress: message => post({ kind: 'capture-progress', message }) });
       } finally {
+        controller.abort();
         if (captureController === controller) captureController = undefined;
       }
     },
