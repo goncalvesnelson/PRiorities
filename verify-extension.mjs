@@ -950,17 +950,20 @@ try {
   const beforeUnresolved = (await modelRequests()).length;
   await writeFile(modeFile, 'unresolved');
   await click('Run fresh review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-unresolved')?.textContent.includes('1 edit') && !document.querySelector('.rf-analyze').disabled`), 'unresolved classification visibility');
+  await waitFor(() => inPanel(`document.querySelector('.rf-unresolved')?.textContent.includes('1 change could not be fully checked') && !document.querySelector('.rf-analyze').disabled`), 'unresolved classification visibility');
   let afterUnresolved = (await modelRequests()).length;
   assert.equal(afterUnresolved - beforeUnresolved, 2);
   assert.equal(await inPage(`document.querySelector('td[data-line-number="151"]').closest('tr').classList.contains('review-focus-native-hidden')`), false, 'Unresolved changes stay visible in GitHub.');
-  await inPanel("document.querySelector('.rf-unresolved button').click(); document.querySelector('.rf-topic[data-topic-id=second-path] .rf-evidence').open = true");
+  await inPanel("document.querySelector('.rf-unresolved .rf-ref').click()");
+  await waitFor(() => inPage(`Boolean(document.querySelector('.review-focus-native-target td[data-line-number="151"]'))`), 'unresolved change revealed in GitHub');
+  assert.ok(await inPanel(`document.querySelector('.rf-unresolved .rf-ref').title.includes('cannot be established')`), 'The code link names the missing evidence.');
+  await inPanel("document.querySelector('.rf-unresolved .rf-link-button').click(); document.querySelector('.rf-topic[data-topic-id=second-path] .rf-evidence').open = true");
   assert.equal(await inPanel(`document.querySelector('.rf-edit[data-edit-id="0-1-3"] .rf-change-kind').textContent`), 'Change type: unknown');
   assert.ok(await inPanel(`document.querySelector('.rf-edit[data-edit-id="0-1-3"] .rf-uncertainty').textContent.includes('cannot be established')`));
 
   await writeFile(modeFile, 'reconciled');
   await click('Run fresh review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-unresolved')?.textContent.includes('1 edit') && !document.querySelector('.rf-analyze').disabled`), 'revised classification replaces both first-pass uncertainties');
+  await waitFor(() => inPanel(`document.querySelector('.rf-unresolved')?.textContent.includes('1 change could not be fully checked') && !document.querySelector('.rf-analyze').disabled`), 'revised classification replaces both first-pass uncertainties');
   assert.equal((await modelRequests()).length - afterUnresolved, 2, 'Reconciling classifications must not add a model call.');
   afterUnresolved = (await modelRequests()).length;
   for (const restored of [false, true]) {
@@ -972,7 +975,7 @@ try {
       assert.equal((await modelRequests()).length, afterUnresolved, 'Restoring revised classifications must not invoke the model.');
     }
     assert.equal(await inPanel("document.querySelectorAll('.rf-edit').length"), 2);
-    assert.ok(await inPanel(`document.querySelector('.rf-unresolved').textContent.includes('1 edit')`));
+    assert.ok(await inPanel(`document.querySelector('.rf-unresolved').textContent.includes('1 change could not be fully checked')`));
     assert.equal(await inPanel(`document.querySelector('.rf-topic').textContent.includes('missing from this file pass')`), false, 'First-pass evidence gaps must not reappear after reconciliation.');
     assert.ok(await inPanel(`document.querySelector('.rf-topic').textContent.includes('Only the external caller contract remains unavailable.')`));
   }
@@ -2283,7 +2286,7 @@ try {
   await inPanel(`${contract}.querySelectorAll('.rf-section-file button')[1].click()`);
   await waitFor(() => inPage(`document.getElementById('diff-${changes.entries[4].pathDigest}').classList.contains('review-focus-native-target')`), 'newly loaded cited file revealed');
   assert.equal(await inPanel("document.querySelector('.rf-navigation-notice').hidden"), true);
-  await inPanel("document.querySelector('.rf-unresolved button').click()");
+  await inPanel("document.querySelector('.rf-unresolved .rf-link-button').click()");
   assert.equal(await inPanel("document.querySelector('.rf-topic[data-topic-id=unknown]').open"), true, 'Unresolved evidence opens its own explanation.');
   await panelPage('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:false});
   assert.equal(await inPanel("document.querySelector('.rf-panel').scrollWidth > document.querySelector('.rf-panel').clientWidth"), false, 'Sections, references, file names and Reviewed controls fit the panel.');

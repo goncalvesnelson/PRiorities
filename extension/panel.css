@@ -160,6 +160,8 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-deleted-files .rf-link-button { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .rf-unresolved { margin: 10px 0 0; padding: 8px 12px; border-radius: 12px; background: var(--rf-warning-tint); color: var(--rf-warning); font-size: 12px; }
 .rf-unresolved .rf-link-button { color: inherit; text-decoration: underline; white-space: normal; text-align: left; }
+.rf-unresolved-list { margin: 6px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.rf-unresolved-list li + li { margin-top: 4px; }
 
 /* Section cards */
 .rf-topic {
