@@ -103,11 +103,13 @@ if (mode === 'guide-sections') {
   if (!schema.required.includes('edits')) {
     const ids = index => idsFor(evidence.files[index]);
     const topic = (id, title, priority, editIds, excerpts = []) => ({...review.topics[0], id, title, gist: 'Gist for ' + title.toLowerCase() + '.', priority, editIds, excerpts});
+    // Review anyway on the machine-maintained sixth file also makes the validation section cite a line it did not cite before.
+    const reviewedAnyway = evidence.files.length > 5;
     review.topics = [
-      topic('supporting', 'Supporting setup', 'supporting', [...ids(0), ...ids(4), ids(2)[0]]),
+      topic('supporting', 'Supporting setup', 'supporting', [...ids(0), ...ids(4), ids(2)[0], ...reviewedAnyway ? ids(5) : []]),
       topic('contract', 'Check the contract and its implementation', 'review', [ids(2)[1]], [{path:evidence.files[2].path,side:'after',startLine:4,endLine:4,note:'The contract changes here.'},{path:evidence.files[4].path,side:'before',startLine:1,endLine:1,note:'The implementation read the old contract.'},{path:evidence.files[2].path,side:'after',startLine:3,endLine:5,note:'Surrounding context keeps the contract readable.'}]),
-      topic('validation', 'Check the separate validation path', 'review', ids(3), [{path:evidence.files[3].path,side:'after',startLine:1,endLine:1,note:'Validation reads the new value.'}]),
-      {...topic('unknown', 'External caller contract', 'supporting', [...ids(1), ids(2)[2]]), uncertainty:'The external caller contract is unavailable.'}
+      topic('validation', 'Check the separate validation path', 'review', ids(3), [{path:evidence.files[3].path,side:'after',startLine:1,endLine:1,note:'Validation reads the new value.'}, ...reviewedAnyway ? [{path:evidence.files[3].path,side:'before',startLine:1,endLine:1,note:'Validation read the old value.'}] : []]),
+      {...topic('unknown', 'External caller contract', 'supporting', [...ids(1), ids(2)[2]], [{path:evidence.files[2].path,side:'after',startLine:4,endLine:4,note:'External callers read the new contract.'}]), uncertainty:'The external caller contract is unavailable.'}
     ];
   }
 }
@@ -875,7 +877,7 @@ try {
   await openFiles();
   assert.equal(await inPanel("document.querySelector('.rf-progress-toggle').getAttribute('aria-expanded')"), 'true');
   const humanReviewInputs = `[...document.querySelectorAll('.rf-reviewed-toggle input')]`;
-  assert.deepEqual(await inPanel(`${humanReviewInputs}.map(input => [input.checked, input.indeterminate])`), [[false, false], [false, false]], 'AI completion never checks the section or file-list Reviewed controls.');
+  assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-section-done input, .rf-reviewed-toggle input')].map(input => [input.checked, input.indeterminate])`), [[false, false], [false, false]], 'AI completion never marks a section done or checks the file-list Reviewed control.');
   assert.equal(await inPage('window.fixtureViewedClicks'), 0);
   await inPanel(`document.querySelector('.rf-evidence').open = true; window.savedReviewEvidence = document.querySelector('.rf-evidence'); document.querySelector('.rf-file-list input').focus(); document.querySelector('.rf-file-list input').click()`);
   await waitFor(() => inPanel(`${humanReviewInputs}.every(input => input.checked && input.getAttribute('aria-disabled') === 'false')`), 'Viewed mirrored after native header replacement');
@@ -892,8 +894,8 @@ try {
   assert.equal(await inPage('window.fixtureViewedClicks'), 3);
   await inPage('document.querySelector(".js-reviewed-checkbox").disabled = false');
   await waitFor(() => inPanel(`${humanReviewInputs}.every(input => input.getAttribute('aria-disabled') === 'false')`), 'Viewed control available');
-  await inPanel("document.querySelector('.rf-section-file input').click()");
-  await waitFor(() => inPanel(`${humanReviewInputs}.every(input => input.checked)`), 'section Reviewed saved');
+  await inPanel("document.querySelector('.rf-section-done input').click()");
+  await waitFor(() => inPanel(`${humanReviewInputs}.every(input => input.checked)`), 'marking the only section listing a file done marks it Viewed');
   assert.equal((await modelRequests()).length, initialRequestCount);
   const closedPanelTarget = panelTarget;
   const closedPanel = await send('Runtime.evaluate', {expression:`chrome.sidePanel.close({tabId:${fixtureTabId}})`,awaitPromise:true}, workers.at(-1));
@@ -904,7 +906,7 @@ try {
   await waitFor(() => inPanel("document.querySelector('.rf-analyze')?.textContent === 'Open saved review'"), 'saved review offered in reopened panel');
   await click('Open saved review');
   await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')"), 'reopened panel restores saved review');
-  assert.deepEqual(await inPanel(`${humanReviewInputs}.map(input => input.checked)`), [true, true]);
+  assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-section-done input, .rf-reviewed-toggle input')].map(input => input.checked)`), [true, true], 'A reopened panel restores the section marked done and GitHub’s Viewed mark.');
   assert.equal((await modelRequests()).length, initialRequestCount);
   await send('Runtime.evaluate', { expression: 'setTimeout(() => chrome.runtime.reload(), 0)' }, workers.at(-1));
   await waitFor(() => inPage('document.querySelectorAll(".review-focus-native-fold, .review-focus-native-hidden").length === 0'), 'extension reload restores native rows');
@@ -1725,6 +1727,32 @@ try {
     finally { IDBObjectStore.prototype.put = originalPut; }
     const cancellation = {preAborted,abortedWrite,previous:await cache.readReview('previous'),replacement:await cache.readReview('uncommitted'),unstarted:await cache.readReview('never-started')};
     await cache.clearCache();
+    const tick = {topicId:'section',path:'file.js'};
+    const otherTick = {topicId:'other-section',path:'file.js'};
+    const savedTicks = async key => (await cache.readReview(key)).ticks;
+    const opened = await cache.saveReview({key:'ticked',lookup:'ticks'},{text:'Ticked review'});
+    await Promise.all([cache.saveSectionTicks('ticked',opened.savedAt,tick,true), cache.saveSectionTicks('ticked',opened.savedAt,otherTick,true)]);
+    const ticks = {saved:await savedTicks('ticked')};
+    await cache.saveSectionTicks('ticked',opened.savedAt,otherTick,false);
+    ticks.unticked = await savedTicks('ticked');
+    const rerun = await cache.saveReview({key:'ticked',lookup:'ticks'},{text:'Rerun keeping its ticks'},undefined,[otherTick]);
+    ticks.carried = await savedTicks('ticked');
+    await cache.saveSectionTicks('ticked',opened.savedAt,tick,true);
+    ticks.staleSession = await savedTicks('ticked');
+    await cache.saveSectionTicks('ticked',rerun.savedAt,tick,true);
+    ticks.currentSession = await savedTicks('ticked');
+    const fresh = await cache.saveReview({key:'ticked',lookup:'ticks'},{text:'Fresh review with the same fingerprint'});
+    ticks.sameKey = await savedTicks('ticked');
+    await cache.saveSectionTicks('ticked',rerun.savedAt,tick,true);
+    ticks.replacedSession = await savedTicks('ticked');
+    const replacing = await cache.saveReview({key:'replacement',lookup:'ticks'},{text:'Fresh review of the same lookup'});
+    await cache.saveSectionTicks('ticked',fresh.savedAt,tick,true);
+    ticks.replaced = {review:await cache.readReview('ticked'),count:(await cache.cacheInfo()).count};
+    await cache.saveSectionTicks('replacement',replacing.savedAt,tick,true);
+    await cache.clearCache();
+    await cache.saveReview({key:'replacement',lookup:'ticks'},{text:'Saved again after clearing'});
+    ticks.cleared = (await cache.readReview('replacement')).ticks;
+    await cache.clearCache();
     const settings = {provider:'claude',model:'fixture'};
     const input = {url:${JSON.stringify(prUrl)},baseSha:${JSON.stringify(baseSha)},headSha:${JSON.stringify(headSha)},description:'first',context:[]};
     const original = await cache.reviewCacheKey(input,settings);
@@ -1756,13 +1784,21 @@ try {
     const shrunk = await cache.setCacheLimit(1);
     await cache.clearCache();
     const highlightKeys = new Set((await Promise.all([${JSON.stringify(completeChanges.snapshot)},${JSON.stringify(plainChanges.snapshot)}].map(snapshot=>cache.reviewCacheKey(snapshot,settings)))).map(entry=>entry.key)).size;
-    return {cancellation,earlierReview,keys:new Set([original,...variants].map(entry=>entry.key)).size,highlightKeys,lru,tooLarge,parallel,shrunk,cleared:await cache.cacheInfo()};
+    return {cancellation,ticks,earlierReview,keys:new Set([original,...variants].map(entry=>entry.key)).size,highlightKeys,lru,tooLarge,parallel,shrunk,cleared:await cache.cacheInfo()};
   })()`);
   assert.equal(cacheChecks.cancellation.preAborted, true);
   assert.equal(cacheChecks.cancellation.abortedWrite, true, 'Cancelling an uncommitted IndexedDB write must abort the transaction.');
   assert.equal(cacheChecks.cancellation.previous.text, 'Paid review', 'Aborting a replacement must roll back deletion of the earlier review.');
   assert.equal(cacheChecks.cancellation.replacement, null);
   assert.equal(cacheChecks.cancellation.unstarted, null);
+  const [savedTick, otherSavedTick] = [{topicId:'section',path:'file.js'}, {topicId:'other-section',path:'file.js'}];
+  assert.deepEqual(cacheChecks.ticks.saved, [savedTick, otherSavedTick], 'Two sessions ticking different sections of one review keep both ticks.');
+  assert.deepEqual(cacheChecks.ticks.unticked, [savedTick], 'Unticking removes only that tick.');
+  assert.deepEqual(cacheChecks.ticks.carried, [otherSavedTick], 'A rerun saves the ticks it carries with its new review.');
+  assert.deepEqual(cacheChecks.ticks.staleSession, [otherSavedTick], 'A session that opened an earlier save of the same key cannot change the newer review’s ticks.');
+  assert.deepEqual(cacheChecks.ticks.currentSession, [otherSavedTick, savedTick]);
+  assert.deepEqual([cacheChecks.ticks.sameKey, cacheChecks.ticks.replacedSession], [[], []], 'A fresh review under the same key starts without ticks, and the replaced session’s ticks stay out of it.');
+  assert.deepEqual([cacheChecks.ticks.replaced, cacheChecks.ticks.cleared], [{review:null,count:1}, []], 'Ticks are deleted with their review when a fresh review of the same lookup replaces it or the cache is cleared; a tick never recreates a deleted review.');
   assert.deepEqual(cacheChecks.earlierReview, {offered:false,retained:true}, 'Reviews from the old folding prompt require fresh analysis without deleting their records.');
   assert.equal(cacheChecks.keys, 9, 'Commits, intent, source context, provider, model, effort and review preferences each change the cache key.');
   assert.equal(cacheChecks.highlightKeys, 1, 'Captures with and without highlighting share one saved-review key.');
@@ -2000,7 +2036,7 @@ try {
   await inPage(`${firstModernFile}.querySelector('button[aria-pressed]').removeAttribute('aria-disabled')`);
   await waitFor(() => inPanel(`${firstModernRow}.querySelector('.rf-reviewed-toggle input').getAttribute('aria-disabled') === 'false'`), 'modern review control active again');
   await inPanel(`${firstModernRow}.querySelector('.rf-reviewed-toggle input').click()`);
-  await waitFor(async () => await inPanel(`[...document.querySelectorAll('.rf-reviewed-toggle[data-path="tests/change-1.ts"] input')].every(input => input.checked)`) && await inPage(`${firstModernFile}.querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true' && !${firstModernFile}.querySelector('button[aria-pressed]').disabled`), 'native Reviewed save finishes before virtualization');
+  await waitFor(async () => await inPanel(`document.querySelector('.rf-reviewed-toggle[data-path="tests/change-1.ts"]').dataset.reviewed === 'true'`) && await inPage(`${firstModernFile}.querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true' && !${firstModernFile}.querySelector('button[aria-pressed]').disabled`), 'native Reviewed save finishes before virtualization');
   await inPage(`window.unmountedReviewFile = ${firstModernFile}; window.unmountedReviewFile.remove()`);
   await waitFor(() => inPanel(`${firstModernRow}.querySelector('.rf-reviewed-toggle input').disabled`), 'unmounted file retains its last observed state without pretending its control is available');
   assert.ok(await inPanel(`${firstModernRow}.querySelector('.rf-reviewed-toggle input').checked && !${firstModernRow}.querySelector('.rf-reviewed-toggle input').indeterminate`));
@@ -2212,6 +2248,22 @@ try {
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !document.querySelector('.rf-analyze').disabled`), 'section fixture ready');
   const sharedPath = changes.paths[2];
   const beforeSections = (await modelRequests()).length;
+  // Lets the check below close the review connection the way a background restart would.
+  await inAgent(`(() => {
+    const connect = chrome.runtime.connect;
+    chrome.runtime.connect = (...args) => {
+      const connection = connect(...args);
+      const add = connection.onDisconnect.addListener.bind(connection.onDisconnect);
+      connection.onDisconnect.addListener = listener => {
+        window.fixtureCloseReview = () => {
+          connection.disconnect();
+          listener();
+        };
+        add(listener);
+      };
+      return connection;
+    };
+  })()`);
   await click('Analyze PR');
   await waitFor(() => inPanel("document.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !document.querySelector('.rf-analyze').disabled"), 'four-section panel review');
   const sectionGists = ['Gist for supporting setup.', 'Gist for check the contract and its implementation.', 'Gist for check the separate validation path.', 'Gist for external caller contract.'];
@@ -2262,13 +2314,63 @@ try {
   assert.ok(await inPanel(`document.querySelector('.rf-navigation-notice a').href.includes('/blob/${headSha}/')`), 'A cited-only file has no section-owned edit, so its file link opens the captured head.');
   await inPanel(`${contract}.querySelectorAll('.rf-code-refs > li')[1].querySelector('.rf-code-quote > .rf-ref').click()`);
   await waitFor(() => inPanel(`document.querySelector('.rf-navigation-notice a')?.href.includes('/blob/${baseSha}/')`), 'before-side source fallback uses base commit');
-  const sharedInputs = `[...document.querySelectorAll('.rf-reviewed-toggle')].filter(label => label.dataset.path === ${JSON.stringify(sharedPath)}).map(label => label.querySelector('input'))`;
-  assert.equal(await inPanel(`${sharedInputs}.length`), 4, 'Three sections and the file list mirror the same native Viewed control.');
-  await inPanel(`${contract}.querySelector('.rf-section-file input').click()`);
-  await waitFor(() => inPanel(`${sharedInputs}.every(input => input.checked && input.getAttribute('aria-disabled') === 'false')`), 'all shared-file Reviewed controls synchronized');
-  assert.equal(await inPage(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelector('button[aria-pressed]').getAttribute('aria-pressed')`), 'true');
-  const missingInput = `${contract}.querySelectorAll('.rf-section-file input')[1]`;
+  const sharedFile = `document.getElementById('diff-${changes.entries[2].pathDigest}')`;
+  const sharedHidden = () => inPage(`[...${sharedFile}.querySelectorAll('.diff-line-row')].map(row => row.classList.contains('review-focus-native-hidden'))`);
+  const sharedFolds = () => inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-toggle')].map(toggle => [toggle.textContent, toggle.getAttribute('aria-label')])`);
+  const sharedViewed = () => inPage(`${sharedFile}.querySelector('button[aria-pressed]').getAttribute('aria-pressed') === 'true'`);
+  const sectionDone = (id, path = sharedPath) => `[...document.querySelectorAll('.rf-topic[data-topic-id=${id}] .rf-section-file')].find(row => row.querySelector('button').getAttribute('aria-label') === ${JSON.stringify(path)}).querySelector('.rf-section-done input')`;
+  const sharedDone = () => inPanel(`[${['supporting', 'contract', 'unknown'].map(id => `${sectionDone(id)}.checked`).join(', ')}]`);
+  // The page agent runs the panel's calls in order, so once a later reveal answers, every call an earlier tick sent has run.
+  const earlierPageCallsHandled = async () => {
+    await inPanel(`${contract}.querySelectorAll('.rf-section-file button')[1].click()`);
+    await waitFor(() => inPanel("!document.querySelector('.rf-navigation-notice').hidden && document.querySelector('.rf-navigation-notice').textContent.includes('has not loaded')"), 'a later page call answered');
+  };
+  assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-section-done input')].filter(input => input.getAttribute('aria-label').includes(${JSON.stringify(sharedPath)})).length`), 3, 'Each of the three sections listing the shared file has its own done checkbox.');
+  assert.equal(await inPanel(`${sectionDone('contract')}.getAttribute('aria-label')`), `Done with this section in ${sharedPath}: folds its lines in GitHub’s diff`);
+  const clicksBeforeTicks = await inPage('window.fixtureViewedClicks');
+  const folded = [true, true, true, true];
+  const open = [false, false];
+  // The contract section owns and cites rows 5–8; the unresolved section also cites its added row 7.
+  const contractDone = [true, true, false, true];
+  const contractReason = 'You marked “Check the contract and its implementation” done.';
+  await inPanel(`${sectionDone('contract')}.click()`);
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'a done review section folds its changed and cited rows, merged with the adjacent supporting fold');
+  assert.deepEqual(await sharedFolds(), [['6 lines folded', `Show 6 lines folded by PRiorities. Supporting changes from “Supporting setup”. ${contractReason}`], ['1 line folded', `Show 1 line folded by PRiorities. ${contractReason}`]], 'Rows from the AI fold and the done section merge into one marker that names both reasons; its own edit stays open where a section not yet done cites it.');
+  assert.equal(await sharedViewed(), false, 'Another section listing the file is not done, so GitHub Viewed stays off.');
+  await inPanel("document.querySelector('.rf-fold-toggle input').click()");
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([false, false, false, false, ...contractDone, ...open]), 'a done section stays folded when folding less important code is off');
+  assert.match(await inPanel("document.querySelector('.rf-fold-summary').textContent"), /^Only sections you marked done are folded/);
+  await inPanel("document.querySelector('.rf-fold-toggle input').click()");
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'AI folding returns beside the done section');
+  await inPanel(`${sectionDone('supporting')}.click()`);
+  await waitFor(async () => (await sharedFolds())[0]?.[1] === 'Show 6 lines folded by PRiorities. You marked “Supporting setup”, “Check the contract and its implementation” done.', 'the second done section names itself on the shared fold');
+  await earlierPageCallsHandled();
+  assert.equal(await sharedViewed(), false, 'Two of three sections done leaves GitHub Viewed off.');
+  assert.equal(await inPage('window.fixtureViewedClicks'), clicksBeforeTicks, 'The second of three ticks never clicks GitHub Viewed.');
+  await inPanel(`${sectionDone('unknown')}.click()`);
+  await waitFor(async () => await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify(Array(10).fill(true)), 'marking every section listing a file done folds its shared and unresolved rows and marks it Viewed');
+  await waitFor(() => inPanel(`document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${sharedPath}"] input').checked`), 'file list mirrors the Viewed mark set by the last done section');
+  await inPanel(`${sectionDone('unknown')}.click()`);
+  await waitFor(async () => !await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'unticking a section of a fully done file unfolds its rows and clears Viewed');
+  assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 2, 'Only crossing into and out of all-done changes GitHub Viewed.');
+  await inPanel(`${sectionDone('supporting')}.click()`);
+  await inPanel(`${sectionDone('contract')}.click()`);
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open]), 'unticking every section leaves only the AI fold');
+  await inPanel(`${sectionDone('unknown')}.click()`);
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, true, true]), 'a done section folds its two isolated rows');
+  assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-toggle')].map(toggle => toggle.textContent)`), ['4 lines folded', '2 lines folded'], 'A done section folds fewer rows than the three-row minimum for AI folds, and not the contract line it cites while the contract section is not done.');
+  await inPanel(`${sectionDone('unknown')}.click()`);
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open]), 'unticking the isolated section unfolds its rows');
+  await inPanel(`${sectionDone('supporting')}.click()`);
+  await inPanel(`${sectionDone('contract')}.click()`);
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'the supporting and contract sections are done again for the saved-review checks');
+  assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 2, 'Ticks that never complete the file leave GitHub Viewed alone.');
+  const missingInput = `document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${changes.paths[4]}"] input')`;
   assert.deepEqual(await inPanel(`[${missingInput}.indeterminate, ${missingInput}.disabled]`), [true, true]);
+  await inPanel(`${sectionDone('supporting', changes.paths[4])}.click()`);
+  await inPanel(`${sectionDone('contract', changes.paths[4])}.click()`);
+  await earlierPageCallsHandled();
+  assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 2, 'Completing a file whose GitHub Viewed control is not loaded clicks nothing yet.');
   await inPage(`(() => {
     const list = document.querySelector('[data-testid=progressive-diffs-list]');
     const first = list.querySelector('.fixture-diff-entry');
@@ -2281,26 +2383,61 @@ try {
     window.reviewDraft.value = 'Unsubmitted review comment';
     file.append(window.reviewDraft);
   })()`);
-  await waitFor(() => inPanel(`!${missingInput}.indeterminate && !${missingInput}.disabled`), 'new native Viewed control discovered');
+  await waitFor(() => inPanel(`${missingInput}.checked && !${missingInput}.indeterminate && !${missingInput}.disabled`), 'the Viewed change the last tick asked for applies once GitHub loads the file');
+  assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 3, 'Loading the file clicks GitHub Viewed exactly once.');
   assert.equal(await inPage('window.reviewDraft.checkVisibility() && window.reviewDraft.value === "Unsubmitted review comment"'), true);
   await inPanel(`${contract}.querySelectorAll('.rf-section-file button')[1].click()`);
   await waitFor(() => inPage(`document.getElementById('diff-${changes.entries[4].pathDigest}').classList.contains('review-focus-native-target')`), 'newly loaded cited file revealed');
   assert.equal(await inPanel("document.querySelector('.rf-navigation-notice').hidden"), true);
   await inPanel("document.querySelector('.rf-unresolved .rf-link-button').click()");
   assert.equal(await inPanel("document.querySelector('.rf-topic[data-topic-id=unknown]').open"), true, 'Unresolved evidence opens its own explanation.');
+  const cacheWarning = `document.querySelector('.rf-cache-notice').checkVisibility() && document.querySelector('.rf-cache-detail').textContent === document.querySelector('.rf-cache-notice').textContent && document.querySelector('.rf-cache-notice').textContent`;
+  await send('Runtime.evaluate', {expression:`(() => {
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function () {
+      IDBObjectStore.prototype.put = put;
+      throw new DOMException('Synthetic tick write failure.', 'UnknownError');
+    };
+  })()`}, workers.at(-1));
+  await inPanel(`${sectionDone('validation', changes.paths[3])}.click()`);
+  await waitFor(async () => (await inPanel(cacheWarning) || '').includes('could not be saved locally'), 'a tick that fails to save warns beside the review and in Analysis details');
+  assert.equal(await inPanel("document.querySelector('.rf-navigation-notice').hidden"), true);
+  await inPanel(`document.querySelector('.rf-topic[data-topic-id=validation] .rf-section-file button').click()`);
+  await waitFor(() => inPanel("!document.querySelector('.rf-navigation-notice').hidden && document.querySelector('.rf-navigation-notice').textContent.includes('has not loaded')"), 'a page call after the tick answered');
+  assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 3, 'The only section listing an unloaded file is done, so its Viewed change waits for the file.');
+  await inPanel(`[...document.querySelector('.rf-file-progress-row[data-path="${changes.paths[5]}"]').querySelectorAll('button')].find(button => button.textContent === 'Review anyway').click()`);
+  await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Review saved') && !document.querySelector('.rf-analyze').disabled"), 'Review anyway reruns the review');
+  assert.equal(await inPanel(`${sectionDone('validation', changes.paths[3])}.checked`), false, 'The rerun drops the tick of a section that now cites more of that file.');
+  assert.deepEqual(await sharedDone(), [true, true, false], 'Ticks of sections that add nothing in their file carry over.');
+  assert.equal(await inPanel("document.querySelector('.rf-cache-notice').hidden"), true, 'The rerun saves its ticks, so the failed-save warning goes.');
+  const validationInput = `document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${changes.paths[3]}"] input')`;
+  await inPage(`(() => {
+    const list = document.querySelector('[data-testid=progressive-diffs-list]');
+    const first = list.querySelector('.fixture-diff-entry');
+    list.insertAdjacentHTML('beforeend', first.outerHTML.replaceAll(${JSON.stringify(changes.paths[0])}, ${JSON.stringify(changes.paths[3])}).replaceAll(${JSON.stringify(changes.entries[0].pathDigest)}, ${JSON.stringify(changes.entries[3].pathDigest)}));
+    const file = list.lastElementChild;
+    file.querySelectorAll('button[aria-pressed], [data-review-focus-owned]').forEach(node => node.remove());
+    window.fixtureInstallReviewControl(file, ${JSON.stringify(changes.paths[3])}, true);
+  })()`);
+  await waitFor(() => inPanel(`!${validationInput}.indeterminate && !${validationInput}.disabled`), 'GitHub loads the file whose tick the rerun dropped');
+  assert.equal(await inPanel(`${validationInput}.checked`), false);
+  assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 3, 'A Viewed change that a dropped tick asked for never applies.');
+  await inAgent('window.fixtureCloseReview()');
+  await waitFor(async () => (await inPanel(cacheWarning) || '').includes('lost its connection'), 'a review connection closed by the background warns that ticks are no longer saved');
   await panelPage('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:false});
   assert.equal(await inPanel("document.querySelector('.rf-panel').scrollWidth > document.querySelector('.rf-panel').clientWidth"), false, 'Sections, references, file names and Reviewed controls fit the panel.');
   await writeFile('/tmp/priorities-panel-sections.png', Buffer.from((await panelPage('Page.captureScreenshot', {format:'png'})).data,'base64'));
   await panelPage('Emulation.setDeviceMetricsOverride', {width:600,height:1080,deviceScaleFactor:1,mobile:false});
-  assert.equal((await modelRequests()).length - beforeSections, 6, 'Panel navigation and Viewed controls add no model calls.');
+  assert.equal((await modelRequests()).length - beforeSections, 8, 'Panel navigation and Viewed controls add no model calls; Review anyway adds one classification and one PR review.');
   await page('Page.reload');
   await waitFor(() => inPanel("document.querySelector('.rf-analyze')?.textContent === 'Open saved review'"), 'saved multi-section review');
   await click('Open saved review');
   await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')"), 'saved sections restored');
   assert.deepEqual(await relatedSections(), expectedRelated, 'A saved review keeps the symbol relations behind its section links.');
-  assert.equal(await inPanel(`${sharedInputs}.every(input => input.checked)`), true);
+  assert.deepEqual(await sharedDone(), [true, true, false], 'A reopened saved review restores the sections marked done.');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'restored done sections fold again');
   assert.equal(await inPage('window.fixtureViewedClicks'), 0, 'Restoring a saved review never changes Viewed.');
-  assert.equal((await modelRequests()).length - beforeSections, 6);
+  assert.equal((await modelRequests()).length - beforeSections, 8);
   for (const override of ['always-visible', 'protected']) {
     await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});
     await waitFor(() => inPage('!document.querySelector("#save-review-preferences").disabled'), 'visibility override preferences');
@@ -2366,7 +2503,7 @@ try {
   assert.ok(workers.length > 0);
   assert.deepEqual(eventErrors, []);
   assert.deepEqual(exceptions, []);
-  console.log('Installed extension passed: real toolbar popup, Conversation-to-diff navigation and one-time autostart, real Chrome side panel and page-agent relay, native folding and code references, Viewed synchronization, options and authentication, complete classic/React/Changes captures and selected ranges, 53 deferred files, bounded issue/source context, capture cancellation, generated/deleted files and limits, cache validation and eviction, retries, live progress, reload and navigation reconnects. Fake Codex and Claude CLIs used the real native host; no live model calls.');
+  console.log('Installed extension passed: real toolbar popup, Conversation-to-diff navigation and one-time autostart, real Chrome side panel and page-agent relay, native folding and code references, per-section done ticks, their saved folds and rerun carry-over, warnings when ticks cannot be saved, Viewed synchronization, options and authentication, complete classic/React/Changes captures and selected ranges, 53 deferred files, bounded issue/source context, capture cancellation, generated/deleted files and limits, cache validation and eviction, retries, live progress, reload and navigation reconnects. Fake Codex and Claude CLIs used the real native host; no live model calls.');
 } finally {
   for (const request of pending.values()) clearTimeout(request.timer);
   chrome.kill('SIGTERM');

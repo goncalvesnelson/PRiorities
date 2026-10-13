@@ -83,7 +83,20 @@ export function readReview(key) {
     const lastUsed = Math.max(Date.now(), (clock ?? 0) + 1);
     settings.put(lastUsed, 'accessClock');
     metadata.put({ ...meta, lastUsed });
-    return { ...entry.value, savedAt: meta.savedAt };
+    return { ...entry.value, savedAt: meta.savedAt, ticks: meta.ticks ?? [] };
+  });
+}
+
+// Ticks live on the review's metadata so every deletion of the review deletes them too. Each holds
+// only a section ID and a file path, small beside the review itself, so they stay out of the
+// cache's byte count. Each call changes one tick, so sessions sharing a review keep each other's.
+export function saveSectionTicks(key, savedAt, tick, done) {
+  return transaction('readwrite', async (_reviews, metadata) => {
+    const meta = await result(metadata.get(key));
+    // The review may have been evicted, or replaced by a fresh review under the same key, since this session opened it.
+    if (meta?.savedAt !== savedAt) return;
+    const others = (meta.ticks ?? []).filter(entry => entry.topicId !== tick.topicId || entry.path !== tick.path);
+    metadata.put({ ...meta, ticks: done ? [...others, tick] : others });
   });
 }
 
@@ -99,17 +112,19 @@ function trimReviews(reviews, metadata, entries, limitBytes) {
   return { usedBytes, count: ordered.length };
 }
 
-export function saveReview(identity, value, signal) {
-  const savedAt = Date.now();
+export function saveReview(identity, value, signal, ticks = []) {
+  const now = Date.now();
   const record = { key: identity.key, value };
-  const meta = { ...identity, savedAt, lastUsed: savedAt, bytes: 0 };
+  const meta = { ...identity, savedAt: now, lastUsed: now, bytes: 0 };
   const bytes = new TextEncoder().encode(JSON.stringify(record) + JSON.stringify(meta)).length + 16;
   meta.bytes = bytes;
   return transaction('readwrite', async (reviews, metadata, settings) => {
     const [entries, configuredLimit, clock] = await Promise.all([result(metadata.getAll()), result(settings.get('limitMB')), result(settings.get('accessClock'))]);
     const limitBytes = (configuredLimit ?? 100) * megabyte;
     if (bytes > limitBytes) return { saved: false, message: 'This review is larger than the cache limit. It remains available in this tab.' };
-    meta.lastUsed = Math.max(Date.now(), (clock ?? 0) + 1);
+    // The access clock never repeats, so savedAt also tells saveSectionTicks which save of this key a session opened.
+    meta.savedAt = meta.lastUsed = Math.max(Date.now(), (clock ?? 0) + 1);
+    meta.ticks = ticks;
     settings.put(meta.lastUsed, 'accessClock');
     for (const entry of entries.filter(entry => entry.lookup === identity.lookup && entry.key !== identity.key)) {
       reviews.delete(entry.key);
@@ -119,7 +134,7 @@ export function saveReview(identity, value, signal) {
     trimReviews(reviews, metadata, remaining, limitBytes - bytes);
     reviews.put(record);
     metadata.put(meta);
-    return { saved: true, savedAt };
+    return { saved: true, savedAt: meta.savedAt };
   }, signal);
 }
 

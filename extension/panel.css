@@ -132,8 +132,8 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-file-state[data-state="failed"]::before { background: var(--rf-danger); }
 .rf-file-sections { display: flex; flex-wrap: wrap; flex-basis: 100%; gap: 2px 6px; }
 .rf-file-sections .rf-link-button { white-space: normal; text-align: left; overflow-wrap: anywhere; }
-.rf-reviewed-toggle { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; line-height: 16px; color: var(--rf-muted); font-size: 12px; cursor: pointer; }
-.rf-reviewed-toggle input { margin: 0; accent-color: var(--rf-primary); cursor: inherit; }
+.rf-reviewed-toggle, .rf-section-done { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; line-height: 16px; color: var(--rf-muted); font-size: 12px; cursor: pointer; }
+.rf-reviewed-toggle input, .rf-section-done input { margin: 0; accent-color: var(--rf-primary); cursor: inherit; }
 .rf-reviewed-toggle[data-reviewed="true"] { color: var(--rf-accent); }
 .rf-reviewed-toggle[data-unavailable="true"] { opacity: .45; cursor: default; }
 .rf-review-unavailable { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -221,7 +221,6 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-code-quote { margin: 2px 0 0; padding-left: 12px; }
 .rf-code-quote + .rf-code-quote { margin-top: 8px; }
 .rf-section-files .rf-link-button { flex: 1 1 auto; min-width: 0; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.rf-section-files .rf-reviewed-toggle > span:not(.rf-review-unavailable) { display: none; }
 .rf-file-delta { color: var(--rf-muted); font-size: 11px; white-space: nowrap; }
 .rf-delta-add { color: var(--rf-primary); }
 .rf-delta-delete { color: var(--rf-danger); }

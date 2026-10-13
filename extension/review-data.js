@@ -218,6 +218,12 @@ export function validateAnalysis(input, snapshot, { initialClassifications, alwa
   return { summary: input.summary, topics, classifications, baseSha: snapshot.baseSha, headSha: snapshot.headSha };
 }
 
+// The files a section lists: those holding its edits and those its excerpts cite.
+export function sectionPaths(topic, snapshot) {
+  const editPaths = new Map(allEdits(snapshot).map(edit => [edit.id, edit.path]));
+  return new Set([...topic.editIds.map(id => editPaths.get(id)), ...topic.excerpts.map(excerpt => excerpt.path)]);
+}
+
 export function sectionLinks({ topics, classifications }) {
   const relations = new Map(classifications.map(edit => [edit.editId, edit]));
   const sections = topics.map(topic => ({

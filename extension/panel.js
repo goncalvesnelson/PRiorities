@@ -1,6 +1,6 @@
 // The PRiorities side panel: Chrome shows it beside the GitHub tab it was opened for. Everything
 // that reads or changes GitHub's page goes through the page agent in that tab (page-agent.js).
-import { isGeneratedFile, sectionLinks } from './review-data.js';
+import { isGeneratedFile, sectionLinks, sectionPaths } from './review-data.js';
 
 const readyMark = '✓ Ready · ';
 const attentionMark = '⚠ Needs attention · ';
@@ -131,6 +131,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   let snapshot;
   let highlights;
   let analysis;
+  let sectionTicks = [];
   let port;
   let controller;
   let operation = 0;
@@ -483,6 +484,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     snapshot = undefined;
     highlights = undefined;
     analysis = undefined;
+    sectionTicks = [];
     finalResult = false;
     reviewStage = '';
     reviewProviderName = '';
@@ -713,7 +715,6 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       const replacement = focused.tagName === 'INPUT' ? row?.querySelector('input') : [...row?.querySelectorAll('button') ?? []].find(button => button.textContent === focused.textContent);
       (replacement ?? filters.querySelector('[aria-pressed="true"]')).focus({ preventScroll: true });
     }
-    for (const node of result.querySelectorAll('.rf-reviewed-toggle')) updateReviewToggle(node, node.dataset.path);
   }
 
   function editLocations() {
@@ -734,12 +735,48 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     return delta;
   }
 
+  // The saved review keeps the ticks it last stored, so this warning replaces the note that it is saved.
+  function warnTicksUnsaved(message) {
+    cacheWarning = true;
+    cacheMessage = message;
+    result.querySelector('.rf-cache-detail').textContent = message;
+    renderControls();
+  }
+
+  function sectionDone(topic, path) {
+    return sectionTicks.some(tick => tick.topicId === topic.id && tick.path === path);
+  }
+
+  // Marking a section done folds its lines in this file. The file's GitHub Viewed mark follows only
+  // when this click completes or breaks the set of every section that lists the file, as soon as
+  // GitHub has loaded the file's control.
+  function markSectionDone(topic, path, done) {
+    const others = analysis.topics.filter(other => other !== topic && sectionPaths(other, snapshot).has(path));
+    sectionTicks = sectionTicks.filter(tick => tick.topicId !== topic.id || tick.path !== path);
+    if (done) sectionTicks.push({ topicId: topic.id, path });
+    port?.postMessage({ type: 'set-section-tick', topicId: topic.id, path, done });
+    applyFolding();
+    if (others.every(other => sectionDone(other, path))) void page.call('setReviewed', path, done, { whenLoaded: true }).catch(() => {}).finally(() => renderFileProgress());
+  }
+
+  function sectionDoneToggle(topic, path) {
+    const label = element('label', 'rf-section-done');
+    label.title = 'Done with this section in this file: folds its lines in GitHub’s diff, except lines a section not yet done also changes or cites. Once every section listing the file is done, PRiorities ticks GitHub’s Viewed checkbox for it, as soon as GitHub loads the file.';
+    const input = element('input');
+    input.type = 'checkbox';
+    input.checked = sectionDone(topic, path);
+    input.setAttribute('aria-label', `Done with this section in ${path}: folds its lines in GitHub’s diff`);
+    input.addEventListener('change', () => markSectionDone(topic, path, input.checked));
+    label.append(input);
+    return label;
+  }
+
   function sectionFileRow(path, topic, locations) {
     const jump = pathButton(path, path.split('/').at(-1), () => void revealFile(path, topic), 'rf-link-button');
     jump.title = `${path} · show its changes in the diff`;
     jump.setAttribute('aria-label', path);
     const row = element('div', 'rf-section-file');
-    row.append(jump, changeDelta(path, topic, locations), reviewToggle(path));
+    row.append(jump, changeDelta(path, topic, locations), sectionDoneToggle(topic, path));
     return row;
   }
 
@@ -907,6 +944,8 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
           return;
         }
         finishFailure(message.message, request);
+      } else if (message.type === 'tick-save-failed') {
+        if (finalResult) warnTicksUnsaved('A section you marked done could not be saved locally. Your ticks still apply in this tab, but they won’t all reopen with the saved review.');
       } else if (message.type === 'result') {
         busy = false;
         openingSavedReview = false;
@@ -914,6 +953,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
         if (restoringReview) missedSavedReviews.delete(restoringReview.candidate);
         controller = undefined;
         analysis = message.analysis;
+        sectionTicks = message.ticks;
         finalResult = true;
         reviewStage = 'complete';
         cacheMessage = message.cache?.restored ? `Opened saved review from ${new Date(message.cache.savedAt).toLocaleString()}. Commits, context, provider, model, effort and review preferences match. No new model calls were made.`
@@ -941,6 +981,9 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
         return;
       }
       if (!finalResult) status = 'The analysis session closed. Analyze again to restart.';
+      // The panel's own disconnects never reach this listener, so the background closed this
+      // connection, and later ticks cannot reach the saved review.
+      else if (!cacheWarning) warnTicksUnsaved('PRiorities lost its connection to this review. Sections you mark done now still fold here but aren’t saved; reopen the review to save ticks again.');
       renderFileProgress();
       renderControls();
     });
@@ -988,19 +1031,20 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   function renderFoldSummary(counts = foldCounts) {
     const node = result.querySelector('.rf-fold-summary');
     if (!node) return;
-    node.textContent = !foldNative ? 'Folding is off: GitHub shows every line it normally shows.'
+    const closed = counts?.groups ? `${counts.folded} of ${counts.groups} green ${counts.groups === 1 ? 'fold' : 'folds'} closed in the loaded files (${counts.hidden.toLocaleString()} ${counts.hidden === 1 ? 'line' : 'lines'} hidden).` : '';
+    node.textContent = !foldNative ? closed ? `Only sections you marked done are folded: ${closed}` : 'Folding is off: GitHub shows every line it normally shows.'
       : counts?.unreadable && !counts.matched ? 'Switch GitHub’s diff to Unified to fold code; split view is left unchanged.'
-      : counts?.groups ? `${counts.folded} of ${counts.groups} green ${counts.groups === 1 ? 'fold' : 'folds'} closed in the loaded files (${counts.hidden.toLocaleString()} ${counts.hidden === 1 ? 'line' : 'lines'} hidden).`
-      : 'Nothing is folded in the files GitHub has loaded.';
+      : closed || 'Nothing is folded in the files GitHub has loaded.';
   }
 
   // The page agent folds GitHub's diff and refolds it as GitHub loads more files; it reports counts back.
+  // Sections marked done fold even when folding less important code is off.
   function applyFolding() {
-    if (!finalResult || !analysis || !foldNative) {
+    if (!finalResult || !analysis) {
       restoreFolding();
       return;
     }
-    void page.call('setFolding', { analysis, preferences: { protectedPaths: reviewPreferences?.protectedPaths ?? [], alwaysShow: reviewPreferences?.alwaysShow ?? [] } }).catch(() => {});
+    void page.call('setFolding', { analysis, ticks: sectionTicks, autoFold: foldNative, preferences: { protectedPaths: reviewPreferences?.protectedPaths ?? [], alwaysShow: reviewPreferences?.alwaysShow ?? [] } }).catch(() => {});
   }
 
   function restoreFolding() {

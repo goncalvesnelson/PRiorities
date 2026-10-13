@@ -2,6 +2,7 @@
 // request, folds and scrolls GitHub's own diff, and relays the panel's messages to the background.
 // It adds nothing to the page except fold markers, their tooltip and the scroll highlight.
 import { capturePullRequest, findNativeFiles, readPageIdentity } from './github.js';
+import { sectionPaths } from './review-data.js';
 import { isProtectedPath } from './review-preferences.js';
 
 const ownedAttribute = 'data-review-focus-owned';
@@ -34,10 +35,18 @@ function rowSelected(row, excerpts) {
   });
 }
 
-function foldReason(topics) {
-  const unique = [...new Set(topics.filter(Boolean))];
-  if (!unique.length) return 'Unchanged context around the changes.';
-  return `Supporting changes from ${unique.map(topic => `“${topic.title}”`).join(', ')}.`;
+function titles(topics) {
+  return [...new Set(topics)].map(topic => `“${topic.title}”`).join(', ');
+}
+
+function foldReason(rows) {
+  const suggested = rows.filter(row => !row.done.length);
+  const supporting = suggested.map(row => row.topic).filter(Boolean);
+  const done = rows.flatMap(row => row.done);
+  return [
+    ...!suggested.length ? [] : supporting.length ? [`Supporting changes from ${titles(supporting)}.`] : ['Unchanged context around the changes.'],
+    ...done.length ? [`You marked ${titles(done)} done.`] : []
+  ].join(' ');
 }
 
 // One shared tooltip in the page, fixed to the viewport so GitHub's scrolling diff tables can't clip it.
@@ -72,10 +81,12 @@ function foldTooltip(doc) {
   return api;
 }
 
-// Folds rows in GitHub's own diff. Review decisions, their cited evidence, unresolved edits,
-// always-visible kinds, protected files and discussion rows stay open; files without an
-// analyzed edit (generated, excluded) are never touched.
-function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alwaysShow = [], revealed = new Set(), onChange = () => {} } = {}) {
+// Folds rows in GitHub's own diff. With `autoFold`, review decisions, their cited evidence,
+// unresolved edits, always-visible kinds and protected files stay open. A row also folds once the
+// reviewer marked done (ticked) every section that changes or cites it in its file, even when it
+// would stay open. Discussion rows and files without an analyzed edit (generated, excluded) are
+// never touched.
+function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alwaysShow = [], ticks = [], autoFold = true, revealed = new Set(), onChange = () => {} } = {}) {
   const topicsByEdit = new Map(analysis.topics.flatMap(topic => topic.editIds.map(id => [id, topic])));
   const keptEdits = new Set(analysis.classifications.filter(entry => entry.kinds.some(kind => kind === 'unknown' || alwaysShow.includes(kind))).map(entry => entry.editId));
   const fileRows = new Map();
@@ -83,12 +94,18 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
     if (!file.hunks.some(hunk => hunk.items.some(item => item.type === 'edit' && topicsByEdit.has(item.id)))) continue;
     const rows = new Map();
     const protectedFile = isProtectedPath(file.path, protectedPaths);
+    const doneTopicIds = new Set(ticks.filter(tick => tick.path === file.path).map(tick => tick.topicId));
+    // An edit belongs to exactly one section; other sections reach its rows only by citing them.
+    const citing = new Map(doneTopicIds.size ? analysis.topics.map(entry => [entry, entry.excerpts.filter(excerpt => excerpt.path === file.path)]).filter(([, excerpts]) => excerpts.length) : []);
     for (const hunk of file.hunks) {
       for (const item of hunk.items) {
         const topic = topicsByEdit.get(item.id);
         const kept = protectedFile || keptEdits.has(item.id) || topic?.priority === 'review';
         for (const row of item.type === 'edit' ? item.rows : [item]) {
-          if (row.type !== 'marker') rows.set(rowKey(row), { row, topic, kept });
+          if (row.type === 'marker') continue;
+          const sections = doneTopicIds.size ? analysis.topics.filter(entry => entry === topic || citing.has(entry) && rowSelected(row, citing.get(entry))) : [];
+          const done = sections.length && sections.every(entry => doneTopicIds.has(entry.id)) ? sections : [];
+          rows.set(rowKey(row), { row, topic, kept, done });
         }
       }
     }
@@ -140,7 +157,8 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
   }
 
   function foldRows(path, rows) {
-    if (rows.length < minimumFold) return;
+    // A section marked done is the reviewer's own request, so its rows fold however few they are.
+    if (rows.length < minimumFold && !rows.some(row => row.done.length)) return;
     const first = rows[0].element;
     const marker = doc.createElement('tr');
     marker.className = 'review-focus-native-fold';
@@ -149,7 +167,7 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
     cell.colSpan = Math.max(1, [...first.cells].reduce((sum, item) => sum + item.colSpan, 0));
     // A green line across the diff with one badge on it; the explanation lives in the badge's tooltip.
     const body = element('div', 'review-focus-native-fold-body');
-    const reason = foldReason(rows.map(row => row.topic));
+    const reason = foldReason(rows);
     const toggle = element('button', 'review-focus-native-toggle');
     toggle.type = 'button';
     const fold = { key: JSON.stringify([path, rowKey(rows[0]), rowKey(rows.at(-1))]), marker, toggle, rows, reason };
@@ -196,12 +214,13 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
           continue;
         }
         matched++;
-        if (match.kept || rowSelected(match.row, excerpts)) {
+        const suggested = autoFold && !match.kept && !rowSelected(match.row, excerpts);
+        if (!suggested && !match.done.length) {
           flush();
           continue;
         }
         if (group.length && group.at(-1).element.nextElementSibling !== row.element) flush();
-        group.push({ ...row, topic: match.topic });
+        group.push({ ...row, topic: match.topic, done: match.done });
       }
       flush();
     }
@@ -226,6 +245,8 @@ export function startPageAgent(port, queued = []) {
   const eventOptions = { signal: listeners.signal };
   const backgroundPorts = new Map();
   const revealed = new Set();
+  // Viewed states a section tick asked for before GitHub loaded the file's control.
+  const pendingReviews = new Map();
   let snapshot;
   let foldState;
   let folding;
@@ -272,7 +293,10 @@ export function startPageAgent(port, queued = []) {
   function restoreFolding(forget = false) {
     folding?.restore();
     folding = undefined;
-    if (forget) revealed.clear();
+    if (forget) {
+      revealed.clear();
+      pendingReviews.clear();
+    }
     for (const node of document.querySelectorAll(`.${nativeHiddenClass}, .${nativeUnfoldedClass}`)) node.classList.remove(nativeHiddenClass, nativeUnfoldedClass);
     for (const node of document.querySelectorAll('.review-focus-native-fold')) node.remove();
   }
@@ -286,15 +310,33 @@ export function startPageAgent(port, queued = []) {
       return;
     }
     folding ??= createNativeFolding(document, snapshot, foldState.analysis, {
-      ...foldState.preferences, revealed, onChange: counts => post({ kind: 'fold-counts', counts })
+      ...foldState.preferences, ticks: foldState.ticks, autoFold: foldState.autoFold, revealed, onChange: counts => post({ kind: 'fold-counts', counts })
     });
     post({ kind: 'fold-counts', counts: folding.apply() });
+  }
+
+  function fileDone(path) {
+    const sections = foldState.analysis.topics.filter(topic => sectionPaths(topic, snapshot).has(path));
+    return sections.length > 0 && sections.every(topic => foldState.ticks.some(tick => tick.topicId === topic.id && tick.path === path));
+  }
+
+  // A rerun can drop a tick without the panel unticking it, so a waiting change applies only while
+  // the current ticks still ask for it.
+  function applyPendingReviews() {
+    if (!verifiedPage()) pendingReviews.clear();
+    // The panel clears folding while a rerun runs; waiting changes are checked against its ticks once they return.
+    if (!foldState) return;
+    for (const [path, checked] of pendingReviews) {
+      if (checked === fileDone(path)) setReviewed(path, checked);
+      else pendingReviews.delete(path);
+    }
   }
 
   function check() {
     if (stopped) return;
     applyTitleMark();
     applyFolding();
+    applyPendingReviews();
     const state = pageState();
     const key = JSON.stringify(state);
     if (key === lastState) return;
@@ -352,10 +394,15 @@ export function startPageAgent(port, queued = []) {
     return rows.length || target.endLine < target.startLine ? 'shown' : 'outside';
   }
 
-  function setReviewed(path, checked) {
+  // With `whenLoaded`, a file whose control GitHub has not loaded yet gets the change once it loads.
+  function setReviewed(path, checked, { whenLoaded = false } = {}) {
     if (!verifiedPage()) return false;
     const control = nativeReviewControl(findNativeFiles(document).find(file => file.path === path));
-    if (!control || control.disabled || control.getAttribute('aria-disabled') === 'true') return false;
+    if (!control || control.disabled || control.getAttribute('aria-disabled') === 'true') {
+      if (whenLoaded) pendingReviews.set(path, checked);
+      return false;
+    }
+    pendingReviews.delete(path);
     const reviewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') === 'true';
     if (checked !== reviewed) control.click();
     scheduleCheck();
@@ -437,6 +484,7 @@ export function startPageAgent(port, queued = []) {
     for (const connection of backgroundPorts.values()) connection.disconnect();
     backgroundPorts.clear();
     restoreFolding();
+    pendingReviews.clear();
     document.querySelector('.review-focus-native-tooltip')?.remove();
     titleMark = '';
     applyTitleMark();
