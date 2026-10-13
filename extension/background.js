@@ -436,9 +436,10 @@ function createSession(tabId, url, port) {
   function schedule(session) {
     if (session.disposed || session.checking || session.restoring || !session.settings || !session.initialized) return;
     if (!session.cancelled) {
-      for (const entry of session.files.values()) {
+      // The PR review waits for the slowest file, so files with the most edits to label start first.
+      const queued = [...session.files.values()].filter(entry => entry.state === 'queued').sort((a, b) => b.edits - a.edits);
+      for (const entry of queued) {
         if (session.active === session.settings.concurrency) break;
-        if (entry.state !== 'queued') continue;
         session.active++;
         void classifyFile(session, entry);
       }
@@ -521,9 +522,9 @@ function createSession(tabId, url, port) {
       job.highlights = message.highlights;
       for (const file of snapshot.files) {
         const fileSnapshot = { ...snapshot, files: [file], context: snapshot.context.filter(source => source.path === file.path) };
-        const hasEdits = file.hunks.some(hunk => hunk.items.some(item => item.type === 'edit'));
+        const edits = allEdits(fileSnapshot).length;
         const included = !isGeneratedFile(file);
-        job.files.set(file.path, { snapshot: fileSnapshot, included, state: hasEdits ? included ? 'queued' : 'excluded' : 'skipped' });
+        job.files.set(file.path, { snapshot: fileSnapshot, edits, included, state: edits ? included ? 'queued' : 'excluded' : 'skipped' });
       }
       for (const entry of job.files.values()) {
         const message = entry.state === 'skipped' ? 'No text edits to analyze. This file remains expanded.'

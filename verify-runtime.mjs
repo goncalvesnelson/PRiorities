@@ -666,6 +666,35 @@ try {
     assert.equal(excerpts.reduce((total, excerpt) => total + excerpt.rows.length, 0), 80, 'The client must not truncate a file to a display budget.');
   }
 
+  const editCounts = [['config', 1], ['client', 1], ['server', 3]];
+  const unevenSnapshot = { ...snapshot, files: editCounts.map(([name, count]) => ({
+    path: `${name}.js`, hunks: Array.from({ length: count }, (_, index) => ({ header: `@@ -${index * 10 + 1} +${index * 10 + 1} @@`, items: [{
+      type: 'edit', id: `${name}-${index}`, rows: [
+        { type: 'delete', text: `old ${index}`, oldLine: index * 10 + 1, newLine: null },
+        { type: 'add', text: `new ${index}`, oldLine: null, newLine: index * 10 + 1 }
+      ]
+    }] }))
+  })) };
+  const unevenEdits = unevenSnapshot.files.flatMap(file => file.hunks.map(hunk => hunk.items[0].id));
+  const unevenClassifications = { edits: unevenEdits.map(editId => ({ ...classifications.edits[0], editId })) };
+  const unevenAssessment = { summary: 'Check each changed module.', topics: editCounts.map(([name, count]) => ({
+    ...assessment.topics[0], id: `${name}-decision`, editIds: Array.from({ length: count }, (_, index) => `${name}-${index}`),
+    excerpts: [{ path: `${name}.js`, side: 'after', startLine: 1, endLine: 1, note: 'The first changed line.' }]
+  })) };
+  const unevenResponse = stagedResponses(unevenClassifications, unevenAssessment);
+  const classifiedOrder = [];
+  nativeHandler = request => {
+    if (request.type === 'status') return { type: 'status', authenticated: true };
+    if (request.schema.properties.edits) classifiedOrder.push(JSON.parse(request.prompt.user).files[0].path);
+    return unevenResponse(request);
+  };
+  await sendMessage({ type: 'save-settings', provider: 'codex', model: '', effort: '', concurrency: 1, fileLimit: 100, listDeletedFiles: false });
+  const unevenReview = await beginReview(unevenSnapshot);
+  await waitForSettlement(unevenReview);
+  assert.equal(unevenReview.messages.at(-1).type, 'result');
+  assert.deepEqual(classifiedOrder, ['server.js', 'config.js', 'client.js'], 'The file with the most edits starts first so it cannot delay the PR review; equal files keep diff order.');
+  assert.deepEqual(JSON.parse(requests.at(-1).prompt.user).classifications.map(edit => edit.editId), unevenEdits, 'The PR review receives labels in diff order, whatever order files were classified in.');
+
   const consequentialChanges = [
     ['authorization.js', 'return allow(role);', 'return true;', 'Who is now authorized?'],
     ['payments.js', 'debit(amount);', 'debit(amount * 100);', 'Which currency unit does debit accept?'],
@@ -1959,7 +1988,7 @@ try {
   }
   assert.ok(nativePorts.every(helper => helper.disconnected), 'Every native request must be cleaned up.');
   assert.ok(!JSON.stringify(requests).includes('apiKey'), 'No provider credentials belong in the native protocol.');
-  console.log('Runtime verified: shared per-provider connection cooldowns and optional storage failures, explicit refresh and worker restart persistence, saved-review failure reporting and recovery, six default and saved-limit concurrent file classifications followed by one PR review, generated-file exclusion and explicit review, deleted files listed only for the PR review, changed-file limit and saved-review key separation, scoped PR reviews, late and concurrent opt-in, superseded check cancellation, isolated failure and retry, per-file timeouts, navigation and reload reconnection without repeated calls, detached completion and retained unsaved results, tab-close cleanup during initialization and active work, idle session heartbeats, pinned evidence, trusted settings and native cleanup. No live Codex calls.');
+  console.log('Runtime verified: shared per-provider connection cooldowns and optional storage failures, explicit refresh and worker restart persistence, saved-review failure reporting and recovery, six default and saved-limit concurrent file classifications started largest first and followed by one PR review, generated-file exclusion and explicit review, deleted files listed only for the PR review, changed-file limit and saved-review key separation, scoped PR reviews, late and concurrent opt-in, superseded check cancellation, isolated failure and retry, per-file timeouts, navigation and reload reconnection without repeated calls, detached completion and retained unsaved results, tab-close cleanup during initialization and active work, idle session heartbeats, pinned evidence, trusted settings and native cleanup. No live Codex calls.');
 } finally {
   await Promise.all(reviewPorts.map(closeTab));
   globalThis.fetch = savedFetch;
