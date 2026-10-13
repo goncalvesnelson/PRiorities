@@ -1,6 +1,6 @@
 import { analyzeWithCLI, getCLIModels, getCLIStatus } from './cli-client.js';
-import { allEdits, analysisSchema, classificationSchema, defaultFileLimit, isGeneratedFile, makeClassificationPrompt, makePrompt, maxFileLimit, validateAnalysis, validateClassifications, validateSnapshot } from './review-data.js';
-import { cacheInfo, clearCache, peekReview, readReview, reviewCacheKey, reviewLookup, saveReview, setCacheLimit } from './review-cache.js';
+import { allEdits, analysisSchema, classificationSchema, defaultFileLimit, isGeneratedFile, makeClassificationPrompt, makePrompt, maxFileLimit, sectionPaths, validateAnalysis, validateClassifications, validateSnapshot } from './review-data.js';
+import { cacheInfo, clearCache, peekReview, readReview, reviewCacheKey, reviewLookup, saveReview, saveSectionTicks, setCacheLimit } from './review-cache.js';
 import { changeKinds, defaultReviewPreferences, validateReviewPreferences } from './review-preferences.js';
 
 const jobs = new Map();
@@ -10,6 +10,25 @@ let durationWrite = Promise.resolve();
 
 function isOptions(sender) {
   return sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL('options.html');
+}
+
+// A tick marks one section done in one of the files that section lists.
+function validTick(analysis, snapshot, tick) {
+  const topic = analysis.topics.find(entry => entry.id === tick?.topicId);
+  return Boolean(topic) && sectionPaths(topic, snapshot).has(tick.path);
+}
+
+// Section IDs are the model's, so a rerun can reuse one for different code. A tick carries over only
+// while its section adds nothing in that file: no new edit there, and no cited lines outside the ones
+// it already cited on the same side.
+function carriesTick(previous, analysis, snapshot, tick) {
+  if (!validTick(analysis, snapshot, tick)) return false;
+  const [before, after] = [previous, analysis].map(review => review.topics.find(topic => topic.id === tick.topicId));
+  const editPaths = new Map(allEdits(snapshot).map(edit => [edit.id, edit.path]));
+  const reviewedEdits = new Set(before.editIds.filter(id => editPaths.get(id) === tick.path));
+  const reviewedExcerpts = before.excerpts.filter(excerpt => excerpt.path === tick.path);
+  return after.editIds.every(id => editPaths.get(id) !== tick.path || reviewedEdits.has(id))
+    && after.excerpts.every(excerpt => excerpt.path !== tick.path || reviewedExcerpts.some(old => old.side === excerpt.side && old.startLine <= excerpt.startLine && excerpt.endLine <= old.endLine));
 }
 
 function pullRequestUrl(value) {
@@ -195,7 +214,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 });
 
 function createSession(tabId, url, port) {
-  const job = { files: new Map(), active: 0, checking: null, checkVersion: 0, finalState: 'pending', cancelled: false, settled: false, port };
+  // Ticks belong to the session, so they outlive a result that Review anyway or a retry replaces;
+  // `tickedAnalysis` is the result they were made on.
+  const job = { files: new Map(), active: 0, checking: null, checkVersion: 0, finalState: 'pending', cancelled: false, settled: false, ticks: [], tickedAnalysis: null, port };
   const send = message => {
     if (job.disposed || !job.port) return;
     try {
@@ -283,19 +304,23 @@ function createSession(tabId, url, port) {
     send({ type: 'resumed', snapshot: job.snapshot, highlights: job.highlights, restoring: job.restoring === true });
     if (job.settings) send(sessionMessage());
     for (const [path, entry] of job.files) send(fileProgress(path, entry));
-    if (job.result) send(job.result);
-    else if (job.settled) send(job.settlement);
+    if (job.result) {
+      send({ ...job.result, ticks: job.ticks });
+      if (job.tickSaveFailed) send({ type: 'tick-save-failed' });
+    } else if (job.settled) send(job.settlement);
     else if (job.finalState === 'checking') send(job.progress);
   };
 
   function finish(session, result) {
     session.result = result;
+    session.tickedAnalysis = result.analysis;
+    session.tickSaveFailed = false;
     session.resultDelivered = false;
     session.finalState = 'complete';
     session.settled = true;
-    stopIdleHeartbeat(session);
-    if (!session.port || !result.cache.saved || [...session.files.values()].some(entry => entry.state === 'excluded')) keepSessionAlive(session);
-    send(result);
+    // The panel can still mark sections done, so the session stays alive until the panel detaches.
+    keepSessionAlive(session);
+    send({ ...result, ticks: session.ticks });
   }
 
   async function classifyFile(session, entry) {
@@ -385,14 +410,16 @@ function createSession(tabId, url, port) {
       report({ phase: 'checking', startedAt: Date.now() });
       const analysis = validateAnalysis(raw, snapshot, { initialClassifications: classifications, alwaysShow: session.settings.review.alwaysShow });
       void recordDuration(session.settings, (Date.now() - started) / 1000, lines);
+      const ticks = session.ticks.filter(tick => carriesTick(session.tickedAnalysis, analysis, session.snapshot, tick));
       let cache = { saved: false, message: 'This review could not be saved locally. It remains available in this tab.' };
       try {
         if (session.cacheIdentity) cache = await saveReview(session.cacheIdentity, {
           analysis, paths: classified.map(entry => entry.snapshot.files[0].path)
-        }, controller.signal);
+        }, controller.signal, ticks);
       } catch {}
       if (controller.signal.aborted) throw new Error('Analysis cancelled.');
       if (session.checkVersion !== version) return;
+      session.ticks = ticks;
       finish(session, { type: 'result', analysis, provider: session.settings.provider, model: session.settings.model, cache });
     } catch (error) {
       if (session.checkVersion !== version) return;
@@ -429,6 +456,7 @@ function createSession(tabId, url, port) {
       entry.classifications = analysis.classifications.filter(classification => editIds.has(classification.editId));
       setFileState(entry, 'classified', 'Saved review restored.');
     }
+    session.ticks = cached.ticks.filter(tick => validTick(analysis, session.snapshot, tick));
     finish(session, { type: 'result', analysis, provider: session.settings.provider, model: session.settings.model, cache: { saved: true, restored: true, savedAt: cached.savedAt } });
     return true;
   }
@@ -466,6 +494,21 @@ function createSession(tabId, url, port) {
     if (job.disposed) return;
     if (message?.type === 'cancel') {
       cancel();
+      return;
+    }
+    if (message?.type === 'set-section-tick') {
+      if (!job.result || typeof message.done !== 'boolean' || !validTick(job.result.analysis, job.snapshot, message)) return;
+      const tick = { topicId: message.topicId, path: message.path };
+      const others = job.ticks.filter(entry => entry.topicId !== tick.topicId || entry.path !== tick.path);
+      job.ticks = message.done ? [...others, tick] : others;
+      if (!job.result.cache.saved) return;
+      try {
+        await saveSectionTicks(job.cacheIdentity.key, job.result.cache.savedAt, tick, message.done);
+      } catch {
+        // The tick still applies in this session; the saved review keeps its earlier state for it.
+        job.tickSaveFailed = true;
+        send({ type: 'tick-save-failed' });
+      }
       return;
     }
     if (job?.restoring && ['review-file', 'retry-file', 'retry-final'].includes(message?.type)) return;

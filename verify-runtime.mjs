@@ -1730,6 +1730,10 @@ try {
   let failCacheSave = false;
   let releaseCacheRead;
   let cacheSaves = 0;
+  let savedKey;
+  let storedTicks = [];
+  let failTickSave = false;
+  const tickSaves = [];
   globalThis.runtimeReviewCache = {
     ...reviewCache,
     peekReview: async () => {
@@ -1739,13 +1743,25 @@ try {
     readReview: async () => {
       if (releaseCacheRead) await new Promise(resolve => { releaseCacheRead = resolve; });
       if (failCacheRead) throw new Error('Synthetic local database read failure.');
-      return structuredClone(storedReview);
+      return storedReview && { ...structuredClone(storedReview), ticks: structuredClone(storedTicks) };
     },
-    saveReview: async (_identity, value) => {
+    saveReview: async (identity, value, _signal, ticks = []) => {
       if (failCacheSave) throw new Error('Synthetic local database write failure.');
       cacheSaves++;
-      storedReview = { ...structuredClone(value), savedAt: Date.now() };
+      savedKey = identity.key;
+      storedReview = { ...structuredClone(value), savedAt: Math.max(Date.now(), (storedReview?.savedAt ?? 0) + 1) };
+      storedTicks = structuredClone(ticks);
       return { saved: true, savedAt: storedReview.savedAt };
+    },
+    saveSectionTicks: async (key, savedAt, tick, done) => {
+      tickSaves.push(structuredClone({ key, savedAt, tick, done }));
+      if (failTickSave) {
+        failTickSave = false;
+        throw new Error('Synthetic local database write failure.');
+      }
+      if (key !== savedKey || savedAt !== storedReview?.savedAt) return;
+      const others = storedTicks.filter(entry => entry.topicId !== tick.topicId || entry.path !== tick.path);
+      storedTicks = done ? [...others, structuredClone(tick)] : others;
     }
   };
   const cacheWorkerURL = new URL('./extension/background.js?cache-failures', import.meta.url).href;
@@ -1914,6 +1930,124 @@ try {
     assert.equal(requests.length, beforeMissCalls, 'Restoring a valid saved review must not start the CLI.');
     await restored.disconnect();
 
+    nativeHandler = stagedResponses(classifications, assessment);
+    const tick = { topicId: 'missing-account', path: 'account.js' };
+    const tickClock = fakeClock();
+    let ticking;
+    try {
+      ticking = await beginReview();
+      await waitForSettlement(ticking);
+      assert.equal(ticking.messages.at(-1).cache.saved, true);
+      assert.deepEqual(ticking.messages.at(-1).ticks, [], 'A fresh review starts with no sections marked done.');
+      const beforeTickIdle = ticking.messages.length;
+      tickClock.tick(40_000);
+      assert.deepEqual(ticking.messages.slice(beforeTickIdle), [{ type: 'heartbeat' }, { type: 'heartbeat' }], 'A saved review keeps its session alive while the panel can still mark sections done.');
+      await ticking.onMessage.emit({ type: 'set-section-tick', ...tick, done: true });
+      assert.deepEqual(tickSaves.at(-1), { key: savedKey, savedAt: ticking.messages.findLast(message => message.type === 'result').cache.savedAt, tick, done: true }, 'A tick is saved next to its review, under the same key and save.');
+      assert.deepEqual(storedTicks, [tick], 'A tick made after the session sat idle is still saved.');
+    } finally {
+      tickClock.restore();
+    }
+    const beforeInvalidTicks = tickSaves.length;
+    for (const invalid of [{ ...tick, topicId: 'unknown-section', done: true }, { ...tick, path: 'other.js', done: true }, { ...tick, done: 'yes' }]) {
+      await ticking.onMessage.emit({ type: 'set-section-tick', ...invalid });
+    }
+    assert.equal(tickSaves.length, beforeInvalidTicks, 'Ticks for unknown sections, files the section does not list, or non-boolean states are ignored.');
+    const resumedTicks = await resumeReview(ticking);
+    assert.deepEqual(resumedTicks.messages.at(-1).ticks, [tick], 'Reconnecting to the session shows its ticks.');
+    await closeTab(resumedTicks);
+    const reopenedTicks = port();
+    await onConnect.emit(reopenedTicks);
+    await reopenedTicks.onMessage.emit({ type: 'analyze', snapshot, cacheOnly: true });
+    assert.equal(reopenedTicks.messages.at(-1).cache.restored, true);
+    assert.deepEqual(reopenedTicks.messages.at(-1).ticks, [tick], 'Opening the saved review restores its ticks.');
+    await reopenedTicks.onMessage.emit({ type: 'set-section-tick', ...tick, done: false });
+    assert.equal(tickSaves.at(-1).savedAt, reopenedTicks.messages.at(-1).cache.savedAt);
+    assert.deepEqual(storedTicks, [], 'Unticking a restored review saves the change.');
+    await reopenedTicks.onMessage.emit({ type: 'set-section-tick', ...tick, done: true });
+    await closeTab(reopenedTicks);
+    const replacingTicks = await beginReview();
+    await waitForSettlement(replacingTicks);
+    assert.deepEqual(replacingTicks.messages.at(-1).ticks, [], 'A fresh review replacing the saved one starts with no ticks.');
+    await closeTab(replacingTicks);
+    const reopenedReplacement = port();
+    await onConnect.emit(reopenedReplacement);
+    await reopenedReplacement.onMessage.emit({ type: 'analyze', snapshot, cacheOnly: true });
+    assert.deepEqual(reopenedReplacement.messages.at(-1).ticks, [], 'The replaced review’s ticks do not carry over.');
+    await closeTab(reopenedReplacement);
+    storedTicks = [tick, { topicId: 'missing-account', path: 'removed.js' }, { topicId: 'removed-section', path: 'account.js' }];
+    const staleTicks = port();
+    await onConnect.emit(staleTicks);
+    await staleTicks.onMessage.emit({ type: 'analyze', snapshot, cacheOnly: true });
+    assert.deepEqual(staleTicks.messages.at(-1).ticks, [tick], 'Restoring keeps only ticks that match the saved sections and their files.');
+    await closeTab(staleTicks);
+    storedTicks = [];
+
+    const carriedTick = { topicId: 'services-bump', path: 'client.go' };
+    const movedTick = { topicId: 'services-bump', path: 'go.mod' };
+    const removedTick = { topicId: 'client-call', path: 'client.go' };
+    const dependencyTopic = (id, editIds, excerpts = []) => ({ ...dependencyReview.topics[0], id, editIds, excerpts });
+    const clientExcerpt = (side, startLine, endLine) => ({ path: 'client.go', side, startLine, endLine, note: 'The services client changes here.' });
+    const rerunReview = topics => stagedResponses({ edits: [...dependencyInventory.edits, checksumClassification] }, {
+      ...dependencyReview, classifications: [...dependencyReview.classifications, checksumClassification], topics
+    });
+    const rerunResponse = rerunReview([dependencyTopic('services-bump', ['services-import', 'services-checksum'], [clientExcerpt('after', 1, 1)]), dependencyTopic('module-version', ['services-version', 'services-call'])]);
+    const reviewedTopics = [dependencyTopic('services-bump', ['services-import', 'services-version'], [clientExcerpt('after', 1, 2)]), dependencyTopic('client-call', ['services-call'])];
+    let failChecksum = true;
+    let failRerunReview = true;
+    nativeHandler = stagedResponses(dependencyInventory, { ...dependencyReview, topics: reviewedTopics });
+    const rerunning = await beginReview(dependencySnapshot);
+    await waitForSettlement(rerunning);
+    const firstSave = rerunning.messages.at(-1).cache.savedAt;
+    for (const ticked of [carriedTick, movedTick, removedTick]) await rerunning.onMessage.emit({ type: 'set-section-tick', ...ticked, done: true });
+    assert.deepEqual(storedTicks, [carriedTick, movedTick, removedTick]);
+    nativeHandler = request => {
+      if (request.schema.properties.edits && failChecksum) return { type: 'error', message: 'The checksum classification failed.' };
+      if (!request.schema.properties.edits && failRerunReview) return { type: 'error', message: 'The PR review could not finish.' };
+      return rerunResponse(request);
+    };
+    for (const [message, settled] of [[{ type: 'review-file', path: 'go.sum' }, 'incomplete'], [{ type: 'retry-file', path: 'go.sum' }, 'check-failed'], [{ type: 'retry-final' }, undefined]]) {
+      const beforeRerun = rerunning.messages.length;
+      await rerunning.onMessage.emit(message);
+      await waitForSettlement(rerunning, beforeRerun);
+      assert.equal(rerunning.messages.at(-1).state, settled, `${message.type} reaches the next step of the rerun.`);
+      if (message.type === 'review-file') failChecksum = false;
+      if (message.type === 'retry-file') failRerunReview = false;
+    }
+    const rerunResult = rerunning.messages.at(-1);
+    assert.equal(rerunResult.type, 'result');
+    assert.deepEqual(rerunResult.ticks, [carriedTick], 'Review anyway, Retry file and Retry final keep a tick whose section adds nothing in its file, and drop ticks of a removed section or of a file the section no longer lists.');
+    assert.notEqual(rerunResult.cache.savedAt, firstSave);
+    assert.deepEqual(storedTicks, [carriedTick], 'The rerun saves the ticks it carried with its new review.');
+    await rerunning.onMessage.emit({ type: 'set-section-tick', ...carriedTick, done: false });
+    assert.deepEqual(storedTicks, [], 'A tick after the rerun changes the new save.');
+    failTickSave = true;
+    await rerunning.onMessage.emit({ type: 'set-section-tick', ...carriedTick, done: true });
+    assert.deepEqual(rerunning.messages.at(-1), { type: 'tick-save-failed' }, 'A tick that cannot be saved is reported to the panel.');
+    assert.deepEqual(storedTicks, [], 'The saved review keeps its earlier state for a tick that failed to save.');
+    const resumedFailure = await resumeReview(rerunning, dependencySnapshot);
+    assert.deepEqual(resumedFailure.messages.slice(-2).map(message => message.type), ['result', 'tick-save-failed'], 'Reconnecting to the session repeats the failed tick save.');
+    assert.deepEqual(resumedFailure.messages.at(-2).ticks, [carriedTick], 'The session keeps a tick whose save failed.');
+    await closeTab(resumedFailure);
+
+    // Section IDs are the model's, so a rerun can hand a ticked section edits or lines the reviewer never saw in it.
+    const absorbedTicks = [carriedTick, movedTick];
+    nativeHandler = stagedResponses(dependencyInventory, { ...dependencyReview, topics: reviewedTopics });
+    const absorbing = await beginReview(dependencySnapshot);
+    await waitForSettlement(absorbing);
+    for (const ticked of absorbedTicks) await absorbing.onMessage.emit({ type: 'set-section-tick', ...ticked, done: true });
+    assert.deepEqual(storedTicks, absorbedTicks);
+    nativeHandler = rerunReview([
+      dependencyTopic('services-bump', ['services-import', 'services-call', 'services-checksum', 'services-version'], [clientExcerpt('after', 1, 2), { path: 'go.mod', side: 'before', startLine: 1, endLine: 1, note: 'The old version requirement.' }])
+    ]);
+    const beforeAbsorbing = absorbing.messages.length;
+    await absorbing.onMessage.emit({ type: 'review-file', path: 'go.sum' });
+    await waitForSettlement(absorbing, beforeAbsorbing);
+    assert.equal(absorbing.messages.at(-1).type, 'result');
+    assert.deepEqual(absorbing.messages.at(-1).ticks, [], 'A rerun drops the tick of a section that gained an edit or newly cites lines in that file.');
+    assert.deepEqual(storedTicks, [], 'The dropped ticks leave the saved review too.');
+    await closeTab(absorbing);
+
     storedReview = structuredClone(cachedReview);
     const openingAcrossReload = port();
     await onConnect.emit(openingAcrossReload);
@@ -1976,11 +2110,15 @@ try {
     assert.equal(unsaved.messages.at(-1).type, 'result', 'Local saving failure must preserve a successful analysis.');
     assert.equal(unsaved.messages.at(-1).cache.saved, false);
     assert.match(unsaved.messages.at(-1).cache.message, /could not be saved locally.*available in this tab/);
+    const beforeUnsavedTick = tickSaves.length;
+    await unsaved.onMessage.emit({ type: 'set-section-tick', topicId: 'missing-account', path: 'account.js', done: true });
+    assert.equal(tickSaves.length, beforeUnsavedTick, 'An unsaved review keeps its ticks only in the session.');
     await unsaved.disconnect();
     const beforeUnsavedResume = requests.length;
     const retainedUnsaved = await resumeReview(unsaved, { baseSha: null, headSha: null });
     assert.equal(retainedUnsaved.messages.at(-1).type, 'result');
     assert.equal(retainedUnsaved.messages.at(-1).cache.saved, false, 'An unsaved result must survive reload even after it was displayed.');
+    assert.deepEqual(retainedUnsaved.messages.at(-1).ticks, [{ topicId: 'missing-account', path: 'account.js' }], 'An unsaved review’s ticks survive reconnection in the same tab.');
     assert.equal(requests.length, beforeUnsavedResume);
     await closeTab(retainedUnsaved);
   } finally {
@@ -1988,7 +2126,7 @@ try {
   }
   assert.ok(nativePorts.every(helper => helper.disconnected), 'Every native request must be cleaned up.');
   assert.ok(!JSON.stringify(requests).includes('apiKey'), 'No provider credentials belong in the native protocol.');
-  console.log('Runtime verified: shared per-provider connection cooldowns and optional storage failures, explicit refresh and worker restart persistence, saved-review failure reporting and recovery, six default and saved-limit concurrent file classifications started largest first and followed by one PR review, generated-file exclusion and explicit review, deleted files listed only for the PR review, changed-file limit and saved-review key separation, scoped PR reviews, late and concurrent opt-in, superseded check cancellation, isolated failure and retry, per-file timeouts, navigation and reload reconnection without repeated calls, detached completion and retained unsaved results, tab-close cleanup during initialization and active work, idle session heartbeats, pinned evidence, trusted settings and native cleanup. No live Codex calls.');
+  console.log('Runtime verified: shared per-provider connection cooldowns and optional storage failures, explicit refresh and worker restart persistence, saved-review failure reporting and recovery, section ticks validated, saved one at a time with their review, failed tick saves reported, restored, carried across Review anyway and retries only while their section adds nothing in the file, and reset by a fresh review, six default and saved-limit concurrent file classifications started largest first and followed by one PR review, generated-file exclusion and explicit review, deleted files listed only for the PR review, changed-file limit and saved-review key separation, scoped PR reviews, late and concurrent opt-in, superseded check cancellation, isolated failure and retry, per-file timeouts, navigation and reload reconnection without repeated calls, detached completion and retained unsaved results, tab-close cleanup during initialization and active work, idle session heartbeats, pinned evidence, trusted settings and native cleanup. No live Codex calls.');
 } finally {
   await Promise.all(reviewPorts.map(closeTab));
   globalThis.fetch = savedFetch;
