@@ -299,7 +299,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     const estimate = checkProgress?.estimate ? roughDuration(checkProgress.estimate) : '';
     steps.replaceChildren(...[
       ['Copy', ''], [`Label${total ? ` ${classified}/${total}` : ''}`, kinds ? `Labelled blocks: ${kinds}` : ''],
-      ['Write review', estimate ? `Usually about ${estimate} with this model, based on recent reviews` : ''], ['Check', '']
+      ['Write review', estimate ? `Usually about ${estimate} with these settings, based on recent reviews` : ''], ['Check', '']
     ].map(([label, note], index) => {
       const step = element('li', '', label);
       step.dataset.state = index < stage ? 'done' : index === stage ? 'current' : 'pending';

@@ -96,6 +96,10 @@ if (mode === 'guide-sections') {
   const idsFor = file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => item.id));
   const unknown = new Set(evidence.files.flatMap(file => file.path === 'tests/change-2.ts' ? idsFor(file) : file.path === 'tests/change-3.ts' ? idsFor(file).slice(2) : []));
   labels = labels.map(label => unknown.has(label.editId) ? {...label, kinds:['unknown'], uncertainty:'The external caller contract is unavailable.'} : label);
+  // The supporting section's edits also carry test, and one carries interface, so the card must sort its tags by count.
+  const tested = new Set(evidence.files.flatMap(file => ['tests/change-1.ts', 'tests/space, comma % and ü.ts'].includes(file.path) ? idsFor(file) : file.path === 'tests/change-3.ts' ? idsFor(file).slice(0, 1) : []));
+  const interfaces = new Set(evidence.files.flatMap(file => file.path === 'tests/change-1.ts' ? idsFor(file) : []));
+  labels = labels.map(label => ({...label, kinds:[...label.kinds, ...interfaces.has(label.editId) ? ['interface'] : [], ...tested.has(label.editId) ? ['test'] : []]}));
   const contractSymbols = ['contractValue', '<b>Contract</b>'];
   const definers = new Set(evidence.files.filter(file => file.path === 'tests/change-3.ts').map(file => idsFor(file)[1]));
   const users = new Set(evidence.files.flatMap(file => file.path === 'tests/change-4.ts' ? idsFor(file) : []));
@@ -2027,7 +2031,7 @@ try {
   assert.equal(await inPanel(`document.querySelector('.rf-progress-detail').title`), ['2/5 blocks labelled in the answer', ...changes.paths.slice(0, 5).map((path, index) => `${index + 1}. Check ${path}`)].join('\n'), 'Every section written so far stays available in full.');
   assert.equal(await inPanel(`document.querySelectorAll('.rf-steps li')[1].title`), 'Labelled blocks: 5 behavior', 'The labelling summary stays in the step tooltip.');
   assert.match(await inPanel(`document.querySelector('.rf-estimate')?.textContent ?? ''`), /^ \/ ~\d+ (?:s|min)$/, 'Three earlier reviews with this model ground an estimate.');
-  assert.match(await inPanel(`document.querySelectorAll('.rf-steps li')[2].title`), /^Usually about \d+ (?:s|min) with this model/);
+  assert.match(await inPanel(`document.querySelectorAll('.rf-steps li')[2].title`), /^Usually about \d+ (?:s|min) with these settings/);
   await inPanel('window.realNow = Date.now; Date.now = () => window.realNow() + 125000');
   await waitFor(() => inPanel(`/^2:[01]\\d$/.test(document.querySelector('.rf-elapsed').textContent)`), 'the step timer counting from the background start time');
   await inPanel('Date.now = window.realNow');
@@ -2330,7 +2334,7 @@ try {
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic')].map(node => [node.dataset.topicId, node.querySelector('.rf-priority').textContent, node.open])`), [['supporting', 'Supporting', true], ['contract', 'Review', false], ['validation', 'Review', false], ['unknown', 'Supporting', false]]);
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic-summary .rf-gist')].map(node => node.textContent)`), sectionGists);
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic-summary .rf-topic-kinds')].map(node => [...node.querySelectorAll('.rf-topic-kind')].map(tag => [tag.textContent, tag.dataset.kind]))`), [
-    [['3 behavior', 'behavior']], [['1 behavior', 'behavior']], [['1 behavior', 'behavior']], [['2 unknown', 'unknown']]
+    [['3 behavior', 'behavior'], ['3 test', 'test'], ['1 interface', 'interface']], [['1 behavior', 'behavior']], [['1 behavior', 'behavior']], [['2 unknown', 'unknown']]
   ], 'Each section card counts its edits by change type, most common first.');
   await waitFor(() => inPage(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelectorAll('.review-focus-native-hidden').length === 4`), 'supporting changes folded beside cited and unresolved changes');
   assert.deepEqual(await inPage(`(() => {
