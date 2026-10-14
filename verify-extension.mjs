@@ -2329,6 +2329,9 @@ try {
   const sectionGists = ['Gist for supporting setup.', 'Gist for check the contract and its implementation.', 'Gist for check the separate validation path.', 'Gist for external caller contract.'];
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic')].map(node => [node.dataset.topicId, node.querySelector('.rf-priority').textContent, node.open])`), [['supporting', 'Supporting', true], ['contract', 'Review', false], ['validation', 'Review', false], ['unknown', 'Supporting', false]]);
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic-summary .rf-gist')].map(node => node.textContent)`), sectionGists);
+  assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic-summary .rf-topic-kinds')].map(node => [...node.querySelectorAll('.rf-topic-kind')].map(tag => [tag.textContent, tag.dataset.kind]))`), [
+    [['3 behavior', 'behavior']], [['1 behavior', 'behavior']], [['1 behavior', 'behavior']], [['2 unknown', 'unknown']]
+  ], 'Each section card counts its edits by change type, most common first.');
   await waitFor(() => inPage(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelectorAll('.review-focus-native-hidden').length === 4`), 'supporting changes folded beside cited and unresolved changes');
   assert.deepEqual(await inPage(`(() => {
     const file = document.getElementById('diff-${changes.entries[2].pathDigest}');

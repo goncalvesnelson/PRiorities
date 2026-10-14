@@ -1,6 +1,7 @@
 // The PRiorities side panel: Chrome shows it beside the GitHub tab it was opened for. Everything
 // that reads or changes GitHub's page goes through the page agent in that tab (page-agent.js).
 import { isGeneratedFile, sectionLinks, sectionPaths } from './review-data.js';
+import { changeKinds } from './review-preferences.js';
 
 const readyMark = '✓ Ready · ';
 const attentionMark = '⚠ Needs attention · ';
@@ -1180,6 +1181,15 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     heading.append(element('span', 'rf-topic-number', String(index + 1)), appendInline(element('span', 'rf-topic-title'), topic.title), element('span', 'rf-priority', topic.priority === 'review' ? 'Review' : 'Supporting'));
     summary.append(heading);
     summary.append(gistLine('span', topic.gist));
+    const kinds = changeKinds.map(kind => [kind, topic.editIds.filter(id => locations.get(id).classification.kinds.includes(kind)).length]).filter(([, count]) => count).sort((a, b) => b[1] - a[1]);
+    const kindTags = element('span', 'rf-topic-kinds');
+    kindTags.append(element('span', 'rf-visually-hidden', 'Change types:'));
+    for (const [kind, count] of kinds) {
+      const tag = element('span', 'rf-topic-kind', `${count} ${kind}`);
+      tag.dataset.kind = kind;
+      kindTags.append(tag);
+    }
+    summary.append(kindTags);
     card.append(summary);
     const body = element('div', 'rf-topic-body');
     const link = identifierLinker(topic, locations);

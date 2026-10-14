@@ -195,6 +195,9 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-topic[data-priority="review"] .rf-priority { border-color: var(--rf-primary); background: var(--rf-primary); color: var(--rf-primary-ink); }
 .rf-gist { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin: 6px 0 0 28px; color: var(--rf-muted); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
 .rf-topic[open] .rf-gist { -webkit-line-clamp: unset; }
+.rf-topic-kinds { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 0 28px; }
+.rf-topic-kind { height: 18px; padding: 0 7px; border: 1px solid var(--rf-border); border-radius: 20px; color: var(--rf-muted); font-size: 11px; line-height: 16px; white-space: nowrap; }
+.rf-topic-kind[data-kind="unknown"] { border-color: var(--rf-warning); color: var(--rf-warning); }
 .rf-topic-body { padding: 4px 16px 18px 44px; }
 .rf-topic-body h3 { margin: 22px 0 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--rf-muted); }
 .rf-topic-body .rf-rich { color: var(--rf-prose); font-size: 15px; line-height: 1.7; }

@@ -44,6 +44,20 @@ In **Settings → What should stay visible?**, choose **Selective**, **Balanced*
 
 **Always keep these change types visible** prevents PRiorities from folding edits with the selected classifications, regardless of the model’s priority or excerpts. It applies to analyzed files and preserves selected change types identified by either the file classification or the final PR review. Validation retains these types even if the final review removes them. The final review can resolve unknown classifications using the combined evidence. Edits assigned to Review sections and their cited evidence stay visible in GitHub, along with unresolved edits and your always-visible types. Folding leaves discussion rows open. Generated and machine-maintained files still need **Review anyway** before analysis.
 
+Each edit gets one or more change types. A type describes what the edit does, not how important it is. Each section card lists its edits’ types, most common first, with how many edits carry each; unknown is highlighted. Each edit’s own types appear under **Change classifications** in its section, and the **Label** step’s tooltip counts them across the PR:
+
+| Type | Meaning |
+|---|---|
+| Behavior | Runtime effects, or changes to control or data flow |
+| Interface | Contracts, exported names, and serialized or stored data |
+| Rename | A rename. It can still change an exported, persisted, serialized or dynamically looked-up name, so matching spelling is not treated as equivalence |
+| Move | Moved code |
+| Formatting | Layout only |
+| Documentation | Documentation |
+| Test | Tests |
+| Configuration | Build, deployment or dependencies |
+| Unknown | An aspect the captured evidence cannot classify. It names the missing evidence, stays visible, and is listed in the review’s notice of changes that could not be fully checked. It is not offered as an always-visible choice because it always stays visible |
+
 **Always keep these files visible** lists paths that never fold, whatever the model decides. Enter one path per line; it matches at any depth, so `go.mod` covers `services/api/go.mod`. End a line with `/` to cover a whole folder, such as `migrations/`. The default list covers common dependency manifests, `Dockerfile`, `.github/workflows/` and `migrations/`; edit it to match your repositories. PRiorities still analyzes and explains protected files, but leaves their native diff rows unfolded.
 
 **Advanced: edit analysis prompts** exposes the full classification and prioritization instructions. Classification labels every edit; prioritization chooses the decisions and source excerpts to show. Classification runs once per file; prioritization runs once for the whole PR. Reset either editor to restore its built-in prompt, then choose **Save review preferences**. A custom prompt replaces the built-in guidance on how to classify, group and explain changes. The extension still adds source-handling rules and the output requirements it validates, including symbol relations, section descriptions and citable lines, and enforces visibility controls. Custom instructions cannot disable those checks.
