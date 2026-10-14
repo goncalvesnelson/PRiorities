@@ -168,7 +168,6 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   const missedSavedReviews = new Set();
   let pendingAction;
   let cacheMessage = '';
-  let cacheWarning = false;
   let cacheLookupFailed = false;
   let openingSavedReview = false;
   let cacheProbe = '';
@@ -228,7 +227,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   const nativeNotice = element('p', 'rf-navigation-notice');
   nativeNotice.hidden = true;
   const result = element('div', 'rf-result');
-  const welcome = element('p', 'rf-welcome', 'Read the explanation here while you review GitHub’s own diff. PRiorities folds less important code there behind green markers; every line stays one click away.');
+  const welcome = element('p', 'rf-welcome', 'Read the explanation here while you review GitHub’s own diff. PRiorities folds less important code there behind grey markers; every line stays one click away.');
   const progressPanel = element('div', 'rf-progress-panel');
   const phase = element('strong', 'rf-phase');
   const steps = element('ol', 'rf-steps');
@@ -327,7 +326,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     if (capturedFiles) { progressBar.max = capturedFiles.total; progressBar.value = capturedFiles.done; }
     else if (blocks?.total) { progressBar.max = blocks.total; progressBar.value = blocks.labelled; }
     else progressBar.removeAttribute('value');
-    cacheNotice.hidden = Boolean(analysis) && !cacheWarning || !cacheMessage && !savedReview;
+    cacheNotice.hidden = !cacheMessage && (Boolean(analysis) || !savedReview);
     cacheNotice.textContent = cacheMessage || (savedReview ? `Saved ${new Date(savedReview.savedAt).toLocaleString()}. Opening checks the current context without a new model call.` : '');
     let nextStatus = pendingAction?.message ?? status;
     const progressShown = busy && (snapshot || capturing);
@@ -445,7 +444,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       if (version !== cacheProbeVersion || !isActive() || busy || analysis) return;
       savedReviewChecked = true;
       if (cached?.error) throw new Error(cached.error);
-      if (cacheLookupFailed) { cacheMessage = ''; cacheWarning = false; }
+      if (cacheLookupFailed) cacheMessage = '';
       cacheLookupFailed = false;
       savedReview = cached?.available ? { ...cached, candidate: JSON.stringify([key, cached.key, cached.savedAt]) } : undefined;
       renderControls();
@@ -453,7 +452,6 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       if (version !== cacheProbeVersion || !isActive() || busy || analysis) return;
       savedReviewChecked = true;
       cacheLookupFailed = true;
-      cacheWarning = true;
       cacheMessage = failure.message;
       renderControls();
     }
@@ -516,7 +514,6 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     pendingAction = undefined;
     savedReview = undefined;
     cacheMessage = '';
-    cacheWarning = false;
     cacheLookupFailed = false;
     openingSavedReview = false;
     startedAt = undefined;
@@ -759,11 +756,8 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     return delta;
   }
 
-  // The saved review keeps the ticks it last stored, so this warning replaces the note that it is saved.
   function warnTicksUnsaved(message) {
-    cacheWarning = true;
     cacheMessage = message;
-    result.querySelector('.rf-cache-detail').textContent = message;
     renderControls();
   }
 
@@ -980,9 +974,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
         sectionTicks = message.ticks;
         finalResult = true;
         reviewStage = 'complete';
-        cacheMessage = message.cache?.restored ? `Opened saved review from ${new Date(message.cache.savedAt).toLocaleString()}. Commits, context, provider, model, effort and review preferences match. No new model calls were made.`
-          : message.cache?.saved ? 'Review saved on this browser. Reopen this PR to reuse it, or run a fresh review anytime.' : message.cache?.message || '';
-        cacheWarning = !message.cache?.restored && !message.cache?.saved && Boolean(message.cache?.message);
+        cacheMessage = message.cache?.restored || message.cache?.saved ? '' : message.cache?.message || '';
         for (const [path, file] of fileStates) {
           if (!unanalyzedStates.includes(file.state)) fileStates.set(path, { ...file, state: 'complete', message: '' });
         }
@@ -1007,7 +999,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       if (!finalResult) status = 'The analysis session closed. Analyze again to restart.';
       // The panel's own disconnects never reach this listener, so the background closed this
       // connection, and later ticks cannot reach the saved review.
-      else if (!cacheWarning) warnTicksUnsaved('PRiorities lost its connection to this review. Sections you mark done now still fold here but aren’t saved; reopen the review to save ticks again.');
+      else if (!cacheMessage) warnTicksUnsaved('PRiorities lost its connection to this review. Sections you mark done now still fold here but aren’t saved; reopen the review to save ticks again.');
       renderFileProgress();
       renderControls();
     });
@@ -1055,7 +1047,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   function renderFoldSummary(counts = foldCounts) {
     const node = result.querySelector('.rf-fold-summary');
     if (!node) return;
-    const closed = counts?.groups ? `${counts.folded} of ${counts.groups} green ${counts.groups === 1 ? 'fold' : 'folds'} closed in the loaded files (${counts.hidden.toLocaleString()} ${counts.hidden === 1 ? 'line' : 'lines'} hidden).` : '';
+    const closed = counts?.groups ? `${counts.folded} of ${counts.groups} ${counts.groups === 1 ? 'fold' : 'folds'} closed in the loaded files (${counts.hidden.toLocaleString()} ${counts.hidden === 1 ? 'line' : 'lines'} hidden).` : '';
     node.textContent = !foldNative ? closed ? `Only sections you marked done are folded: ${closed}` : 'Folding is off: GitHub shows every line it normally shows.'
       : counts?.unreadable && !counts.matched ? 'Switch GitHub’s diff to Unified to fold code; split view is left unchanged.'
       : closed || 'Nothing is folded in the files GitHub has loaded.';
@@ -1303,6 +1295,13 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       group.append(list);
       summary.append(group);
     }
+    if (snapshot.warnings.length) {
+      const notice = element('div', 'rf-context-limits', 'This review was written from partial context:');
+      const list = element('ul', 'rf-unresolved-list');
+      for (const warning of snapshot.warnings) list.append(element('li', '', warning));
+      notice.append(list);
+      summary.append(notice);
+    }
     const unresolved = analysis.classifications.filter(entry => entry.kinds.includes('unknown'));
     if (unresolved.length) {
       const notice = element('div', 'rf-unresolved', `${unresolved.length} ${unresolved.length === 1 ? 'change' : 'changes'} could not be fully checked from the captured code. Review ${unresolved.length === 1 ? 'it' : 'them'} yourself:`);
@@ -1325,11 +1324,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     sections.append(element('h2', 'rf-sections-title', `Sections · ${analysis.topics.length}`));
     const links = sectionLinks(analysis);
     for (const [index, topic] of analysis.topics.entries()) sections.append(renderTopic(topic, index, locations, links));
-    const details = disclosure('Analysis details', 'rf-review-details');
-    if (cacheMessage) details.append(element('p', 'rf-cache-detail', cacheMessage));
-    details.append(element('p', 'rf-provenance', `Analyzed ${snapshot.baseSha.slice(0, 8)}…${snapshot.headSha.slice(0, 8)} with ${reviewProviderName}${reviewModel ? ` (${reviewModel})` : ''}, effort: ${reviewEffort || 'model default'}.`));
-    for (const warning of snapshot.warnings ?? []) details.append(element('p', '', warning));
-    result.append(summary, sections, details);
+    result.append(summary, sections);
     renderFoldSummary();
     panel.scrollTop = scroll;
   }

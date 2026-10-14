@@ -1,6 +1,7 @@
 /*
  * Injected into GitHub's pages. The side panel has its own stylesheet (panel.css). Badges and the
- * tooltip use Uphold's dark tokens, like the panel; only the fold line follows GitHub's colour mode.
+ * tooltip use Uphold's dark tokens, like the panel; only the reviewed fold line and the scroll
+ * highlight follow GitHub's colour mode.
  */
 
 /* ── The only marks PRiorities makes in GitHub's page: folds, their tooltip and the scroll highlight ── */
@@ -24,19 +25,25 @@ html[data-color-mode="dark"] :is(.review-focus-native-fold, .review-focus-native
 }
 
 .review-focus-native-hidden { display: none !important; }
-/* A fold is a solid green line across the diff with a PRiorities badge centred on it. */
+/*
+ * A fold is a solid line across the diff with a PRiorities badge centred on it: grey where PRiorities
+ * folded less important code, green where the reviewer marked the section done. The grey reads on
+ * both GitHub's light and dark backgrounds, so it needs no colour-mode variants.
+ */
+.review-focus-native-fold { --rf-fold-line: #8b949e; --rf-fold-badge: #c9cfd8; }
+.review-focus-native-fold.review-focus-native-reviewed { --rf-fold-line: var(--rf-fold); --rf-fold-badge: #84fb7f; }
 tr.review-focus-native-fold > td { padding: 0 !important; border: 0 !important; background: transparent !important; }
 .review-focus-native-fold-body {
   position: relative; display: flex; align-items: center; height: 28px; padding: 0 12px;
   animation: rf-fold-in .32s cubic-bezier(.2, .8, .2, 1) both;
 }
-.review-focus-native-fold-body::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px; background: var(--rf-fold); transition: opacity .2s; }
+.review-focus-native-fold-body::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px; background: var(--rf-fold-line); transition: opacity .2s; }
 .review-focus-native-fold-body:has([aria-expanded="true"])::before { opacity: .45; }
 .review-focus-native-toggle {
   position: sticky; left: 12px; z-index: 1;
   display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
-  height: 22px; padding: 0 10px 0 9px; border: 1px solid var(--rf-fold); border-radius: 20px;
-  background: #10151d; color: #84fb7f;
+  height: 22px; padding: 0 10px 0 9px; border: 1px solid var(--rf-fold-line); border-radius: 20px;
+  background: #10151d; color: var(--rf-fold-badge);
   font: 600 12px/1 proxima-nova, "Proxima Nova", ui-sans-serif, system-ui, -apple-system, sans-serif;
   white-space: nowrap; cursor: pointer;
   transition: background-color .15s, transform .15s;
@@ -49,7 +56,7 @@ tr.review-focus-native-fold > td { padding: 0 !important; border: 0 !important; 
 .review-focus-native-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
 .review-focus-native-toggle:hover { background: #1e2533; }
 .review-focus-native-toggle:active { transform: scale(.96); }
-.review-focus-native-toggle:focus-visible { outline: 2px solid #84fb7f; outline-offset: 2px; }
+.review-focus-native-toggle:focus-visible { outline: 2px solid var(--rf-fold-badge); outline-offset: 2px; }
 .review-focus-native-tooltip {
   position: fixed; z-index: 2147483647; display: flex; flex-direction: column; gap: 4px;
   max-width: 320px; padding: 10px 12px; border: 1px solid #222a37; border-radius: 12px;
@@ -58,7 +65,7 @@ tr.review-focus-native-fold > td { padding: 0 !important; border: 0 !important; 
   pointer-events: none; animation: rf-tooltip-in .14s ease-out both;
 }
 .review-focus-native-tooltip[hidden] { display: none; }
-.review-focus-native-tooltip strong { color: #84fb7f; font-weight: 700; }
+.review-focus-native-tooltip strong { color: #f0f3f6; font-weight: 700; }
 .review-focus-native-tooltip span:last-child { color: #9aa3b2; font-size: 12px; }
 @keyframes rf-tooltip-in { from { opacity: 0; transform: translateY(2px); } }
 tr.review-focus-native-unfolded > td { animation: rf-unfold .3s cubic-bezier(.2, .8, .2, 1) both; }

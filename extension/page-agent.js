@@ -39,14 +39,10 @@ function titles(topics) {
   return [...new Set(topics)].map(topic => `“${topic.title}”`).join(', ');
 }
 
-function foldReason(rows) {
-  const suggested = rows.filter(row => !row.done.length);
-  const supporting = suggested.map(row => row.topic).filter(Boolean);
-  const done = rows.flatMap(row => row.done);
-  return [
-    ...!suggested.length ? [] : supporting.length ? [`Supporting changes from ${titles(supporting)}.`] : ['Unchanged context around the changes.'],
-    ...done.length ? [`You marked ${titles(done)} done.`] : []
-  ].join(' ');
+function foldReason(rows, reviewed) {
+  if (reviewed) return `You marked ${titles(rows.flatMap(row => row.done))} done.`;
+  const supporting = rows.map(row => row.topic).filter(Boolean);
+  return supporting.length ? `Supporting changes from ${titles(supporting)}.` : 'Unchanged context around the changes.';
 }
 
 // One shared tooltip in the page, fixed to the viewport so GitHub's scrolling diff tables can't clip it.
@@ -147,10 +143,11 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
       else hidden.add(row.element);
     }
     const lines = `${fold.rows.length} ${fold.rows.length === 1 ? 'line' : 'lines'}`;
-    fold.toggle.textContent = expanded ? `Fold ${lines}` : `${lines} folded`;
+    const state = fold.reviewed ? 'reviewed' : 'folded';
+    fold.toggle.textContent = expanded ? `Fold ${lines}` : `${lines} ${state}`;
     fold.toggle.setAttribute('aria-expanded', String(expanded));
-    fold.toggle.setAttribute('aria-label', `${expanded ? 'Fold again' : 'Show'} ${lines} folded by PRiorities. ${fold.reason}`);
-    fold.tooltip = [expanded ? `PRiorities unfolded ${lines}` : `PRiorities folded ${lines}`, fold.reason,
+    fold.toggle.setAttribute('aria-label', `${expanded ? 'Fold again' : 'Show'} ${lines} ${fold.reviewed ? 'you reviewed' : 'folded by PRiorities'}. ${fold.reason}`);
+    fold.tooltip = [expanded ? `PRiorities unfolded ${lines}` : fold.reviewed ? `You reviewed ${lines}` : `PRiorities folded ${lines}`, fold.reason,
       `${expanded ? 'Click to fold them again.' : 'Click to show them.'} GitHub’s diff and comments are unchanged.`];
     if (tooltip.anchor === fold.toggle) tooltip.show(fold.toggle, fold.tooltip);
     onChange(counts());
@@ -158,19 +155,21 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
 
   function foldRows(path, rows) {
     // A section marked done is the reviewer's own request, so its rows fold however few they are.
-    if (rows.length < minimumFold && !rows.some(row => row.done.length)) return;
+    const reviewed = rows.some(row => row.done.length);
+    if (rows.length < minimumFold && !reviewed) return;
     const first = rows[0].element;
     const marker = doc.createElement('tr');
     marker.className = 'review-focus-native-fold';
+    marker.classList.toggle('review-focus-native-reviewed', reviewed);
     marker.setAttribute(ownedAttribute, '');
     const cell = doc.createElement('td');
     cell.colSpan = Math.max(1, [...first.cells].reduce((sum, item) => sum + item.colSpan, 0));
-    // A green line across the diff with one badge on it; the explanation lives in the badge's tooltip.
+    // A line across the diff with one badge on it; the explanation lives in the badge's tooltip.
     const body = element('div', 'review-focus-native-fold-body');
-    const reason = foldReason(rows);
+    const reason = foldReason(rows, reviewed);
     const toggle = element('button', 'review-focus-native-toggle');
     toggle.type = 'button';
-    const fold = { key: JSON.stringify([path, rowKey(rows[0]), rowKey(rows.at(-1))]), marker, toggle, rows, reason };
+    const fold = { key: JSON.stringify([path, rowKey(rows[0]), rowKey(rows.at(-1))]), marker, toggle, rows, reason, reviewed };
     toggle.addEventListener('click', () => setExpanded(fold, !revealed.has(fold.key)));
     for (const type of ['pointerenter', 'focus']) toggle.addEventListener(type, () => tooltip.show(toggle, fold.tooltip));
     for (const type of ['pointerleave', 'blur']) toggle.addEventListener(type, () => tooltip.hide());
@@ -219,7 +218,10 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
           flush();
           continue;
         }
-        if (group.length && group.at(-1).element.nextElementSibling !== row.element) flush();
+        const previous = group.at(-1);
+        // Reviewed rows get their own marker so they never share one with rows PRiorities folded.
+        const reviewedChanged = previous && previous.done.length > 0 !== match.done.length > 0;
+        if (previous && (previous.element.nextElementSibling !== row.element || reviewedChanged)) flush();
         group.push({ ...row, topic: match.topic, done: match.done });
       }
       flush();
