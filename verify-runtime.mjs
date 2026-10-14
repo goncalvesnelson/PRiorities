@@ -826,14 +826,12 @@ try {
     assert.match(rejectedFinal.messages.at(-1).message, error, name);
     assert.ok(!rejectedFinal.messages.some(message => message.type === 'result'), 'Invalid final classifications must never reach the folding UI.');
   }
-  for (const [name, mutate] of [
-    ['missing defines', edit => { delete edit.defines; }],
-    ['uses not a list', edit => { edit.uses = 'account'; }],
-    ['blank symbol', edit => { edit.uses = [' ']; }],
-    ['non-string symbol', edit => { edit.defines = [7]; }],
-    ['overlong symbol', edit => { edit.uses = ['x'.repeat(201)]; }],
-    ['control character in symbol', edit => { edit.defines = ['first\nsecond']; }],
-    ['too many symbols', edit => { edit.uses = Array.from({ length: 51 }, (_, index) => `symbol${index}`); }]
+  for (const [name, mutate, problem] of [
+    ['missing defines', edit => { delete edit.defines; }, 'did not return a defines list.'],
+    ['uses not a list', edit => { edit.uses = 'account'; }, 'did not return a uses list.'],
+    ['blank symbol', edit => { edit.uses = [' ']; }, 'listed an empty uses name.'],
+    ['non-string symbol', edit => { edit.defines = [7]; }, 'listed a defines entry that is not text.'],
+    ['control character in symbol', edit => { edit.defines = ['first\nsecond']; }, 'listed a defines name containing a control character.']
   ]) {
     const invalidInventory = structuredClone(twoClassifications);
     mutate(invalidInventory.edits[0]);
@@ -842,7 +840,7 @@ try {
     const rejected = await beginReview(twoEdits);
     await waitForSettlement(rejected);
     assert.equal(requests.length - before, 1, `${name} must stop before prioritization.`);
-    assert.match(rejected.messages.find(message => message.state === 'failed').message, /invalid symbol names/, name);
+    assert.equal(rejected.messages.find(message => message.state === 'failed').message, `The classification of account.js:1 ${problem} This file remains expanded.`, name);
   }
   const repeatedSymbols = structuredClone(twoClassifications);
   repeatedSymbols.edits[0].uses = [' account ', 'account', 'balance'];
@@ -851,6 +849,13 @@ try {
   await waitForSettlement(normalizedSymbols);
   assert.deepEqual(JSON.parse(requests.at(-1).prompt.user).classifications[0].uses, ['account', 'balance'], 'Symbol names reach the PR review trimmed and without duplicates.');
   assert.deepEqual(normalizedSymbols.messages.at(-1).analysis.classifications[0].uses, ['account', 'balance']);
+  const manySymbols = structuredClone(twoClassifications);
+  manySymbols.edits[0].uses = [...Array.from({ length: 120 }, (_, index) => `symbol${index}`), 'x'.repeat(300)];
+  nativeHandler = stagedResponses(manySymbols, { ...assessment, topics: [{ ...assessment.topics[0], editIds: ['1-1-1', '1-1-2'] }] });
+  const largeInventory = await beginReview(twoEdits);
+  await waitForSettlement(largeInventory);
+  assert.equal(largeInventory.messages.at(-1).type, 'result', 'A large new file can list any number of symbols of any length.');
+  assert.deepEqual(JSON.parse(requests.at(-1).prompt.user).classifications[0].uses, manySymbols.edits[0].uses, 'Every symbol a large new file lists reaches the PR review.');
 
   const unresolved = { edits: [{ ...classifications.edits[0], kinds: ['interface', 'unknown'] }] };
   const deferred = { ...assessment, topics: [{ ...assessment.topics[0], priority: 'supporting', excerpts: [] }] };
@@ -1721,7 +1726,7 @@ try {
 
   const reviewCache = await import('./extension/review-cache.js');
   const lookupSettings = { provider: 'codex', model: 'fixture-model', effort: 'high', concurrency: 6, fileLimit: 100, listDeletedFiles: false, review: defaultReviewPreferences() };
-  assert.equal(reviewCache.reviewLookup(snapshot, lookupSettings), JSON.stringify([8, snapshot.url, snapshot.baseSha, snapshot.headSha, 'codex', 'fixture-model', 'high', defaultReviewPreferences()]), 'Reviews made without listing deleted files keep their existing saved-review key.');
+  assert.equal(reviewCache.reviewLookup(snapshot, lookupSettings), JSON.stringify([8, snapshot.url, snapshot.baseSha, snapshot.headSha, 'codex', 'fixture-model', 'high', defaultReviewPreferences(), false]), 'The saved-review key covers every setting that changes analysis output.');
   assert.equal(reviewCache.reviewLookup(snapshot, { ...lookupSettings, fileLimit: 300 }), reviewCache.reviewLookup(snapshot, lookupSettings), 'The file limit only gates analysis and is not part of the saved-review key.');
   assert.notEqual(reviewCache.reviewLookup(snapshot, { ...lookupSettings, listDeletedFiles: true }), reviewCache.reviewLookup(snapshot, lookupSettings), 'Reviews made while listing deleted files never replace or reopen reviews made without it.');
   const cachedReview = { analysis: result.analysis, paths: ['account.js'], savedAt: Date.now() };

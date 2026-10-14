@@ -1654,7 +1654,7 @@ try {
   await waitFor(() => inPage('!document.querySelector("#cache-limit").disabled'), 'cache ready for invalid stored-result regression');
   const invalidRecord = await inPage(`(async () => {
     const cache = await import('./review-cache.js');
-    const identity = await cache.reviewCacheKey(${JSON.stringify(lastSnapshot)},{provider:'claude',model:'claude-fixture-model',effort:'medium'});
+    const identity = await cache.reviewCacheKey(${JSON.stringify(lastSnapshot)},{provider:'claude',model:'claude-fixture-model',effort:'medium',listDeletedFiles:false});
     const original = await cache.readReview(identity.key);
     if (!original) throw new Error('Expected a saved review for this exact capture.');
     await cache.saveReview(identity,{analysis:original.analysis,paths:[]});

@@ -159,13 +159,22 @@ function validateLabels(input, snapshot) {
   });
 }
 
-function symbolNames(names) {
-  if (!Array.isArray(names) || names.length > 50 || names.some(name => typeof name !== 'string' || !name.trim() || name.length > 200 || /[\u0000-\u001f]/.test(name))) throw new Error('The classification returned invalid symbol names.');
+function symbolNames(names, list, location) {
+  if (!Array.isArray(names)) throw new Error(`The classification of ${location} did not return a ${list} list.`);
+  if (names.some(name => typeof name !== 'string')) throw new Error(`The classification of ${location} listed a ${list} entry that is not text.`);
+  if (names.some(name => !name.trim())) throw new Error(`The classification of ${location} listed an empty ${list} name.`);
+  if (names.some(name => /[\u0000-\u001f]/.test(name))) throw new Error(`The classification of ${location} listed a ${list} name containing a control character.`);
   return [...new Set(names.map(name => name.trim()))];
 }
 
 export function validateClassifications(input, snapshot) {
-  return validateLabels(input, snapshot).map((edit, index) => ({ ...edit, defines: symbolNames(input.edits[index].defines), uses: symbolNames(input.edits[index].uses) }));
+  const edits = new Map(allEdits(snapshot).map(edit => [edit.id, edit]));
+  return validateLabels(input, snapshot).map((edit, index) => {
+    const { path, rows } = edits.get(edit.editId);
+    const { newLine, oldLine } = rows.find(row => row.newLine !== null) ?? rows[0];
+    const location = `${path}:${newLine ?? oldLine}`;
+    return { ...edit, defines: symbolNames(input.edits[index].defines, 'defines', location), uses: symbolNames(input.edits[index].uses, 'uses', location) };
+  });
 }
 
 // The PR review returns labels only; each edit keeps the symbol relations from its file classification.
