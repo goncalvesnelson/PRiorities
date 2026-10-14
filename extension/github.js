@@ -398,7 +398,7 @@ async function loadChanges(doc, route, identity, { fileLimit, listDeletedFiles }
   for (let offset = 0; offset < missing.length; offset += 4) batches.push(missing.slice(offset, offset + 4));
   await mapLimited(batches, async paths => {
     addEntries(await fetchChangeEntries(doc, identity, range, paths, signal), paths);
-    onProgress(`Reading changed files: ${entries.size} of ${summaries.size}…`);
+    onProgress(`Reading changed files: ${entries.size} of ${summaries.size}…`, { done: entries.size, total: summaries.size });
   });
   await mapLimited([...entries.values()].filter(needsDiffText), async entry => {
     onProgress(`Loading deferred diff for ${entry.path}…`);

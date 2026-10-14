@@ -85,9 +85,9 @@ async function readDurations() {
   return Array.isArray(analysisDurations) ? analysisDurations : [];
 }
 
-async function expectedSeconds({ provider, model }, lines) {
+async function expectedSeconds({ provider, model, effort }, lines) {
   try {
-    const rates = (await readDurations()).filter(run => run?.provider === provider && run.model === model && run.seconds > 0 && run.lines > 0)
+    const rates = (await readDurations()).filter(run => run?.provider === provider && run.model === model && run.effort === effort && run.seconds > 0 && run.lines > 0)
       .map(run => run.seconds / run.lines).sort((a, b) => a - b);
     if (rates.length < 3) return undefined;
     return Math.round(rates[Math.floor(rates.length / 2)] * lines);
@@ -96,10 +96,10 @@ async function expectedSeconds({ provider, model }, lines) {
   }
 }
 
-function recordDuration({ provider, model }, seconds, lines) {
+function recordDuration({ provider, model, effort }, seconds, lines) {
   if (!(seconds > 0 && lines > 0)) return;
   durationWrite = durationWrite.then(async () => {
-    const runs = [...await readDurations(), { provider, model, seconds, lines }].slice(-20);
+    const runs = [...await readDurations(), { provider, model, effort, seconds, lines }].slice(-20);
     await chrome.storage.local.set({ analysisDurations: runs });
   }).catch(() => {});
 }
@@ -228,7 +228,7 @@ function createSession(tabId, url, port) {
   };
 
   function fileProgress(path, entry) {
-    return { type: 'file-progress', path, state: entry.state, ...(entry.message ? { message: entry.message } : {}), ...(entry.state === 'classifying' && entry.labelled ? { labelled: entry.labelled } : {}) };
+    return { type: 'file-progress', path, state: entry.state, ...(entry.message ? { message: entry.message } : {}), ...(entry.state === 'classifying' && entry.labelled ? { labelled: entry.labelled } : {}), ...(entry.state === 'classifying' && entry.thought ? { thought: entry.thought } : {}) };
   }
 
   function sessionMessage() {
@@ -335,12 +335,14 @@ function createSession(tabId, url, port) {
     const heartbeat = setInterval(() => setFileState(entry, entry.state, `Classifying edits… ${Math.floor((Date.now() - started) / 1000)}s`), 15_000);
     try {
       entry.labelled = 0;
+      entry.thought = '';
       setFileState(entry, 'classifying', 'Classifying edits…');
       const changedPaths = [...session.files.values()].filter(file => file.included).map(file => file.snapshot.files[0].path);
       const raw = await analyzeWithCLI({
         ...session.settings, signal: controller.signal, prompt: makeClassificationPrompt(entry.snapshot, changedPaths, session.settings.review, session.snapshot), schema: classificationSchema,
         onProgress: progress => {
           entry.labelled = progress.labelled;
+          entry.thought = progress.thought;
           setFileState(entry, entry.state, entry.message);
         }
       });

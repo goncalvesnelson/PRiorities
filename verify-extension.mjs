@@ -143,6 +143,13 @@ if (mode === 'many-decisions') {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 }
+if (mode === 'guide-sections' && schema.required.includes('edits') && evidence.files[0].path === 'tests/change-3.ts') {
+  while (await readFile(${JSON.stringify(uxGate)}, 'utf8') === 'waiting') await new Promise(resolve => setTimeout(resolve, 20));
+}
+if (mode === 'parallel' && !schema.required.includes('edits')) {
+  process.stdout.write(JSON.stringify({type:'item.completed',item:{id:'reasoning_0',type:'reasoning',text:'**Comparing the three files**\\n\\nEach file changes one value.'}}) + '\\n');
+  while (['waiting', 'labelled'].includes(await readFile(${JSON.stringify(uxGate)}, 'utf8'))) await new Promise(resolve => setTimeout(resolve, 20));
+}
 if (mode === 'parallel') {
   await appendFile(${JSON.stringify(lifecycleLog)}, JSON.stringify({type:'start',pid:process.pid})+'\\n');
   if (schema.required.includes('edits')) {
@@ -150,6 +157,10 @@ if (mode === 'parallel') {
     while ((await readFile(${JSON.stringify(lifecycleLog)},'utf8')).split('\\n').filter(Boolean).map(line=>JSON.parse(line)).filter(event=>event.type==='start').length < 3) {
       if(Date.now()-start>5000) throw new Error('Three independent Codex helpers did not start concurrently.');
       await new Promise(resolve=>setTimeout(resolve,20));
+    }
+    if (evidence.files[0].path === 'tests/change-1.ts') {
+      process.stdout.write(JSON.stringify({type:'item.completed',item:{id:'reasoning_0',type:'reasoning',text:'**Checking the first file**\\n\\nIt changes one value.'}}) + '\\n');
+      while (await readFile(${JSON.stringify(uxGate)}, 'utf8') === 'waiting') await new Promise(resolve => setTimeout(resolve, 20));
     }
   }
 }
@@ -1008,6 +1019,26 @@ try {
   changesMode = 'complete';
   await page('Page.navigate', {url:prUrl + '/changes'});
   await waitFor(() => inPanel(`document.querySelector('.rf-status')?.textContent.includes('Ready to analyze') || document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'parallel capture failure fixture ready');
+  await inAgent(`(() => {
+    const originalFetch = globalThis.fetch;
+    let entryRequests = 0;
+    globalThis.fetch = (input, options) => {
+      if (new URL(input).pathname !== ${JSON.stringify(changes.root + '/page_data/diff_entries')} || ++entryRequests <= 2) return originalFetch(input, options);
+      return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), {once:true}));
+    };
+    window.restoreEntryFetch = () => { globalThis.fetch = originalFetch; };
+  })()`);
+  await inPanel(`document.querySelector('.rf-analyze').click()`);
+  await waitFor(() => inPanel(`(() => {
+    const read = document.querySelector('.rf-progress-detail').textContent.match(/^Reading changed files: (\\d+) of 53…$/);
+    const bar = document.querySelector('.rf-progress-bar');
+    return read && bar.value === Number(read[1]) && bar.max === 53;
+  })()`), 'the file count of a held capture in the progress line and bar');
+  const captureStatus = await inPanel(`({text:document.querySelector('.rf-status').textContent, hidden:document.querySelector('.rf-status').classList.contains('rf-visually-hidden'), detail:document.querySelector('.rf-progress-detail').textContent})`);
+  assert.ok(captureStatus.hidden && captureStatus.text.endsWith(`. ${captureStatus.detail}`), 'Capture progress is announced once, without a second visible status or doubled punctuation.');
+  await click('Cancel');
+  await waitFor(() => inPanel(`!document.querySelector('.rf-analyze').disabled && !document.querySelector('.rf-progress-panel').checkVisibility()`), 'capture cancelled while diff reads are held');
+  await inAgent('restoreEntryFetch()');
   const beforeCaptureFailure = (await modelRequests()).length;
   await inAgent(`(() => {
     const originalFetch = globalThis.fetch;
@@ -1070,10 +1101,11 @@ try {
   const captureFixture = (options = {}) => inPage(`(async()=>{
     const module=await import(${JSON.stringify(moduleUrl)});
     const progress=[];
+    const fileCounts=[];
     try {
-      const {snapshot,highlights}=await module.capturePullRequest({...${JSON.stringify(options)},onProgress:message=>progress.push(message)});
-      return {snapshot,highlights,progress};
-    } catch(error) { return {error:error.message,progress}; }
+      const {snapshot,highlights}=await module.capturePullRequest({...${JSON.stringify(options)},onProgress:(message,files)=>{progress.push(message);if(files)fileCounts.push(files);}});
+      return {snapshot,highlights,progress,fileCounts};
+    } catch(error) { return {error:error.message,progress,fileCounts}; }
   })()`);
   const lifecycleRoute = structuredClone(changes.route);
   lifecycleRoute.diffContents = [
@@ -1283,6 +1315,8 @@ try {
     ]);
   }
   assert.ok(completeChanges.progress.includes('Reading context for 53 changed files…'));
+  assert.deepEqual(completeChanges.fileCounts.at(-1), { done: 53, total: 53 }, 'Reading missing diffs reports how many of the changed files are read.');
+  assert.ok(completeChanges.fileCounts.every((count, index, counts) => count.total === 53 && count.done >= (counts[index - 1]?.done ?? 0)), 'Read counts only grow.');
   assert.deepEqual(completeChanges.highlights[changes.paths[0]], {
     before: {1: [['before', 'pl-k'], [` ${changes.paths[0]}`]]},
     after: {1: [['after', 'pl-k'], [` ${changes.paths[0]}`]]}
@@ -1356,7 +1390,13 @@ try {
   await writeFile(modeFile, 'parallel');
   await page('Page.navigate', { url: prUrl + '/changes' });
   await waitFor(() => inPanel(`document.querySelector('.rf-status')?.textContent.includes('Ready to analyze')`), 'current unified Changes layout');
+  await writeFile(uxGate, 'waiting');
   await click('Analyze PR');
+  await waitFor(() => inPanel(`document.querySelector('.rf-file-progress-row[data-path="tests/change-1.ts"][data-state=classifying] .rf-file-thought')?.textContent === 'Checking the first file'`), 'the latest Codex reasoning headline in its running file row');
+  await writeFile(uxGate, 'labelled');
+  await waitFor(() => inPanel(`document.querySelector('.rf-steps li[aria-current=step]')?.firstChild.textContent === 'Write review' && document.querySelector('.rf-progress-detail').textContent === 'Comparing the three files'`), 'the latest Codex reasoning headline while the PR review is written');
+  assert.equal(await inPanel(`document.querySelectorAll('.rf-file-thought').length`), 0, 'A finished file drops its reasoning headline.');
+  await writeFile(uxGate, 'continue');
   await waitFor(() => inPanel(`document.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && !document.querySelector('.rf-analyze').disabled`), 'three actual native helpers followed by a PR review');
   const parallelRequests = (await modelRequests()).slice(beforeParallel);
   assert.equal(parallelRequests.length, 4, 'Three file classifications, followed by one PR review.');
@@ -1399,7 +1439,21 @@ try {
       globalThis.releaseRestoreDigest = () => resolve(originalRestoreDigest.apply(crypto.subtle, args));
     });
   `}, restoreWorker);
+  await inAgent(`(() => {
+    const originalFetch = globalThis.fetch;
+    let releaseDescription;
+    const description = new Promise(resolve => { releaseDescription = resolve; });
+    globalThis.fetch = async (input, options) => {
+      if (new URL(input).pathname === ${JSON.stringify(changes.root)}) await description;
+      return originalFetch(input, options);
+    };
+    window.releaseRestoreCapture = () => { globalThis.fetch = originalFetch; releaseDescription(); };
+  })()`);
   await click('Open saved review');
+  await waitFor(() => inPanel(`document.querySelector('.rf-phase')?.textContent === 'Opening saved review' && /^(?:Reading|Loading) .+…$/.test(document.querySelector('.rf-progress-detail').textContent)`), 'capture progress while a saved review opens');
+  const restoreStatus = await inPanel(`({text:document.querySelector('.rf-status').textContent, hidden:document.querySelector('.rf-status').classList.contains('rf-visually-hidden'), detail:document.querySelector('.rf-progress-detail').textContent})`);
+  assert.ok(restoreStatus.hidden && restoreStatus.text === `Opening saved review. ${restoreStatus.detail}`, 'Opening a saved review shows capture progress in the progress line, not a stale visible status.');
+  await inAgent('releaseRestoreCapture()');
   await waitFor(() => inPanel(`document.querySelector('.rf-phase')?.textContent === 'Opening saved review' && document.querySelector('.rf-file-progress-row[data-state=excluded]')`), 'saved-review lookup held while generated files are visible');
   assert.equal(await inPanel(`Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Review anyway')`), false, 'File analysis controls must wait for saved-review restoration.');
   await waitFor(async () => (await send('Runtime.evaluate', {expression:'typeof releaseRestoreDigest === "function"',returnByValue:true}, restoreWorker)).result.value, 'cache fingerprint gate');
@@ -1927,7 +1981,7 @@ try {
   await page('Page.navigate', {url:'about:blank'});
   await send('Runtime.evaluate', {expression:'globalThis.setInterval = globalThis.originalInterval; delete globalThis.originalInterval;'}, worker);
   // Waiting-file states need fewer classification slots than the five fixture files.
-  await send('Runtime.evaluate', {expression:'chrome.storage.local.set({classificationConcurrency:3, analysisDurations:[1, 2, 3].map(seconds => ({provider:"claude", model:"claude-fixture-model", seconds:seconds * 20, lines:10}))})', awaitPromise:true}, worker);
+  await send('Runtime.evaluate', {expression:'chrome.storage.local.set({classificationConcurrency:3, analysisDurations:[1, 2, 3].map(seconds => ({provider:"claude", model:"claude-fixture-model", effort:"medium", seconds:seconds * 20, lines:10}))})', awaitPromise:true}, worker);
   changesMode = 'many-decisions';
   await writeFile(modeFile, 'many-decisions');
   await writeFile(uxGate, 'waiting');
@@ -1951,7 +2005,7 @@ try {
   await openFiles();
   const visibleStates = await inPanel(`Array.from(document.querySelectorAll('.rf-file-progress-row'), row => ({state:row.dataset.state, label:row.querySelector('.rf-file-state').textContent, visible:row.checkVisibility()}))`);
   assert.ok(visibleStates.some(row => row.state === 'classified' && row.label.startsWith('AI classified') && row.visible));
-  assert.ok(visibleStates.some(row => row.state === 'classifying' && row.label === 'AI classifying' && row.visible));
+  assert.ok(visibleStates.some(row => row.state === 'classifying' && /^AI classifying(?: · 1\/1 blocks)?$/.test(row.label) && row.visible));
   assert.ok(visibleStates.some(row => row.state === 'queued' && row.label === 'AI waiting' && row.visible));
   await inPage(`(() => {
     document.head.insertAdjacentHTML('beforeend', ${JSON.stringify(fixtureStyle)});
@@ -1961,8 +2015,10 @@ try {
   assert.ok(await inPanel(`document.querySelector('.rf-status').textContent.includes('1 of 5 files classified')`), 'Live progress describes classified files without duplicate visible status.');
   const progressSteps = `Array.from(document.querySelectorAll('.rf-steps li'), step => [step.firstChild.textContent, step.dataset.state])`;
   assert.deepEqual(await inPanel(progressSteps), [['Copy', 'done'], ['Label 1/5', 'current'], ['Write review', 'pending'], ['Check', 'pending']], 'The step tracker marks labelling as current.');
-  await waitFor(() => inPanel(`/^Labelling change-\\d\\.ts 1\\/1 · change-\\d\\.ts 1\\/1 · change-\\d\\.ts 1\\/1$/.test(document.querySelector('.rf-progress-detail').textContent)`), 'labelled blocks reported for each running file');
+  await waitFor(() => inPanel(`document.querySelector('.rf-progress-detail').textContent === '3 labelling · 1 waiting · 4/5 blocks'`), 'running, waiting and labelled totals in the progress line');
+  assert.deepEqual(await inPanel(`Array.from(document.querySelectorAll('.rf-file-progress-row[data-state=classifying] .rf-file-state'), label => label.textContent)`), Array(3).fill('AI classifying · 1/1 blocks'), 'Each running file shows its own labelled blocks in its row.');
   assert.ok(await inPanel("document.querySelector('.rf-progress-panel').checkVisibility() && document.querySelector('.rf-steps').checkVisibility()"), 'The panel displays the current analysis steps.');
+  assert.deepEqual(await inPanel(`[document.querySelector('.rf-progress-bar').value, document.querySelector('.rf-progress-bar').max]`), [4, 5], 'The bar counts labelled blocks, including those in files still running.');
   await writeFile(uxGate, 'continue');
   const sectionProgress = `2/5 blocks · Section 5: Check ${changes.paths[4]}`;
   await waitFor(() => inPanel(`document.querySelector('.rf-progress-detail').textContent === ${JSON.stringify(sectionProgress)}`), 'section titles reported while the PR review is written');
@@ -2264,7 +2320,11 @@ try {
       return connection;
     };
   })()`);
+  await writeFile(uxGate, 'waiting');
   await click('Analyze PR');
+  await waitFor(() => inPanel(`document.querySelectorAll('.rf-file-progress-row[data-state=classified]').length === 4`), 'every file but the three-block one labelled');
+  assert.deepEqual(await inPanel(`[document.querySelector('.rf-progress-bar').value, document.querySelector('.rf-progress-bar').max]`), [4, 7], 'The bar weighs files by their blocks and leaves the machine-maintained file out.');
+  await writeFile(uxGate, 'continue');
   await waitFor(() => inPanel("document.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !document.querySelector('.rf-analyze').disabled"), 'four-section panel review');
   const sectionGists = ['Gist for supporting setup.', 'Gist for check the contract and its implementation.', 'Gist for check the separate validation path.', 'Gist for external caller contract.'];
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic')].map(node => [node.dataset.topicId, node.querySelector('.rf-priority').textContent, node.open])`), [['supporting', 'Supporting', true], ['contract', 'Review', false], ['validation', 'Review', false], ['unknown', 'Supporting', false]]);

@@ -5,11 +5,16 @@ function connectionError(label, message) {
   return new Error(`The local ${label} helper disconnected. ${message || 'Check the helper installation and retry.'}`);
 }
 
+function validProgressText(text) {
+  return typeof text === 'string' && [...text].length <= 200 && !/[\p{Cc}\p{Cf}]/u.test(text);
+}
+
 function validProgress(message) {
-  return Object.keys(message).length === 4 && ['reasoning', 'writing'].includes(message.phase)
+  return Object.keys(message).length === 5 && ['reasoning', 'writing'].includes(message.phase)
     && Number.isSafeInteger(message.labelled) && message.labelled >= 0
     && Array.isArray(message.sections) && message.sections.length <= 50
-    && message.sections.every(title => typeof title === 'string' && title.length > 0 && [...title].length <= 200 && !/[\p{Cc}\p{Cf}]/u.test(title));
+    && message.sections.every(title => validProgressText(title) && title.length > 0)
+    && validProgressText(message.thought);
 }
 
 function nativeRequest(provider, request, signal, onProgress) {
@@ -57,7 +62,7 @@ function nativeRequest(provider, request, signal, onProgress) {
         return;
       }
       if (request.type === 'analyze' && message?.type === 'progress') {
-        if (validProgress(message)) onProgress?.({ phase: message.phase, sections: message.sections, labelled: message.labelled });
+        if (validProgress(message)) onProgress?.({ phase: message.phase, sections: message.sections, labelled: message.labelled, thought: message.thought });
         return;
       }
       if (request.type === 'analyze' && message?.type === 'result' && message.result && typeof message.result === 'object' && !Array.isArray(message.result)) {
