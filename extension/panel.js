@@ -175,6 +175,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   let fileFilter = 'all';
   let fileListOpen = false;
   let captureStartedAt;
+  let captureProgress;
   let startedAt;
   let checkProgress;
   let progressStage = 0;
@@ -237,7 +238,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   const progressLine = element('div', 'rf-progress-line');
   progressLine.append(phase, steps, progressDetail);
   const progressBar = element('progress', 'rf-progress-bar');
-  progressBar.setAttribute('aria-label', 'Files classified');
+  progressBar.setAttribute('aria-label', 'Analysis progress');
   progressPanel.append(progressLine, progressBar);
   const cacheNotice = element('p', 'rf-cache-notice');
   const runSettings = element('p', 'rf-run-settings rf-caption');
@@ -288,7 +289,8 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     const stage = openingSavedReview || !snapshot ? 0 : reviewStage !== 'checking' ? 1 : checkProgress?.phase === 'checking' ? 3 : 2;
     progressStage = stage;
     phase.textContent = [reviewStage === 'reconnecting' ? 'Reconnecting to analysis' : openingSavedReview ? 'Opening saved review' : 'Copying this pull request', 'Labelling files', 'Writing the review', 'Checking the review'][stage];
-    const detail = stage === 1 ? `${classified} of ${total} files classified` : stage === 2 ? 'Every file is classified; comparing the changes' : stage === 3 ? 'Validating the answer against the captured code' : reviewStage === 'reconnecting' ? 'Checking for work already running in this tab' : openingSavedReview ? 'Checking the saved review against the current context' : 'Capturing the complete diff and context';
+    const capturing = ['capture', 'restoring'].includes(reviewStage);
+    const detail = stage === 1 ? `${classified} of ${total} files classified` : stage === 2 ? 'Every file is classified; comparing the changes' : stage === 3 ? 'Validating the answer against the captured code' : reviewStage === 'reconnecting' ? 'Checking for work already running in this tab' : capturing && captureProgress ? captureProgress.message : openingSavedReview ? 'Checking the saved review against the current context' : 'Capturing the complete diff and context';
     const tracked = !openingSavedReview && reviewStage !== 'reconnecting';
     phase.hidden = tracked;
     steps.hidden = !tracked;
@@ -319,19 +321,23 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     if (busy && !clock) clock = setInterval(renderClock, 1000);
     if (!busy && clock) { clearInterval(clock); clock = undefined; }
     renderProgressSummary();
-    if (stage === 1 && total) { progressBar.max = total; progressBar.value = classified; }
+    const capturedFiles = capturing ? captureProgress?.files : undefined;
+    const blocks = stage === 1 ? labelledBlocks() : undefined;
+    if (capturedFiles) { progressBar.max = capturedFiles.total; progressBar.value = capturedFiles.done; }
+    else if (blocks?.total) { progressBar.max = blocks.total; progressBar.value = blocks.labelled; }
     else progressBar.removeAttribute('value');
     cacheNotice.hidden = Boolean(analysis) && !cacheWarning || !cacheMessage && !savedReview;
     cacheNotice.textContent = cacheMessage || (savedReview ? `Saved ${new Date(savedReview.savedAt).toLocaleString()}. Opening checks the current context without a new model call.` : '');
     let nextStatus = pendingAction?.message ?? status;
-    if (busy && snapshot && !currentError && !pendingAction) nextStatus = `${phase.textContent}. ${detail}.`;
+    const progressShown = busy && (snapshot || capturing);
+    if (progressShown && !currentError && !pendingAction) nextStatus = `${phase.textContent}. ${detail.endsWith('…') ? detail : `${detail}.`}`;
     if (!busy && offPage) nextStatus = offPage;
     else if (!busy && !status) nextStatus = !configured
       ? `Connect your local ${providerName} helper in Settings, then analyze this PR.`
       : `Ready to analyze ${rangeSelected ? 'these commits' : 'this PR'} with ${providerName}${model ? ` (${model})` : ''}. Analysis starts only when you click ${analyzeLabel}.`;
     if (settingsChanged && !busy && !pendingAction && !currentError) nextStatus = `Settings changed. ${analyzeLabel} will use ${providerName} (${model}), effort: ${effort || 'model default'}.`;
     if (statusNode.textContent !== nextStatus) statusNode.textContent = nextStatus;
-    const ordinaryStatus = (busy && snapshot || finalResult && verifiedPage() || !attempted && configured && !status) && !currentError && !pendingAction && !(settingsChanged && !busy);
+    const ordinaryStatus = (progressShown || finalResult && verifiedPage() || !attempted && configured && !status) && !currentError && !pendingAction && !(settingsChanged && !busy);
     statusNode.classList.toggle('rf-visually-hidden', Boolean(ordinaryStatus) && !offPage);
     result.hidden = !finalResult;
     maybeAutostart();
@@ -349,22 +355,37 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     elapsed.textContent = Number.isFinite(since) ? clockTime(Math.max(0, Math.floor((Date.now() - since) / 1000))) : '';
   }
 
+  function editBlocks(path) {
+    return snapshot.files.find(entry => entry.path === path)?.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit')).length ?? 0;
+  }
+
+  // Counting blocks weighs each file by its size; Claude Code also reports blocks labelled inside a running file.
+  function labelledBlocks() {
+    let labelled = 0;
+    let total = 0;
+    for (const [path, file] of fileStates) {
+      if (unanalyzedStates.includes(file.state)) continue;
+      const blocks = editBlocks(path);
+      total += blocks;
+      if (['classified', 'complete'].includes(file.state)) labelled += blocks;
+      else if (file.state === 'classifying') labelled += Math.min(file.labelled ?? 0, blocks);
+    }
+    return { labelled, total };
+  }
+
   function liveProgress(stage) {
     if (stage === 1) {
-      const active = [...fileStates].filter(([, file]) => file.state === 'classifying').map(([path, file]) => {
-        const blocks = snapshot.files.find(entry => entry.path === path)?.hunks.flatMap(hunk => hunk.items.filter(item => item.type === 'edit')).length ?? 0;
-        return { path, count: file.labelled ? `${Math.min(file.labelled, blocks)}/${blocks}` : '' };
-      });
-      if (!active.length) return {};
-      return {
-        text: `Labelling ${active.map(({ path, count }) => `${path.split('/').at(-1)}${count ? ` ${count}` : ''}`).join(' · ')}`,
-        title: active.map(({ path, count }) => `${path}${count ? `: ${count} blocks labelled` : ''}`).join('\n')
-      };
+      const states = [...fileStates.values()];
+      const active = states.filter(file => file.state === 'classifying').length;
+      if (!active) return {};
+      const waiting = states.filter(file => file.state === 'queued').length;
+      const { labelled, total } = labelledBlocks();
+      return { text: [`${active} labelling`, waiting && `${waiting} waiting`, `${labelled}/${total} blocks`].filter(Boolean).join(' · ') };
     }
     if (stage !== 2 || !checkProgress) return {};
-    const { sections = [], labelled, edits, phase: activity } = checkProgress;
+    const { sections = [], labelled, edits, phase: activity, thought } = checkProgress;
     const blocks = labelled ? `${Math.min(labelled, edits)}/${edits} blocks` : '';
-    const latest = sections.length ? `Section ${sections.length}: ${sections.at(-1)}` : { reasoning: 'Reasoning…', writing: 'Writing the answer…' }[activity] ?? '';
+    const latest = sections.length ? `Section ${sections.length}: ${sections.at(-1)}` : thought || ({ reasoning: 'Reasoning…', writing: 'Writing the answer…' }[activity] ?? '');
     return {
       text: [blocks, latest].filter(Boolean).join(' · '),
       title: [blocks && `${blocks} labelled in the answer`, ...sections.map((title, index) => `${index + 1}. ${title}`)].filter(Boolean).join('\n')
@@ -691,7 +712,8 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       const row = element('div', 'rf-file-progress-row');
       row.dataset.state = file.state;
       row.dataset.path = path;
-      const label = element('span', 'rf-file-state', fileLabel(file));
+      const blocks = file.state === 'classifying' && file.labelled ? editBlocks(path) : 0;
+      const label = element('span', 'rf-file-state', `${fileLabel(file)}${blocks ? ` · ${Math.min(file.labelled, blocks)}/${blocks} blocks` : ''}`);
       label.dataset.state = file.state;
       row.append(pathButton(path, path, () => void revealFile(path), 'rf-file-path'), label, reviewToggle(path));
       if (finalResult && file.state !== 'deleted') {
@@ -704,6 +726,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       if (['failed', 'cancelled'].includes(file.state) && port && !openingSavedReview) row.append(button('Retry file', () => retryReview(path)));
       if (file.state === 'excluded' && port && !openingSavedReview) row.append(button('Review anyway', () => reviewGeneratedFile(path)));
       if (['failed', 'cancelled'].includes(file.state) && file.message) row.append(element('span', 'rf-caption', file.message));
+      if (file.state === 'classifying' && file.thought) row.append(element('span', 'rf-caption rf-file-thought', file.thought));
       rows.append(row);
     }
     if (!rows.childElementCount) rows.append(element('p', 'rf-caption', 'No files in this view.'));
@@ -823,15 +846,15 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     reviewStage = cacheOnly ? 'restoring' : 'capture';
     busy = true;
     error = '';
-    status = 'Reading this pull request and its pinned source…';
+    captureProgress = undefined;
     captureStartedAt = Date.now();
     renderControls();
     controller = new AbortController();
     controller.signal.addEventListener('abort', () => void page.call('abortCapture').catch(() => {}));
     try {
-      page.onCaptureProgress = message => {
+      page.onCaptureProgress = (message, files) => {
         if (request !== operation) return;
-        status = message;
+        captureProgress = { message, files };
         renderControls();
       };
       const captured = await page.call('capture', { fileLimit, listDeletedFiles });
@@ -1435,7 +1458,7 @@ function pageBridge(port, state) {
       bridge.state = message.state;
       bridge.onPage(message.state);
     } else if (message.kind === 'fold-counts') bridge.onFoldCounts(message.counts);
-    else if (message.kind === 'capture-progress') bridge.onCaptureProgress(message.message);
+    else if (message.kind === 'capture-progress') bridge.onCaptureProgress(message.message, message.files);
     else if (message.kind === 'reply') {
       const call = calls.get(message.id);
       calls.delete(message.id);

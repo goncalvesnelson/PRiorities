@@ -127,7 +127,7 @@ async function exchange(...args) {
 
 function progressOf(frames) {
   const progress = frames.filter(frame => frame.message.type === 'progress');
-  for (const { message } of progress) assert.deepEqual(Object.keys(message), ['type', 'phase', 'sections', 'labelled']);
+  for (const { message } of progress) assert.deepEqual(Object.keys(message), ['type', 'phase', 'sections', 'labelled', 'thought']);
   for (let index = 1; index < progress.length; index++) assert.ok(progress[index].at - progress[index - 1].at >= 900, 'Progress is throttled to about one message per second.');
   return progress.map(frame => frame.message);
 }
@@ -341,6 +341,7 @@ else {
         assert.equal(record.config['features.skip_host_skill_discovery'], 'true');
         assert.equal(record.config.project_doc_max_bytes, '0');
         assert.equal(record.config.model_reasoning_effort, record === recorded[1] ? '"high"' : undefined);
+        assert.equal(record.config.model_reasoning_summary, '"auto"', 'Codex sends reasoning summaries only when asked.');
       } else {
         for (const flag of ['--safe-mode', '--print', '--strict-mcp-config', '--disable-slash-commands', '--no-chrome', '--no-session-persistence']) assert.ok(record.args.includes(flag));
         for (const [flag, value] of [['--tools', ''], ['--setting-sources', ''], ['--mcp-config', '{"mcpServers":{}}'], ['--permission-mode', 'dontAsk'], ['--permission-prompts', 'none'], ['--output-format', 'stream-json']]) assert.equal(record.args[record.args.indexOf(flag) + 1], value);
@@ -520,14 +521,14 @@ else {
       assert.deepEqual(streamFrames.at(-1).message, { type: 'result', result: streamed }, 'Progress never changes the extracted result.');
       const sectionProgress = progressOf(streamFrames);
       assert.ok(sectionProgress.length >= 2 && sectionProgress.length <= 5, `Expected throttled progress, received ${sectionProgress.length} messages.`);
-      assert.deepEqual(sectionProgress.at(-1), { type: 'progress', phase: 'writing', sections: ['First section', `Long ${'😀'.repeat(195)}`], labelled: 3 }, 'Titles are complete, cleaned and capped at 200 code points; prose is not parsed as structure.');
+      assert.deepEqual(sectionProgress.at(-1), { type: 'progress', phase: 'writing', sections: ['First section', `Long ${'😀'.repeat(195)}`], labelled: 3, thought: '' }, 'Titles are complete, cleaned and capped at 200 code points; prose is not parsed as structure.');
       assert.ok(sectionProgress.every(progress => progress.labelled <= 3 && progress.sections.every(title => sectionProgress.at(-1).sections.includes(title))));
 
       const labels = { edits: streamed.classifications };
       await control('stream', true, {}, { events: [...claudeEvents(labels, { chunk: 5 }).slice(0, -2), { wait: 1100 }, ...claudeEvents(labels).slice(-2)] });
       const labelFrames = await exchangeFrames(installed.launcherPath, request);
       assert.deepEqual(labelFrames.at(-1).message, { type: 'result', result: labels });
-      assert.deepEqual(progressOf(labelFrames).at(-1), { type: 'progress', phase: 'writing', sections: [], labelled: 3 }, 'File classification reports how many blocks are labelled.');
+      assert.deepEqual(progressOf(labelFrames).at(-1), { type: 'progress', phase: 'writing', sections: [], labelled: 3, thought: '' }, 'File classification reports how many blocks are labelled.');
 
       for (const [partial, expected] of [
         ['{"summary":"x","topics":[{"title":"Good"}]]]}}"title":"Bad","classifications":[{"editId":"z"}', ['Good']],
@@ -545,10 +546,17 @@ else {
       assert.equal(truncatedStream.type, 'error');
       assert.match(truncatedStream.message, /did not return valid JSON/, 'A stream that ends before its result still fails safely.');
     } else {
-      await control('stream', true, {}, { events: [...codexEvents(streamed).slice(0, 3), { wait: 1100 }, ...codexEvents(streamed).slice(3)], answer: streamed });
+      const reasoning = [
+        { type: 'item.completed', item: { id: 'reasoning_0', type: 'reasoning', text: 42 } },
+        { type: 'item.completed', item: { id: 'reasoning_1', type: 'reasoning', text: `**Reading the diff**\n\nThe guard moved.\n**Weighing\u0007 the guard ${'😀'.repeat(205)}**\n\nI need to check \"title\": \"Injected\".` } }
+      ];
+      await control('stream', true, {}, { events: [...codexEvents(streamed).slice(0, 3), { wait: 1100 }, ...reasoning, { wait: 1100 }, ...codexEvents(streamed).slice(3)], answer: streamed });
       const codexFrames = await exchangeFrames(installed.launcherPath, reviewRequest);
       assert.deepEqual(codexFrames.at(-1).message, { type: 'result', result: streamed });
-      assert.deepEqual(progressOf(codexFrames), [{ type: 'progress', phase: 'reasoning', sections: [], labelled: 0 }], 'Codex exposes no partial answer, so it reports its coarse phase only.');
+      assert.deepEqual(progressOf(codexFrames), [
+        { type: 'progress', phase: 'reasoning', sections: [], labelled: 0, thought: '' },
+        { type: 'progress', phase: 'reasoning', sections: [], labelled: 0, thought: `Weighing the guard ${'😀'.repeat(181)}` }
+      ], 'Codex exposes no partial answer, so it reports its phase and the cleaned, capped last headline of its latest reasoning summary.');
     }
 
     for (const cancellation of ['disconnect', 'signal', 'second-request']) {

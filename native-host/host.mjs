@@ -214,6 +214,10 @@ function loginStatus({ code, output, errorOutput }) {
   throw new HelperError(`${providerName} returned an unreadable login status. Run ${statusCommand} in Terminal and update the CLI before checking again.`);
 }
 
+function progressText(text) {
+  return [...text.replace(/[\s\p{Cc}\p{Cf}]+/gu, ' ')].slice(0, 200).join('').trim();
+}
+
 // Tolerates truncated or malformed JSON: only complete strings at known positions count.
 function answerScanner(progress) {
   let containers = [];
@@ -230,7 +234,7 @@ function answerScanner(progress) {
     if (list.name === 'topics' && item.key === 'title' && progress.sections.length < 50) {
       let title;
       try { title = JSON.parse(`"${text}"`); } catch { return false; }
-      title = [...title.replace(/[\s\p{Cc}\p{Cf}]+/gu, ' ')].slice(0, 200).join('').trim();
+      title = progressText(title);
       if (title) progress.sections.push(title);
       return Boolean(title);
     }
@@ -271,17 +275,27 @@ function answerScanner(progress) {
 }
 
 function analysisReader() {
-  const progress = { phase: '', sections: [], labelled: 0 };
+  const progress = { phase: '', sections: [], labelled: 0, thought: '' };
   let scan;
   const report = phase => {
     progress.phase = phase;
-    reportProgress({ type: 'progress', phase, sections: [...progress.sections], labelled: progress.labelled });
+    reportProgress({ type: 'progress', phase, sections: [...progress.sections], labelled: progress.labelled, thought: progress.thought });
   };
   return line => {
     let event;
     try { event = JSON.parse(line); } catch { return line; }
     if (provider === 'codex') {
       if (event?.type === 'turn.started') report('reasoning');
+      const item = event?.type === 'item.completed' ? event.item : undefined;
+      // Codex sends a reasoning step once it ends, joining its summary parts with newlines; each part opens with a bold headline.
+      if (item?.type === 'reasoning' && typeof item.text === 'string') {
+        const headlines = item.text.split('\n').map(line => line.trim().match(/^\*\*(.+)\*\*$/)?.[1]).filter(Boolean);
+        const thought = progressText(headlines.at(-1) ?? item.text.trim().split('\n', 1)[0]);
+        if (thought) {
+          progress.thought = thought;
+          report('reasoning');
+        }
+      }
       return line;
     }
     if (event?.type === 'result') return line;
@@ -312,7 +326,7 @@ function analysisArguments(request) {
   writeFileSync(schemaPath, JSON.stringify(request.schema), { mode: 0o600 });
   writeFileSync(outputPath, '', { mode: 0o600 });
   const configuration = {
-    approval_policy: 'never', web_search: 'disabled',
+    approval_policy: 'never', web_search: 'disabled', model_reasoning_summary: 'auto',
     'history.persistence': 'none', project_doc_max_bytes: 0,
     'skills.include_instructions': false, 'features.skip_host_skill_discovery': true,
     model_instructions_file: instructionsPath,

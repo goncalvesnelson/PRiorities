@@ -414,7 +414,7 @@ export function startPageAgent(port, queued = []) {
       captureController?.abort();
       const controller = captureController = new AbortController();
       try {
-        return await capturePullRequest({ ...options, signal: controller.signal, onProgress: message => post({ kind: 'capture-progress', message }) });
+        return await capturePullRequest({ ...options, signal: controller.signal, onProgress: (message, files) => post({ kind: 'capture-progress', message, files }) });
       } finally {
         controller.abort();
         if (captureController === controller) captureController = undefined;

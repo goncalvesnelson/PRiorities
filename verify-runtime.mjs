@@ -1515,16 +1515,16 @@ try {
     const highlights = { 'account.js': { before: {}, after: { 3: [['return', 'pl-k'], [' null;']] } } };
     const navigating = await beginReview(snapshot, highlights);
     await until(() => held, `The ${stage} request should start before navigation.`);
-    const progress = { type: 'progress', phase: 'writing', sections: stage === 'checking' ? ['Handle the new null return', `Long ${'😀'.repeat(195)}`] : [], labelled: 1 };
+    const progress = { type: 'progress', phase: 'writing', sections: stage === 'checking' ? ['Handle the new null return', `Long ${'😀'.repeat(195)}`] : [], labelled: 1, thought: `Weighing ${'😀'.repeat(191)}` };
     const beforeInvalidProgress = navigating.messages.length;
-    for (const invalid of [{ ...progress, extra: true }, { ...progress, sections: ['Bell\u0007'] }, { ...progress, sections: ['x'.repeat(201)] }, { ...progress, sections: ['😀'.repeat(201)] }, { ...progress, labelled: -1 }, { ...progress, phase: 'finished' }]) await held.helper.onMessage.emit(invalid);
+    for (const invalid of [{ ...progress, extra: true }, { ...progress, sections: ['Bell\u0007'] }, { ...progress, sections: ['x'.repeat(201)] }, { ...progress, sections: ['😀'.repeat(201)] }, { ...progress, labelled: -1 }, { ...progress, phase: 'finished' }, { ...progress, sections: [null] }, { ...progress, thought: 'Bell\u0007' }, { ...progress, thought: '😀'.repeat(201) }, { ...progress, thought: undefined }]) await held.helper.onMessage.emit(invalid);
     assert.equal(navigating.messages.length, beforeInvalidProgress, 'Invalid progress must not be relayed.');
     await held.helper.onMessage.emit(progress);
     const relayed = navigating.messages.at(-1);
     if (stage === 'checking') {
-      assert.deepEqual({ ...relayed, startedAt: 0 }, { type: 'progress', stage: 'checking', startedAt: 0, edits: 1, kinds: [['behavior', 1], ['interface', 1]], phase: 'writing', sections: ['Handle the new null return', `Long ${'😀'.repeat(195)}`], labelled: 1 }, 'Valid progress accepts titles up to 200 code points, with the PR review stage and its labelling summary.');
+      assert.deepEqual({ ...relayed, startedAt: 0 }, { type: 'progress', stage: 'checking', startedAt: 0, edits: 1, kinds: [['behavior', 1], ['interface', 1]], phase: 'writing', sections: ['Handle the new null return', `Long ${'😀'.repeat(195)}`], labelled: 1, thought: `Weighing ${'😀'.repeat(191)}` }, 'Valid progress accepts titles and reasoning headlines up to 200 code points, with the PR review stage and its labelling summary.');
       assert.ok(Number.isFinite(relayed.startedAt));
-    } else assert.deepEqual(relayed, { type: 'file-progress', path: 'account.js', state: 'classifying', message: 'Classifying edits…', labelled: 1 }, 'Only valid model progress is relayed as labelled blocks for its file.');
+    } else assert.deepEqual(relayed, { type: 'file-progress', path: 'account.js', state: 'classifying', message: 'Classifying edits…', labelled: 1, thought: `Weighing ${'😀'.repeat(191)}` }, 'Only valid model progress is relayed as labelled blocks and the reasoning headline for its file.');
     assert.equal(held.helper.disconnected, false, 'Invalid progress is ignored without ending the analysis.');
     const beforeDisconnect = navigating.messages.length;
     await navigating.disconnect();
@@ -1554,8 +1554,10 @@ try {
 
   const durationSettings = { provider: storage.reviewProvider === 'claude' ? 'claude' : 'codex' };
   durationSettings.model = storage[`${durationSettings.provider}Settings`]?.model ?? '';
+  durationSettings.effort = storage[`${durationSettings.provider}Settings`]?.effort ?? '';
   storage.analysisDurations = [
-    ...Array.from({ length: 19 }, () => ({ provider: 'claude', model: 'unrelated-model', seconds: 99, lines: 1 })),
+    ...Array.from({ length: 16 }, () => ({ provider: 'claude', model: 'unrelated-model', effort: '', seconds: 99, lines: 1 })),
+    ...Array.from({ length: 3 }, () => ({ ...durationSettings, effort: 'other-effort', seconds: 99, lines: 1 })),
     ...[2, 2].map(rate => ({ ...durationSettings, seconds: rate * 10, lines: 10 }))
   ];
   for (const expected of [undefined, 6]) {
@@ -1568,15 +1570,16 @@ try {
     const timed = await beginReview();
     await until(() => heldReview, 'The PR review should start.');
     const reviewStarted = timed.messages.find(message => message.type === 'progress').startedAt;
-    assert.equal(timed.messages.filter(message => message.type === 'progress').at(-1).estimate, expected, expected ? 'Three earlier reviews with this provider and model give an estimate for 3 changed lines.' : 'Fewer than three earlier reviews give no estimate.');
+    assert.equal(timed.messages.filter(message => message.type === 'progress').at(-1).estimate, expected, expected ? 'Three earlier reviews with this provider, model and effort give an estimate for 3 changed lines.' : 'Fewer than three earlier reviews with this effort give no estimate, however many used another effort.');
     await new Promise(resolve => setTimeout(resolve, 5));
     await heldReview.helper.onMessage.emit(response(heldReview.request));
     await waitForSettlement(timed);
     assert.equal(timed.messages.at(-1).type, 'result');
     assert.ok(timed.messages.find(message => message.phase === 'checking').startedAt > reviewStarted, 'Checking starts its own timer after the model finishes choosing review decisions.');
     await until(() => storage.analysisDurations.at(-1).lines === 3 && storage.analysisDurations.at(-1).seconds > 0 && storage.analysisDurations.length === 20, 'The finished PR review duration is stored.');
-    assert.deepEqual(Object.keys(storage.analysisDurations.at(-1)), ['provider', 'model', 'seconds', 'lines']);
+    assert.deepEqual(Object.keys(storage.analysisDurations.at(-1)), ['provider', 'model', 'effort', 'seconds', 'lines']);
     assert.equal(storage.analysisDurations.at(-1).provider, durationSettings.provider);
+    assert.equal(storage.analysisDurations.at(-1).effort, durationSettings.effort);
     await closeTab(timed);
     storage.analysisDurations = storage.analysisDurations.map(run => ({ ...run }));
   }
