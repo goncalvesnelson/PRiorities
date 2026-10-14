@@ -237,8 +237,10 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
   return { apply, restore, counts, revealRow };
 }
 
+const reviewControlSelector = 'input.js-reviewed-checkbox, button[aria-pressed][aria-label="Viewed"], button[aria-pressed][aria-label="Not Viewed"]';
+
 function nativeReviewControl(native) {
-  return native?.element.querySelector('input.js-reviewed-checkbox, button[aria-pressed][aria-label="Viewed"], button[aria-pressed][aria-label="Not Viewed"]');
+  return native?.element.querySelector(reviewControlSelector);
 }
 
 // `port` comes from the side panel; `queued` holds messages that arrived while this module loaded.
@@ -504,6 +506,16 @@ export function startPageAgent(port, queued = []) {
   document.addEventListener('change', event => {
     if (event.target.matches('input.js-reviewed-checkbox')) scheduleCheck();
   }, eventOptions);
+  // The reviewer's own Viewed clicks are trusted; the clicks setReviewed makes are not.
+  document.addEventListener('click', event => {
+    const control = event.target.closest?.(reviewControlSelector);
+    if (!event.isTrusted || !control || control.getAttribute('aria-disabled') === 'true' || !verifiedPage()) return;
+    const native = findNativeFiles(document).find(file => nativeReviewControl(file) === control);
+    if (!native) return;
+    // A checkbox has already toggled when its click dispatches; GitHub's button toggles in its own handler.
+    const viewed = control.tagName === 'INPUT' ? control.checked : control.getAttribute('aria-pressed') !== 'true';
+    post({ kind: 'viewed-click', path: native.path, viewed });
+  }, { ...eventOptions, capture: true });
   for (const type of ['turbo:load', 'pjax:end']) document.addEventListener(type, scheduleCheck, eventOptions);
   for (const type of ['popstate', 'pageshow']) window.addEventListener(type, scheduleCheck, eventOptions);
   document.addEventListener('visibilitychange', () => {

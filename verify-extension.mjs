@@ -636,6 +636,17 @@ try {
   assert.equal(await inPage('document.querySelectorAll("[data-review-focus-owned]").length'), 0, 'Opening a PR leaves GitHub untouched until the side panel connects.');
   const panelPage = (method, params = {}) => send(method, params, panelSession);
   const inPanel = expression => inPage(expression, panelSession);
+  // A real mouse click, which the page sees as trusted, unlike element.click().
+  const clickInPage = async element => {
+    const point = await inPage(`(() => {
+      const target = ${element};
+      target.scrollIntoView({ block: 'center' });
+      const rect = target.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    })()`);
+    await page('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+    await page('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+  };
   // A finished review is on screen, with no warning that it could not be saved.
   const reviewReady = "document.querySelector('.rf-overview-title') && document.querySelector('.rf-cache-notice').hidden && !document.querySelector('.rf-analyze').disabled";
   async function openPanel() {
@@ -902,8 +913,9 @@ try {
   await waitFor(() => inPanel(`${humanReviewInputs}.every(input => input.checked && input.getAttribute('aria-disabled') === 'false')`), 'Viewed mirrored after native header replacement');
   assert.equal(await inPage('document.querySelector(".js-reviewed-checkbox").checked'), true);
   assert.equal(await inPanel('window.savedReviewEvidence.isConnected && window.savedReviewEvidence.open && document.activeElement.type === "checkbox"'), true);
-  await inPage('document.querySelector(".js-reviewed-checkbox").click()');
-  await waitFor(() => inPanel(`${humanReviewInputs}.every(input => !input.checked)`), 'native Viewed uncheck mirrored');
+  assert.equal(await inPanel("document.querySelector('.rf-section-done input').checked"), true, 'Ticking the file in the panel marks its only section done.');
+  await clickInPage('document.querySelector(".js-reviewed-checkbox")');
+  await waitFor(async () => await inPage('!document.querySelector(".js-reviewed-checkbox").disabled') && await inPanel(`${humanReviewInputs}.every(input => !input.checked) && !document.querySelector('.rf-section-done input').checked`), 'native Viewed uncheck mirrored and clears the section');
   await inPage('window.fixtureViewedRollback = true; window.fixtureViewedDelay = 80');
   await inPanel("document.querySelector('.rf-file-list input').focus(); document.querySelector('.rf-file-list input').click()");
   await waitFor(async () => await inPage('window.fixtureViewedClicks === 3 && !document.querySelector(".js-reviewed-checkbox").disabled') && await inPanel(`${humanReviewInputs}.every(input => !input.checked)`), 'native save rollback mirrored');
@@ -913,6 +925,9 @@ try {
   assert.equal(await inPage('window.fixtureViewedClicks'), 3);
   await inPage('document.querySelector(".js-reviewed-checkbox").disabled = false');
   await waitFor(() => inPanel(`${humanReviewInputs}.every(input => input.getAttribute('aria-disabled') === 'false')`), 'Viewed control available');
+  assert.equal(await inPanel("document.querySelector('.rf-section-done input').checked"), true, 'A Viewed save GitHub rolls back keeps the section the reviewer ticked through the file.');
+  await inPanel("document.querySelector('.rf-section-done input').click()");
+  assert.equal(await inPage('window.fixtureViewedClicks'), 3, 'Unticking the section of a file that is not Viewed clicks nothing.');
   await inPanel("document.querySelector('.rf-section-done input').click()");
   await waitFor(() => inPanel(`${humanReviewInputs}.every(input => input.checked)`), 'marking the only section listing a file done marks it Viewed');
   assert.equal((await modelRequests()).length, initialRequestCount);
@@ -2397,7 +2412,7 @@ try {
   };
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-section-done input')].filter(input => input.getAttribute('aria-label').includes(${JSON.stringify(sharedPath)})).length`), 3, 'Each of the three sections listing the shared file has its own done checkbox.');
   assert.equal(await inPanel(`${sectionDone('contract')}.getAttribute('aria-label')`), `Done with this section in ${sharedPath}: folds its lines in GitHub’s diff`);
-  const clicksBeforeTicks = await inPage('window.fixtureViewedClicks');
+  let clicksBeforeTicks = await inPage('window.fixtureViewedClicks');
   const folded = [true, true, true, true];
   const open = [false, false];
   // Two context rows after the external caller rows: too few for an AI fold, so they stay open even beside reviewed rows.
@@ -2409,6 +2424,14 @@ try {
   await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'a done review section folds its changed and cited rows beside the supporting fold');
   assert.deepEqual(await sharedFolds(), [['4 lines folded', 'Show 4 lines folded by PRiorities. Supporting changes from “Supporting setup”.'], ['2 lines reviewed', `Show 2 lines you reviewed. ${contractReason}`], ['1 line reviewed', `Show 1 line you reviewed. ${contractReason}`]], 'The done section folds behind its own reviewed markers, apart from the adjacent AI fold; its own edit stays open where a section not yet done cites it.');
   assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-fold')].map(marker => marker.classList.contains('review-focus-native-reviewed'))`), [false, true, true], 'Only the done section’s markers are marked reviewed.');
+  const contractNotesShown = () => inPanel(`(() => {
+    const wasOpen = ${contract}.open;
+    ${contract}.open = true;
+    const shown = [...${contract}.querySelectorAll('.rf-code-refs > li')].map(item => [...item.querySelectorAll('.rf-code-quote')].map(quote => quote.checkVisibility()));
+    ${contract}.open = wasOpen;
+    return shown;
+  })()`);
+  assert.deepEqual(await contractNotesShown(), [[false, false], [true]], 'Marking the contract section done in the shared file collapses its notes there, not in the file it is not done in.');
   await inPage(`${sharedFile}.querySelectorAll('.review-focus-native-toggle')[1].click()`);
   assert.deepEqual((await sharedFolds())[1], ['Fold 2 lines', `Fold again 2 lines you reviewed. ${contractReason}`], 'An expanded reviewed fold offers to fold again and still says you reviewed it.');
   await inPage(`${sharedFile}.querySelectorAll('.review-focus-native-toggle')[1].click()`);
@@ -2442,6 +2465,30 @@ try {
   await inPanel(`${sectionDone('contract')}.click()`);
   await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'the supporting and contract sections are done again for the saved-review checks');
   assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 2, 'Ticks that never complete the file leave GitHub Viewed alone.');
+  // Ticking the file, in the panel or in GitHub, ticks or unticks every section listing it there.
+  const sharedReviewed = `document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${sharedPath}"] input')`;
+  const sharedControl = `${sharedFile}.querySelector('button[aria-pressed]')`;
+  // The panel's Reviewed box mirrors GitHub's Viewed a moment later; each click waits for it to catch up.
+  const fileState = async () => [await sharedViewed(), await inPanel(`${sharedReviewed}.checked`), await sharedDone(), await sharedHidden(), await inPage(`${sharedControl}.disabled`)];
+  const allDone = [true, true, [true, true, true], [...Array(10).fill(true), ...trailing], false];
+  const noneDone = [false, false, [false, false, false], [...folded, false, false, false, false, ...open, ...trailing], false];
+  await waitFor(async () => !await sharedViewed() && await inPanel(`!${sharedReviewed}.checked && ${sharedReviewed}.getAttribute('aria-disabled') === 'false'`), 'the file list shows the shared file not yet Viewed');
+  const beforeFileTicks = await inPage('window.fixtureViewedClicks');
+  await inPanel(`${sharedReviewed}.click()`);
+  await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(allDone), 'ticking the file in the panel marks every section listing it done');
+  assert.deepEqual(await contractNotesShown(), [[false, false], [true]], 'A section ticked through its file collapses its notes there.');
+  await inPanel(`${sharedReviewed}.click()`);
+  await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(noneDone), 'unticking the file in the panel clears every section listing it');
+  assert.deepEqual(await contractNotesShown(), [[true, true], [true]], 'Unticking shows the notes again.');
+  await clickInPage(sharedControl);
+  await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(allDone), 'clicking Viewed in GitHub marks every section listing the file done');
+  await clickInPage(sharedControl);
+  await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(noneDone), 'clicking Viewed off in GitHub clears every section listing the file');
+  assert.equal(await inPage('window.fixtureViewedClicks') - beforeFileTicks, 4, 'Each file tick changes GitHub Viewed once; marking its sections clicks nothing more.');
+  clicksBeforeTicks += 4;
+  await inPanel(`${sectionDone('supporting')}.click()`);
+  await inPanel(`${sectionDone('contract')}.click()`);
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'the supporting and contract sections are done again after the file ticks');
   const missingInput = `document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${changes.paths[4]}"] input')`;
   assert.deepEqual(await inPanel(`[${missingInput}.indeterminate, ${missingInput}.disabled]`), [true, true]);
   await inPanel(`${sectionDone('supporting', changes.paths[4])}.click()`);
