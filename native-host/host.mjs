@@ -287,7 +287,7 @@ function analysisReader() {
     if (provider === 'codex') {
       if (event?.type === 'turn.started') report('reasoning');
       const item = event?.type === 'item.completed' ? event.item : undefined;
-      // Codex sends a reasoning step once it ends, joining its summary parts with newlines; each part opens with a bold headline.
+      // Codex sends a reasoning step once it ends, joining its summary parts with newlines; each part usually opens with a bold headline.
       if (item?.type === 'reasoning' && typeof item.text === 'string') {
         const headlines = item.text.split('\n').map(line => line.trim().match(/^\*\*(.+)\*\*$/)?.[1]).filter(Boolean);
         const thought = progressText(headlines.at(-1) ?? item.text.trim().split('\n', 1)[0]);

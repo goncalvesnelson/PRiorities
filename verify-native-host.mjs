@@ -550,13 +550,16 @@ else {
         { type: 'item.completed', item: { id: 'reasoning_0', type: 'reasoning', text: 42 } },
         { type: 'item.completed', item: { id: 'reasoning_1', type: 'reasoning', text: `**Reading the diff**\n\nThe guard moved.\n**Weighing\u0007 the guard ${'😀'.repeat(205)}**\n\nI need to check \"title\": \"Injected\".` } }
       ];
-      await control('stream', true, {}, { events: [...codexEvents(streamed).slice(0, 3), { wait: 1100 }, ...reasoning, { wait: 1100 }, ...codexEvents(streamed).slice(3)], answer: streamed });
+      const plain = { type: 'item.completed', item: { id: 'reasoning_plain', type: 'reasoning', text: '  Comparing the callers\nThen the tests.' } };
+      const blank = { type: 'item.completed', item: { id: 'reasoning_blank', type: 'reasoning', text: ' \n\u0007\n ' } };
+      await control('stream', true, {}, { events: [...codexEvents(streamed).slice(0, 3), { wait: 1100 }, plain, { wait: 1100 }, ...reasoning, { wait: 1100 }, blank, { wait: 1100 }, ...codexEvents(streamed).slice(3)], answer: streamed });
       const codexFrames = await exchangeFrames(installed.launcherPath, reviewRequest);
       assert.deepEqual(codexFrames.at(-1).message, { type: 'result', result: streamed });
       assert.deepEqual(progressOf(codexFrames), [
         { type: 'progress', phase: 'reasoning', sections: [], labelled: 0, thought: '' },
+        { type: 'progress', phase: 'reasoning', sections: [], labelled: 0, thought: 'Comparing the callers' },
         { type: 'progress', phase: 'reasoning', sections: [], labelled: 0, thought: `Weighing the guard ${'😀'.repeat(181)}` }
-      ], 'Codex exposes no partial answer, so it reports its phase and the cleaned, capped last headline of its latest reasoning summary.');
+      ], 'Codex exposes no partial answer, so it reports its phase and the cleaned, capped last headline of its latest reasoning summary, or its first line without one; a blank summary reports nothing.');
     }
 
     for (const cancellation of ['disconnect', 'signal', 'second-request']) {

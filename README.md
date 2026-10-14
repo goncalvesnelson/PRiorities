@@ -52,12 +52,13 @@ flowchart TD
   class panel,folds,cache out
 ```
 
-Each section is marked **Review** or **Supporting**:
+Each section is marked **Review** or **Supporting**; Supporting doesn’t mean the change is safe. The default instructions, which you can replace in Settings, ask the model to:
 
-- **Review** covers consequential behavior changes, concrete failure paths, mismatches between what the PR says and what the code does, contracts, security, correctness, and uncertainty that matters. The count at the top of a review, such as “2 review decisions”, counts these sections. Their changes and the code they cite stay open in GitHub’s diff.
-- **Supporting** needs a reason from the code for giving it less attention; file type alone never qualifies. It doesn’t mean the change is safe. Its changes fold behind green markers, except unresolved edits and your always-visible change types and paths.
+- mark **Review** for consequential behavior changes, concrete failure paths, mismatches between what the PR says and what the code does, contracts, security, correctness, and uncertainty that matters;
+- mark **Supporting** only with a reason from the code for giving it less attention, never file type alone;
+- order sections so one that another builds on comes first, whatever its label, since the label signals attention, not reading order.
 
-The label signals attention, not reading order: a section that another builds on comes first, whatever its label.
+The count at the top of a review, such as “2 review decisions”, counts Review sections. With folding on, the default, a Review section’s changes and the code it cites stay open in GitHub’s diff, while a Supporting section’s changes fold behind green markers, except unresolved edits, code a Review section cites, and your always-visible change types and paths. Once you mark done every section that changes or cites a line, that line folds too, whatever the label.
 
 The grouping follows code-review research on keeping related changes together ([notes](review-literature-research.md)). Whether it helps reviewers catch more defects is still untested.
 
