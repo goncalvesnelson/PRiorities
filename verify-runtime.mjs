@@ -826,36 +826,33 @@ try {
     assert.match(rejectedFinal.messages.at(-1).message, error, name);
     assert.ok(!rejectedFinal.messages.some(message => message.type === 'result'), 'Invalid final classifications must never reach the folding UI.');
   }
-  for (const [name, mutate, problem] of [
-    ['missing defines', edit => { delete edit.defines; }, 'did not return a defines list.'],
-    ['uses not a list', edit => { edit.uses = 'account'; }, 'did not return a uses list.'],
-    ['blank symbol', edit => { edit.uses = [' ']; }, 'listed an empty uses name.'],
-    ['non-string symbol', edit => { edit.defines = [7]; }, 'listed a defines entry that is not text.'],
-    ['control character in symbol', edit => { edit.defines = ['first\nsecond']; }, 'listed a defines name containing a control character.']
+  const deletionOnly = structuredClone(twoEdits);
+  deletionOnly.files[0].hunks[0].items[1].rows.pop();
+  for (const [name, review, mutate, problem] of [
+    ['missing defines', twoEdits, ({ edits }) => { delete edits[0].defines; }, 'account.js:1 did not return a defines list.'],
+    ['uses not a list', twoEdits, ({ edits }) => { edits[1].uses = 'account'; }, 'account.js:3 did not return a uses list.'],
+    ['blank symbol', deletionOnly, ({ edits }) => { edits[1].uses = [' ']; }, 'account.js:2 (before) listed an empty uses name.'],
+    ['non-string symbol', twoEdits, ({ edits }) => { edits[1].defines = [7]; }, 'account.js:3 listed a defines entry that is not text.'],
+    ['control character in symbol', twoEdits, ({ edits }) => { edits[0].defines = ['first\nsecond']; }, 'account.js:1 listed a defines name containing a control character.']
   ]) {
     const invalidInventory = structuredClone(twoClassifications);
-    mutate(invalidInventory.edits[0]);
+    mutate(invalidInventory);
     nativeHandler = () => ({ type: 'result', result: invalidInventory });
     const before = requests.length;
-    const rejected = await beginReview(twoEdits);
+    const rejected = await beginReview(review);
     await waitForSettlement(rejected);
     assert.equal(requests.length - before, 1, `${name} must stop before prioritization.`);
-    assert.equal(rejected.messages.find(message => message.state === 'failed').message, `The classification of account.js:1 ${problem} This file remains expanded.`, name);
+    assert.equal(rejected.messages.find(message => message.state === 'failed').message, `The classification of ${problem} This file remains expanded.`, name);
   }
   const repeatedSymbols = structuredClone(twoClassifications);
   repeatedSymbols.edits[0].uses = [' account ', 'account', 'balance'];
+  repeatedSymbols.edits[1].uses = [...Array.from({ length: 120 }, (_, index) => `symbol${index}`), 'x'.repeat(300)];
   nativeHandler = stagedResponses(repeatedSymbols, { ...assessment, topics: [{ ...assessment.topics[0], editIds: ['1-1-1', '1-1-2'] }] });
   const normalizedSymbols = await beginReview(twoEdits);
   await waitForSettlement(normalizedSymbols);
-  assert.deepEqual(JSON.parse(requests.at(-1).prompt.user).classifications[0].uses, ['account', 'balance'], 'Symbol names reach the PR review trimmed and without duplicates.');
-  assert.deepEqual(normalizedSymbols.messages.at(-1).analysis.classifications[0].uses, ['account', 'balance']);
-  const manySymbols = structuredClone(twoClassifications);
-  manySymbols.edits[0].uses = [...Array.from({ length: 120 }, (_, index) => `symbol${index}`), 'x'.repeat(300)];
-  nativeHandler = stagedResponses(manySymbols, { ...assessment, topics: [{ ...assessment.topics[0], editIds: ['1-1-1', '1-1-2'] }] });
-  const largeInventory = await beginReview(twoEdits);
-  await waitForSettlement(largeInventory);
-  assert.equal(largeInventory.messages.at(-1).type, 'result', 'A large new file can list any number of symbols of any length.');
-  assert.deepEqual(JSON.parse(requests.at(-1).prompt.user).classifications[0].uses, manySymbols.edits[0].uses, 'Every symbol a large new file lists reaches the PR review.');
+  const reviewedSymbols = JSON.parse(requests.at(-1).prompt.user).classifications.map(edit => edit.uses);
+  assert.deepEqual(reviewedSymbols, [['account', 'balance'], repeatedSymbols.edits[1].uses], 'Symbol names reach the PR review trimmed and without duplicates, however many there are and however long.');
+  assert.deepEqual(normalizedSymbols.messages.at(-1).analysis.classifications.map(edit => edit.uses), reviewedSymbols);
 
   const unresolved = { edits: [{ ...classifications.edits[0], kinds: ['interface', 'unknown'] }] };
   const deferred = { ...assessment, topics: [{ ...assessment.topics[0], priority: 'supporting', excerpts: [] }] };
