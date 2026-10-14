@@ -395,7 +395,7 @@ function readModels() {
         } catch (error) { finish(null, error instanceof HelperError ? error : new HelperError(`${providerName} returned an unreadable model catalog. Update the CLI and retry.`)); }
       }
     });
-    if (provider === 'codex') sendRequest({ id: 1, method: 'initialize', params: { clientInfo: { name: 'priorities', version: '0.5.5' } } });
+    if (provider === 'codex') sendRequest({ id: 1, method: 'initialize', params: { clientInfo: { name: 'priorities', version: '0.6.0' } } });
     else sendRequest({ type: 'control_request', request_id: 'catalog', request: { subtype: 'initialize' } });
   });
 }
