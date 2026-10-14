@@ -168,11 +168,12 @@ function symbolNames(names, list, location) {
 }
 
 export function validateClassifications(input, snapshot) {
+  const labels = validateLabels(input, snapshot);
   const edits = new Map(allEdits(snapshot).map(edit => [edit.id, edit]));
-  return validateLabels(input, snapshot).map((edit, index) => {
+  return labels.map((edit, index) => {
     const { path, rows } = edits.get(edit.editId);
-    const { newLine, oldLine } = rows.find(row => row.newLine !== null) ?? rows[0];
-    const location = `${path}:${newLine ?? oldLine}`;
+    const added = rows.find(row => row.newLine !== null);
+    const location = added ? `${path}:${added.newLine}` : `${path}:${rows[0].oldLine} (before)`;
     return { ...edit, defines: symbolNames(input.edits[index].defines, 'defines', location), uses: symbolNames(input.edits[index].uses, 'uses', location) };
   });
 }
