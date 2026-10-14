@@ -1,7 +1,7 @@
 /*
  * Injected into GitHub's pages. The side panel has its own stylesheet (panel.css). Badges and the
- * tooltip use Uphold's dark tokens, like the panel; only the reviewed fold line and the scroll
- * highlight follow GitHub's colour mode.
+ * tooltip use Uphold's dark tokens, like the panel; only the reviewed fold line, the reviewed badge's
+ * border and the scroll highlight follow GitHub's colour mode.
  */
 
 /* ── The only marks PRiorities makes in GitHub's page: folds, their tooltip and the scroll highlight ── */

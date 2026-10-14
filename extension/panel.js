@@ -676,7 +676,8 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
         checkPage();
         return;
       }
-      // GitHub's checkbox stays the source of truth; the page agent reports its new state back.
+      // GitHub's checkbox stays the source of truth for Viewed; the page agent reports its new state
+      // back. The sections follow the click itself, so they stay ticked if GitHub rolls the save back.
       void page.call('setReviewed', path, input.checked).catch(() => {}).finally(() => renderFileProgress());
       markFileDone(path, input.checked);
     });
@@ -776,7 +777,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     if (others.every(other => sectionDone(other, path))) void page.call('setReviewed', path, done, { whenLoaded: true }).catch(() => {}).finally(() => renderFileProgress());
   }
 
-  // Ticking a file as reviewed, in the panel or in GitHub, marks every section listing it done there.
+  // Ticking or unticking a file, in the panel or in GitHub, ticks or unticks every section listing it.
   function markFileDone(path, done) {
     if (!finalResult) return;
     for (const topic of analysis.topics.filter(topic => sectionPaths(topic, snapshot).has(path))) setSectionTick(topic, path, done);
