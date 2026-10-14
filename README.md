@@ -5,11 +5,11 @@ Focus GitHub code reviews on the changes that need your judgment.
 PRiorities is a Chrome extension that uses your local Codex or Claude Code login to explain changes in Chrome’s side panel while you review GitHub’s own diff. It classifies each file separately, with up to six files in parallel by default, then reviews the whole PR to choose what needs attention.
 
 - Read numbered, expandable sections in plain language, each following one changed flow with its implementation, callers and tests together. Each section explains before/after behavior, why it matters and its review questions. When a changed definition and its use still land in different sections, both sections link to each other by symbol name. File names, cited line ranges and linked code identifiers jump to the matching code in GitHub.
-- Fold supporting changes and unchanged context behind green markers in GitHub’s Unified diff. Review decisions, their cited evidence, unresolved edits and your always-visible types and paths stay open until you mark their section done. Expand any fold or turn folding off; GitHub’s comments and review controls stay in place. Split view stays unchanged.
+- Fold supporting changes and unchanged context behind grey markers in GitHub’s Unified diff. Review decisions, their cited evidence, unresolved edits and your always-visible types and paths stay open until you mark their section done. Expand any fold or turn folding off; GitHub’s comments and review controls stay in place. Split view stays unchanged.
 - Choose review focus, custom analysis prompts, your CLI model and reasoning effort in Settings. Analyze the full PR or the commit range selected in GitHub, with source context and saved reviews matched to those commits.
 - Skip generated and machine-maintained files by default, with **Review anyway** in the file list. Analyze up to 100 changed files by default, configurable from 1–300; optionally list deleted files without sending their contents to the AI or counting them toward that limit.
 - Follow analysis steps, elapsed time and file progress in the panel. Retry individual files or the whole-PR review without repeating completed classifications. Once capture finishes, analysis continues across panel closure, GitHub navigation and page reloads in the same browser tab.
-- Tick a section done in one of its files to fold that section’s lines there; lines another section also changes or cites stay visible until that section is done too. Once every section listing a file is done, PRiorities ticks GitHub’s **Viewed** checkbox for it; for a file GitHub has not loaded yet, that waits until it loads while the panel stays open on this PR’s diff. **Reviewed** in the panel’s progress list operates **Viewed** directly. Ticks are saved with the review and kept across retries while their section adds nothing new in that file, and your review progress stays separate from AI analysis.
+- Tick a section done in one of its files to fold that section’s lines there; lines another section also changes or cites stay visible until that section is done too. These folds get their own green **reviewed** markers. Once every section listing a file is done, PRiorities ticks GitHub’s **Viewed** checkbox for it; for a file GitHub has not loaded yet, that waits until it loads while the panel stays open on this PR’s diff. **Reviewed** in the panel’s progress list operates **Viewed** directly. Ticks are saved with the review and kept across retries while their section adds nothing new in that file, and your review progress stays separate from AI analysis.
 - Reopen completed reviews from a local cache: 100 MB by default, customizable in Settings. Commit or context changes require a fresh review; the cache evicts the least recently used entries when full.
 
 ## How it works
@@ -31,7 +31,7 @@ flowchart TD
   check["<b>③ Check</b><br/>every change covered, every quote real code<br/><i>if not, retry</i>"]
 
   panel["📋 <b>Side panel</b><br/>sections with before, after,<br/>why it matters and questions<br/>⚠️ changes it couldn’t verify,<br/>linked to their code"]
-  folds["🟩 <b>GitHub's diff</b><br/>less important code<br/>folded away,<br/>unverified changes kept open"]
+  folds["⬜ <b>GitHub's diff</b><br/>less important code<br/>folded away,<br/>unverified changes kept open"]
   cache[("💾 <b>Saved</b><br/>reopens with no<br/>new AI calls")]
 
   start --> copy
@@ -58,7 +58,7 @@ Each section is marked **Review** or **Supporting**; Supporting doesn’t mean t
 - mark **Supporting** only with a reason from the code for giving it less attention, never file type alone;
 - order sections so one that another builds on comes first, whatever its label, since the label signals attention, not reading order.
 
-The count at the top of a review, such as “2 review decisions”, counts Review sections. With folding on, the default, a Review section’s changes and the code it cites stay open in GitHub’s diff, while a Supporting section’s changes fold behind green markers, except unresolved edits, code a Review section cites, and your always-visible change types and paths. Once you mark done every section that changes or cites a line, that line folds too, whatever the label.
+The count at the top of a review, such as “2 review decisions”, counts Review sections. With folding on, the default, a Review section’s changes and the code it cites stay open in GitHub’s diff, while a Supporting section’s changes fold behind grey markers, except unresolved edits, code a Review section cites, and your always-visible change types and paths. Once you mark done every section that changes or cites a line, that line folds too, behind a green reviewed marker, whatever the label.
 
 The grouping follows code-review research on keeping related changes together ([notes](review-literature-research.md)). Whether it helps reviewers catch more defects is still untested.
 

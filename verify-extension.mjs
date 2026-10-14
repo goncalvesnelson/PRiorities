@@ -331,13 +331,14 @@ async function handleEvent(message) {
         file.linesAdded = 4;
         file.linesDeleted = 4;
         file.linesChanged = 8;
-        file.diffLines = [{type:'HUNK',text:'@@ -1,6 +1,6 @@'},
+        file.diffLines = [{type:'HUNK',text:'@@ -1,8 +1,8 @@'},
           {type:'DELETION',text:'-before prerequisite',left:1,right:0}, {type:'DELETION',text:'-before prerequisite detail',left:2,right:0},
           {type:'ADDITION',text:'+after prerequisite',left:2,right:1}, {type:'ADDITION',text:'+after prerequisite detail',left:2,right:2},
           {type:'CONTEXT',text:' unchanged context',left:3,right:3},
           {type:'DELETION',text:'-before contract',left:4,right:3}, {type:'ADDITION',text:'+after contract',html:'+<span class="pl-s">after <span class="pl-s1">contract</span></span>',left:4,right:4},
           {type:'CONTEXT',text:' unchanged context',left:5,right:5},
-          {type:'DELETION',text:'-before external caller',left:6,right:5}, {type:'ADDITION',text:'+after external caller',left:6,right:6}];
+          {type:'DELETION',text:'-before external caller',left:6,right:5}, {type:'ADDITION',text:'+after external caller',left:6,right:6},
+          {type:'CONTEXT',text:' trailing context',left:7,right:7}, {type:'CONTEXT',text:' trailing context',left:8,right:8}];
         Object.assign(route.diffSummaries[2], {linesAdded:4, linesDeleted:4, linesChanged:8});
         const [, deletion, addition] = route.diffContents[3].diffLines;
         deletion.html = `-<img src=x onerror="window.injectedHighlight=1">before ${changes.paths[3]}`;
@@ -635,6 +636,8 @@ try {
   assert.equal(await inPage('document.querySelectorAll("[data-review-focus-owned]").length'), 0, 'Opening a PR leaves GitHub untouched until the side panel connects.');
   const panelPage = (method, params = {}) => send(method, params, panelSession);
   const inPanel = expression => inPage(expression, panelSession);
+  // A finished review is on screen, with no warning that it could not be saved.
+  const reviewReady = "document.querySelector('.rf-overview-title') && document.querySelector('.rf-cache-notice').hidden && !document.querySelector('.rf-analyze').disabled";
   async function openPanel() {
     const helper = await send('Target.createTarget', { url: `chrome-extension://${extensionId}/popup.html` });
     const { sessionId: helperSession } = await send('Target.attachToTarget', { targetId: helper.targetId, flatten: true });
@@ -806,7 +809,7 @@ try {
   assert.ok(await inPanel("document.querySelector('.rf-run-settings').textContent.includes('fixture-model · Effort: high')"));
   assert.ok((await modelRequests()).every(request => request.args.includes('model_reasoning_effort="high"')));
   assert.deepEqual(issueRequests, [901, 902, 903].map(number => `https://github.com/microsoft/vscode/issues/${number}`), 'Read bounded, unique same-repository issue references only.');
-  assert.ok(await inPanel("document.body.textContent.includes('Could not read linked issue #902')"));
+  assert.ok(await inPanel("[...document.querySelectorAll('.rf-context-limits li')].some(item => item.textContent.includes('Could not read linked issue #902')) && document.querySelector('.rf-context-limits').checkVisibility()"), 'Missing linked-issue context is shown in the overview.');
   const layout = await inPanel(`(() => {
     const topic = document.querySelector('.rf-topic');
     const gist = topic.querySelector('.rf-gist');
@@ -847,7 +850,8 @@ try {
   assert.equal(layout.reference, 'L137');
   assert.equal(await inPage('document.querySelectorAll("#review-focus-extension, .review-focus-file-status, .review-focus-file-progress").length'), 0, 'Explanations and progress live only in the side panel.');
   await waitFor(() => inPage('document.querySelectorAll(".review-focus-native-fold").length > 0'), 'native unchanged context folded');
-  assert.ok(await inPanel("document.querySelector('.rf-fold-summary').textContent.includes('green')"));
+  assert.ok(await inPanel("document.querySelector('.rf-fold-summary').textContent.includes('closed in the loaded files')"));
+  assert.equal(await inPage('document.querySelectorAll(".review-focus-native-reviewed").length'), 0, 'Nothing is marked reviewed before a section is done.');
   await inPanel("document.querySelector('.rf-code-quote > .rf-ref').click()");
   await waitFor(() => inPage(`Boolean(document.querySelector('.review-focus-native-target td[data-line-number="137"]'))`), 'cited line revealed in GitHub');
   assert.equal(await inPanel("document.querySelector('.rf-result').checkVisibility()"), true, 'Following a reference keeps the explanation available.');
@@ -920,7 +924,7 @@ try {
   assert.notEqual(panelTarget, closedPanelTarget, 'Reopening through Chrome creates a new panel document.');
   await waitFor(() => inPanel("document.querySelector('.rf-analyze')?.textContent === 'Open saved review'"), 'saved review offered in reopened panel');
   await click('Open saved review');
-  await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')"), 'reopened panel restores saved review');
+  await waitFor(() => inPanel(reviewReady), 'reopened panel restores saved review');
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-section-done input, .rf-reviewed-toggle input')].map(input => input.checked)`), [true, true], 'A reopened panel restores the section marked done and GitHub’s Viewed mark.');
   assert.equal((await modelRequests()).length, initialRequestCount);
   await send('Runtime.evaluate', { expression: 'setTimeout(() => chrome.runtime.reload(), 0)' }, workers.at(-1));
@@ -930,7 +934,7 @@ try {
   await openPanel();
   await waitFor(() => inPanel("document.querySelector('.rf-analyze')?.textContent === 'Open saved review'"), 'saved review after extension reload');
   await click('Open saved review');
-  await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')"), 'saved review restored after extension reload');
+  await waitFor(() => inPanel(reviewReady), 'saved review restored after extension reload');
   assert.equal((await modelRequests()).length, initialRequestCount);
   for (const checked of [false, true]) {
     await inPage(`{ const control = document.querySelector('.js-reviewed-checkbox'); control.checked = ${checked}; control.dispatchEvent(new Event('change', {bubbles:true})); }`);
@@ -960,7 +964,7 @@ try {
     transientIssueFailure = false;
     transientSourceFailure = false;
     await click('Retry saved review');
-    await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')"), 'saved review retry after context recovery');
+    await waitFor(() => inPanel(reviewReady), 'saved review retry after context recovery');
     assert.equal((await modelRequests()).length, initialRequestCount);
   }
 
@@ -988,7 +992,7 @@ try {
       await page('Page.reload');
       await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'revised classifications saved');
       await click('Open saved review');
-      await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'revised classifications restored');
+      await waitFor(() => inPanel(reviewReady), 'revised classifications restored');
       assert.equal((await modelRequests()).length, afterUnresolved, 'Restoring revised classifications must not invoke the model.');
     }
     assert.equal(await inPanel("document.querySelectorAll('.rf-edit').length"), 2);
@@ -1462,7 +1466,7 @@ try {
   assert.equal(await inPanel(`Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Review anyway')`), false, 'File analysis controls must wait for saved-review restoration.');
   await waitFor(async () => (await send('Runtime.evaluate', {expression:'typeof releaseRestoreDigest === "function"',returnByValue:true}, restoreWorker)).result.value, 'cache fingerprint gate');
   await send('Runtime.evaluate', {expression:'releaseRestoreDigest(); crypto.subtle.digest = originalRestoreDigest; delete globalThis.releaseRestoreDigest; delete globalThis.originalRestoreDigest;'}, restoreWorker);
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'restore excluded-file controls');
+  await waitFor(() => inPanel(reviewReady), 'restore excluded-file controls');
   assert.equal((await modelRequests()).length, beforeGenerated + defaultRequests.length);
   await openFiles();
   await inPanel(`document.querySelector('.rf-file-progress-row[data-path="${changes.paths[0]}"] .rf-file-path').click()`);
@@ -1512,7 +1516,7 @@ try {
   await saveChangedFileSettings(5, false);
   await openDeletedFilesPR();
   await click('Analyze PR');
-  await waitFor(() => inPanel(`document.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && document.querySelector('.rf-cache-detail')?.textContent.includes('Review saved') && !document.querySelector('.rf-analyze').disabled`), 'raised limit analyzes deleted files as before');
+  await waitFor(() => inPanel(`document.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && document.querySelector('.rf-cache-notice').hidden && !document.querySelector('.rf-analyze').disabled`), 'raised limit analyzes deleted files as before');
   const unlistedRequests = (await modelRequests()).slice(beforeOverLimit);
   assert.equal(unlistedRequests.length, 6, 'With the option off, deleted files are classified like any other file.');
   assert.ok(unlistedRequests.at(-1).evidence.files.some(file => file.path === removedPaths[1]) && JSON.stringify(unlistedRequests).includes('DELETED_CONTENT'));
@@ -1525,7 +1529,7 @@ try {
   await openDeletedFilesPR();
   changesRequests.length = 0;
   await click('Analyze PR');
-  await waitFor(() => inPanel(`document.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && document.querySelector('.rf-cache-detail')?.textContent.includes('Review saved') && !document.querySelector('.rf-analyze').disabled`), 'PR analyzed with deleted files listed');
+  await waitFor(() => inPanel(`document.querySelector('.rf-overview-title')?.textContent === '0 review decisions' && document.querySelector('.rf-cache-notice').hidden && !document.querySelector('.rf-analyze').disabled`), 'PR analyzed with deleted files listed');
   assert.deepEqual(changesRequests.filter(request => new URL(request.url).pathname.includes('/page_data/')), [], 'Listed deleted files are neither batch-loaded nor deferred-loaded.');
   const listedRequests = (await modelRequests()).slice(beforeOverLimit + unlistedRequests.length);
   assert.equal(listedRequests.length, 4, 'Only the three changed files are classified before the PR review.');
@@ -1548,12 +1552,12 @@ try {
   await page('Page.reload');
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved review made with deleted files listed');
   await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review') && document.querySelector('.rf-deleted-files')`), 'restored review with deleted files listed');
+  await waitFor(() => inPanel(`${reviewReady} && document.querySelector('.rf-deleted-files')`), 'restored review with deleted files listed');
   await saveChangedFileSettings(5, false);
   await openDeletedFilesPR();
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'the earlier review made without listing deleted files');
   await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'review saved without listing deleted files survives the other mode');
+  await waitFor(() => inPanel(reviewReady), 'review saved without listing deleted files survives the other mode');
   assert.equal(await inPanel(`document.querySelector('.rf-coverage').textContent`), 'Sections cover 5 of 5 files.');
   assert.equal((await modelRequests()).length, beforeSavedDeleted, 'Reviews saved with and without listing deleted files reopen separately without model calls.');
   await saveChangedFileSettings(100, false);
@@ -1633,7 +1637,7 @@ try {
   await page('Page.reload');
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'Claude review saved for the same input');
   await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'Claude cached review restored');
+  await waitFor(() => inPanel(reviewReady), 'Claude cached review restored');
   assert.equal((await modelRequests()).length, afterClaude);
   const { targetId: modelSettingsTarget } = await send('Target.createTarget', { url: `chrome-extension://${extensionId}/options.html` });
   const { sessionId: modelSettingsSession } = await send('Target.attachToTarget', { targetId: modelSettingsTarget, flatten: true });
@@ -1691,7 +1695,7 @@ try {
   await page('Page.reload');
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'original saved review remains available after changing model');
   await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'original Claude model review restored');
+  await waitFor(() => inPanel(reviewReady), 'original Claude model review restored');
   const afterModelSettings = afterClaude + changedModelRequests.length;
   assert.equal((await modelRequests()).length, afterModelSettings, 'Returning to the original model reuses its saved review.');
   descriptionSuffix = ' Additional acceptance criteria added without a commit.';
@@ -1744,7 +1748,7 @@ try {
   await inPanel("window.dispatchEvent(new Event('focus'))");
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze').textContent === 'Open saved review'`), 'a replaced saved result with the same fingerprint and a new save time is offered again');
   await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'replacement saved result restored');
+  await waitFor(() => inPanel(reviewReady), 'replacement saved result restored');
   assert.equal((await modelRequests()).length, afterChangedIntent);
   await page('Page.navigate', { url: `chrome-extension://${extensionId}/options.html` });
   await waitFor(() => inPage('!document.querySelector("#cache-limit").disabled && document.querySelector("#cache-usage").textContent.includes("MB used")'), 'cache settings and usage');
@@ -2156,7 +2160,7 @@ try {
   })()`);
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze').textContent === 'Open saved review'`), 'saved AI review available after returning to its revision');
   await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'cached result after a revision switch');
+  await waitFor(() => inPanel(reviewReady), 'cached result after a revision switch');
   assert.ok(await inPanel(`${firstModernRow}.querySelector('.rf-reviewed-toggle input').indeterminate && ${firstModernRow}.querySelector('.rf-reviewed-toggle input').disabled`), 'A revision change clears observations for absent native controls instead of reusing old checked state.');
   await inPage('document.querySelector("main").append(window.unmountedReviewFile)');
   await waitFor(() => inPanel(`${firstModernRow}.querySelector('.rf-reviewed-toggle input').checked && !${firstModernRow}.querySelector('.rf-reviewed-toggle input').disabled`), 'current native state re-read when its file is loaded');
@@ -2192,7 +2196,7 @@ try {
   await page('Page.reload');
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'custom preferences have their own reusable cache identity');
   await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'custom-preference saved analysis restored');
+  await waitFor(() => inPanel(reviewReady), 'custom-preference saved analysis restored');
   assert.equal((await modelRequests()).length, beforeCustomReview + 2);
   assert.ok(await inPanel(`document.querySelector('.rf-run-settings').textContent.includes('Focus: thorough')`));
   await page('Page.navigate', {url:`chrome-extension://${extensionId}/options.html`});
@@ -2279,11 +2283,10 @@ try {
   const rangeRequests = (await modelRequests()).slice(beforeRange);
   assert.equal(rangeRequests.length, 6);
   assert.ok(rangeRequests.every(request => request.evidence.baseSha === rangeBase && request.evidence.headSha === rangeHead && request.evidence.files.every(file => changes.paths.slice(0, 5).includes(file.path))), 'All classifications and the final check must use only the selected comparison.');
-  assert.ok(await inPanel(`document.querySelector('.rf-provenance').textContent.includes('aaaaaaaa…cccccccc')`));
   await page('Page.reload');
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Open saved review'`), 'saved range review available');
   await click('Open saved review');
-  await waitFor(() => inPanel(`document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')`), 'saved range review restored');
+  await waitFor(() => inPanel(reviewReady), 'saved range review restored');
   assert.equal((await modelRequests()).length, beforeRange + 6);
   await page('Page.navigate', { url: prUrl + '/changes' });
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Analyze PR' && !document.querySelector('.rf-analyze').disabled`), 'range result is not offered as a full PR review');
@@ -2340,7 +2343,7 @@ try {
   assert.deepEqual(await inPage(`(() => {
     const file = document.getElementById('diff-${changes.entries[2].pathDigest}');
     return [...file.querySelectorAll('.diff-line-row')].map(row => [row.querySelector('.diff-text-inner').textContent, row.classList.contains('review-focus-native-hidden')]);
-  })()`), [['before prerequisite', true], ['before prerequisite detail', true], ['after prerequisite', true], ['after prerequisite detail', true], ['unchanged context', false], ['before contract', false], ['after contract', false], ['unchanged context', false], ['before external caller', false], ['after external caller', false]], 'Native folding keeps review decisions, their context and unresolved changes visible.');
+  })()`), [['before prerequisite', true], ['before prerequisite detail', true], ['after prerequisite', true], ['after prerequisite detail', true], ['unchanged context', false], ['before contract', false], ['after contract', false], ['unchanged context', false], ['before external caller', false], ['after external caller', false], ['trailing context', false], ['trailing context', false]], 'Native folding keeps review decisions, their context and unresolved changes visible.');
   assert.equal(await inPanel("document.querySelector('.rf-coverage').textContent"), 'Sections cover 5 of 6 files. 1 machine-maintained file not analyzed (open the file list to choose Review anyway).');
   assert.deepEqual(await inPage(`[...document.querySelectorAll('.diff-file-header code')].map(node => node.textContent)`), changes.paths.slice(0, 3), 'Analysis preserves GitHub’s native file order.');
   await openFiles();
@@ -2397,40 +2400,47 @@ try {
   const clicksBeforeTicks = await inPage('window.fixtureViewedClicks');
   const folded = [true, true, true, true];
   const open = [false, false];
+  // Two context rows after the external caller rows: too few for an AI fold, so they stay open even beside reviewed rows.
+  const trailing = [false, false];
   // The contract section owns and cites rows 5–8; the unresolved section also cites its added row 7.
   const contractDone = [true, true, false, true];
   const contractReason = 'You marked “Check the contract and its implementation” done.';
   await inPanel(`${sectionDone('contract')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'a done review section folds its changed and cited rows, merged with the adjacent supporting fold');
-  assert.deepEqual(await sharedFolds(), [['6 lines folded', `Show 6 lines folded by PRiorities. Supporting changes from “Supporting setup”. ${contractReason}`], ['1 line folded', `Show 1 line folded by PRiorities. ${contractReason}`]], 'Rows from the AI fold and the done section merge into one marker that names both reasons; its own edit stays open where a section not yet done cites it.');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'a done review section folds its changed and cited rows beside the supporting fold');
+  assert.deepEqual(await sharedFolds(), [['4 lines folded', 'Show 4 lines folded by PRiorities. Supporting changes from “Supporting setup”.'], ['2 lines reviewed', `Show 2 lines you reviewed. ${contractReason}`], ['1 line reviewed', `Show 1 line you reviewed. ${contractReason}`]], 'The done section folds behind its own reviewed markers, apart from the adjacent AI fold; its own edit stays open where a section not yet done cites it.');
+  assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-fold')].map(marker => marker.classList.contains('review-focus-native-reviewed'))`), [false, true, true], 'Only the done section’s markers are marked reviewed.');
+  await inPage(`${sharedFile}.querySelectorAll('.review-focus-native-toggle')[1].click()`);
+  assert.deepEqual((await sharedFolds())[1], ['Fold 2 lines', `Fold again 2 lines you reviewed. ${contractReason}`], 'An expanded reviewed fold offers to fold again and still says you reviewed it.');
+  await inPage(`${sharedFile}.querySelectorAll('.review-focus-native-toggle')[1].click()`);
+  assert.deepEqual((await sharedFolds())[1], ['2 lines reviewed', `Show 2 lines you reviewed. ${contractReason}`], 'Folding it again restores the reviewed label.');
   assert.equal(await sharedViewed(), false, 'Another section listing the file is not done, so GitHub Viewed stays off.');
   await inPanel("document.querySelector('.rf-fold-toggle input').click()");
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([false, false, false, false, ...contractDone, ...open]), 'a done section stays folded when folding less important code is off');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([false, false, false, false, ...contractDone, ...open, ...trailing]), 'a done section stays folded when folding less important code is off');
   assert.match(await inPanel("document.querySelector('.rf-fold-summary').textContent"), /^Only sections you marked done are folded/);
   await inPanel("document.querySelector('.rf-fold-toggle input').click()");
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'AI folding returns beside the done section');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'AI folding returns beside the done section');
   await inPanel(`${sectionDone('supporting')}.click()`);
-  await waitFor(async () => (await sharedFolds())[0]?.[1] === 'Show 6 lines folded by PRiorities. You marked “Supporting setup”, “Check the contract and its implementation” done.', 'the second done section names itself on the shared fold');
+  await waitFor(async () => (await sharedFolds())[0]?.[1] === 'Show 6 lines you reviewed. You marked “Supporting setup”, “Check the contract and its implementation” done.', 'once the supporting section is done too, its rows join the adjacent reviewed fold');
   await earlierPageCallsHandled();
   assert.equal(await sharedViewed(), false, 'Two of three sections done leaves GitHub Viewed off.');
   assert.equal(await inPage('window.fixtureViewedClicks'), clicksBeforeTicks, 'The second of three ticks never clicks GitHub Viewed.');
   await inPanel(`${sectionDone('unknown')}.click()`);
-  await waitFor(async () => await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify(Array(10).fill(true)), 'marking every section listing a file done folds its shared and unresolved rows and marks it Viewed');
+  await waitFor(async () => await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify([...Array(10).fill(true), ...trailing]), 'marking every section listing a file done folds its shared and unresolved rows and marks it Viewed');
   await waitFor(() => inPanel(`document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${sharedPath}"] input').checked`), 'file list mirrors the Viewed mark set by the last done section');
   await inPanel(`${sectionDone('unknown')}.click()`);
-  await waitFor(async () => !await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'unticking a section of a fully done file unfolds its rows and clears Viewed');
+  await waitFor(async () => !await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'unticking a section of a fully done file unfolds its rows and clears Viewed');
   assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 2, 'Only crossing into and out of all-done changes GitHub Viewed.');
   await inPanel(`${sectionDone('supporting')}.click()`);
   await inPanel(`${sectionDone('contract')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open]), 'unticking every section leaves only the AI fold');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open, ...trailing]), 'unticking every section leaves only the AI fold');
   await inPanel(`${sectionDone('unknown')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, true, true]), 'a done section folds its two isolated rows');
-  assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-toggle')].map(toggle => toggle.textContent)`), ['4 lines folded', '2 lines folded'], 'A done section folds fewer rows than the three-row minimum for AI folds, and not the contract line it cites while the contract section is not done.');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, true, true, ...trailing]), 'a done section folds its two isolated rows');
+  assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-toggle')].map(toggle => toggle.textContent)`), ['4 lines folded', '2 lines reviewed'], 'A done section folds fewer rows than the three-row minimum for AI folds, and not the contract line it cites while the contract section is not done. The two context rows after it are too few for an AI fold and do not join the reviewed marker.');
   await inPanel(`${sectionDone('unknown')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open]), 'unticking the isolated section unfolds its rows');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open, ...trailing]), 'unticking the isolated section unfolds its rows');
   await inPanel(`${sectionDone('supporting')}.click()`);
   await inPanel(`${sectionDone('contract')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'the supporting and contract sections are done again for the saved-review checks');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'the supporting and contract sections are done again for the saved-review checks');
   assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 2, 'Ticks that never complete the file leave GitHub Viewed alone.');
   const missingInput = `document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${changes.paths[4]}"] input')`;
   assert.deepEqual(await inPanel(`[${missingInput}.indeterminate, ${missingInput}.disabled]`), [true, true]);
@@ -2458,7 +2468,7 @@ try {
   assert.equal(await inPanel("document.querySelector('.rf-navigation-notice').hidden"), true);
   await inPanel("document.querySelector('.rf-unresolved .rf-link-button').click()");
   assert.equal(await inPanel("document.querySelector('.rf-topic[data-topic-id=unknown]').open"), true, 'Unresolved evidence opens its own explanation.');
-  const cacheWarning = `document.querySelector('.rf-cache-notice').checkVisibility() && document.querySelector('.rf-cache-detail').textContent === document.querySelector('.rf-cache-notice').textContent && document.querySelector('.rf-cache-notice').textContent`;
+  const cacheWarning = `document.querySelector('.rf-cache-notice').checkVisibility() && document.querySelector('.rf-cache-notice').textContent`;
   await send('Runtime.evaluate', {expression:`(() => {
     const put = IDBObjectStore.prototype.put;
     IDBObjectStore.prototype.put = function () {
@@ -2467,14 +2477,13 @@ try {
     };
   })()`}, workers.at(-1));
   await inPanel(`${sectionDone('validation', changes.paths[3])}.click()`);
-  await waitFor(async () => (await inPanel(cacheWarning) || '').includes('could not be saved locally'), 'a tick that fails to save warns beside the review and in Analysis details');
+  await waitFor(async () => (await inPanel(cacheWarning) || '').includes('could not be saved locally'), 'a tick that fails to save warns beside the review');
   assert.equal(await inPanel("document.querySelector('.rf-navigation-notice').hidden"), true);
   await inPanel(`document.querySelector('.rf-topic[data-topic-id=validation] .rf-section-file button').click()`);
   await waitFor(() => inPanel("!document.querySelector('.rf-navigation-notice').hidden && document.querySelector('.rf-navigation-notice').textContent.includes('has not loaded')"), 'a page call after the tick answered');
   assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 3, 'The only section listing an unloaded file is done, so its Viewed change waits for the file.');
   await inPanel(`[...document.querySelector('.rf-file-progress-row[data-path="${changes.paths[5]}"]').querySelectorAll('button')].find(button => button.textContent === 'Review anyway').click()`);
-  await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Review saved') && !document.querySelector('.rf-analyze').disabled"), 'Review anyway reruns the review');
-  assert.equal(await inPanel(`${sectionDone('validation', changes.paths[3])}.checked`), false, 'The rerun drops the tick of a section that now cites more of that file.');
+  await waitFor(() => inPanel(`!${sectionDone('validation', changes.paths[3])}.checked && ${reviewReady}`), 'Review anyway reruns the review and drops the tick of a section that now cites more of that file');
   assert.deepEqual(await sharedDone(), [true, true, false], 'Ticks of sections that add nothing in their file carry over.');
   assert.equal(await inPanel("document.querySelector('.rf-cache-notice').hidden"), true, 'The rerun saves its ticks, so the failed-save warning goes.');
   const validationInput = `document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${changes.paths[3]}"] input')`;
@@ -2499,10 +2508,10 @@ try {
   await page('Page.reload');
   await waitFor(() => inPanel("document.querySelector('.rf-analyze')?.textContent === 'Open saved review'"), 'saved multi-section review');
   await click('Open saved review');
-  await waitFor(() => inPanel("document.querySelector('.rf-cache-detail')?.textContent.includes('Opened saved review')"), 'saved sections restored');
+  await waitFor(() => inPanel(reviewReady), 'saved sections restored');
   assert.deepEqual(await relatedSections(), expectedRelated, 'A saved review keeps the symbol relations behind its section links.');
   assert.deepEqual(await sharedDone(), [true, true, false], 'A reopened saved review restores the sections marked done.');
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open]), 'restored done sections fold again');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'restored done sections fold again');
   assert.equal(await inPage('window.fixtureViewedClicks'), 0, 'Restoring a saved review never changes Viewed.');
   assert.equal((await modelRequests()).length - beforeSections, 8);
   for (const override of ['always-visible', 'protected']) {
@@ -2545,7 +2554,6 @@ try {
     assert.equal(await inPanel(`new URLSearchParams(location.search).get('tab')`), String(fixtureTabId), 'The popup binds the review to the active PR tab.');
     assert.equal((await modelRequests()).length - beforeLaunch, route ? 0 : 2, 'The first popup launch classifies and reviews once; reopening uses the saved review.');
     if (route) {
-      assert.ok(await inPanel(`document.querySelector('.rf-cache-detail').textContent.includes('Opened saved review')`));
       continue;
     }
     const popupRequests = (await modelRequests()).slice(beforePopup);
