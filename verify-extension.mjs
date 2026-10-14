@@ -94,7 +94,7 @@ if (mode === 'parallel' || mode === 'generated-review' || mode === 'generated-fi
 }
 if (mode === 'guide-sections') {
   const idsFor = file => file.hunks.flatMap(hunk => hunk.items.filter(item => !Array.isArray(item)).map(item => item.id));
-  const unknown = new Set(evidence.files.flatMap(file => file.path === 'tests/change-2.ts' ? idsFor(file) : file.path === 'tests/change-3.ts' ? idsFor(file).slice(2) : []));
+  const unknown = new Set(evidence.files.flatMap(file => file.path === 'tests/change-2.ts' ? idsFor(file) : file.path === 'tests/change-3.ts' ? idsFor(file).slice(2, 3) : []));
   labels = labels.map(label => unknown.has(label.editId) ? {...label, kinds:['unknown'], uncertainty:'The external caller contract is unavailable.'} : label);
   // The supporting section's edits also carry test, and one carries interface, so the card must sort its tags by count.
   const tested = new Set(evidence.files.flatMap(file => ['tests/change-1.ts', 'tests/space, comma % and ü.ts'].includes(file.path) ? idsFor(file) : file.path === 'tests/change-3.ts' ? idsFor(file).slice(0, 1) : []));
@@ -110,8 +110,8 @@ if (mode === 'guide-sections') {
     // Review anyway on the machine-maintained sixth file also makes the validation section cite a line it did not cite before.
     const reviewedAnyway = evidence.files.length > 5;
     review.topics = [
-      topic('supporting', 'Supporting setup', 'supporting', [...ids(0), ...ids(4), ids(2)[0], ...reviewedAnyway ? ids(5) : []]),
-      topic('contract', 'Check the contract and its implementation', 'review', [ids(2)[1]], [{path:evidence.files[2].path,side:'after',startLine:4,endLine:4,note:'The contract changes here.'},{path:evidence.files[4].path,side:'before',startLine:1,endLine:1,note:'The implementation read the old contract.'},{path:evidence.files[2].path,side:'after',startLine:3,endLine:5,note:'Surrounding context keeps the contract readable.'}]),
+      topic('supporting', 'Supporting setup', 'supporting', [...ids(0), ...ids(4), ids(2)[0], ids(2)[3], ...reviewedAnyway ? ids(5) : []]),
+      topic('contract', 'Check the contract and its implementation', 'review', [ids(2)[1], ids(2)[4], ids(2)[5]], [{path:evidence.files[2].path,side:'after',startLine:4,endLine:4,note:'The contract changes here.'},{path:evidence.files[4].path,side:'before',startLine:1,endLine:1,note:'The implementation read the old contract.'},{path:evidence.files[2].path,side:'after',startLine:3,endLine:5,note:'Surrounding context keeps the contract readable.'},{path:evidence.files[2].path,side:'after',startLine:10,endLine:10,note:'The contract continues here.'}]),
       topic('validation', 'Check the separate validation path', 'review', ids(3), [{path:evidence.files[3].path,side:'after',startLine:1,endLine:1,note:'Validation reads the new value.'}, ...reviewedAnyway ? [{path:evidence.files[3].path,side:'before',startLine:1,endLine:1,note:'Validation read the old value.'}] : []]),
       {...topic('unknown', 'External caller contract', 'supporting', [...ids(1), ids(2)[2]], [{path:evidence.files[2].path,side:'after',startLine:4,endLine:4,note:'External callers read the new contract.'}]), uncertainty:'The external caller contract is unavailable.'}
     ];
@@ -328,18 +328,23 @@ async function handleEvent(message) {
       if (changesMode === 'guide-sections') {
         route.diffSummaries = route.diffSummaries.slice(0,6);
         const file = route.diffContents[2];
-        file.linesAdded = 4;
-        file.linesDeleted = 4;
-        file.linesChanged = 8;
-        file.diffLines = [{type:'HUNK',text:'@@ -1,8 +1,8 @@'},
+        file.linesAdded = 7;
+        file.linesDeleted = 7;
+        file.linesChanged = 14;
+        file.diffLines = [{type:'HUNK',text:'@@ -1,13 +1,13 @@'},
           {type:'DELETION',text:'-before prerequisite',left:1,right:0}, {type:'DELETION',text:'-before prerequisite detail',left:2,right:0},
           {type:'ADDITION',text:'+after prerequisite',left:2,right:1}, {type:'ADDITION',text:'+after prerequisite detail',left:2,right:2},
           {type:'CONTEXT',text:' unchanged context',left:3,right:3},
           {type:'DELETION',text:'-before contract',left:4,right:3}, {type:'ADDITION',text:'+after contract',html:'+<span class="pl-s">after <span class="pl-s1">contract</span></span>',left:4,right:4},
           {type:'CONTEXT',text:' unchanged context',left:5,right:5},
           {type:'DELETION',text:'-before external caller',left:6,right:5}, {type:'ADDITION',text:'+after external caller',left:6,right:6},
-          {type:'CONTEXT',text:' trailing context',left:7,right:7}, {type:'CONTEXT',text:' trailing context',left:8,right:8}];
-        Object.assign(route.diffSummaries[2], {linesAdded:4, linesDeleted:4, linesChanged:8});
+          {type:'CONTEXT',text:' trailing context',left:7,right:7}, {type:'CONTEXT',text:' trailing context',left:8,right:8},
+          {type:'DELETION',text:'-before tail setup',left:9,right:8}, {type:'ADDITION',text:'+after tail setup',left:9,right:9},
+          {type:'CONTEXT',text:' cited contract context',left:10,right:10},
+          {type:'DELETION',text:'-before second contract',left:11,right:10}, {type:'ADDITION',text:'+after second contract',left:11,right:11},
+          {type:'CONTEXT',text:' contract gap',left:12,right:12},
+          {type:'DELETION',text:'-before third contract',left:13,right:12}, {type:'ADDITION',text:'+after third contract',left:13,right:13}];
+        Object.assign(route.diffSummaries[2], {linesAdded:7, linesDeleted:7, linesChanged:14});
         const [, deletion, addition] = route.diffContents[3].diffLines;
         deletion.html = `-<img src=x onerror="window.injectedHighlight=1">before ${changes.paths[3]}`;
         addition.html = `+<a href="https://example.com/">after</a> ${changes.paths[3]}`;
@@ -527,7 +532,7 @@ try {
         control.type = 'button';
         control.setAttribute('aria-pressed', String(reviewed.has(path)));
         control.setAttribute('aria-label', reviewed.has(path) ? 'Viewed' : 'Not Viewed');
-        control.textContent = 'Viewed';
+        control.append(Object.assign(document.createElement('span'), { textContent: 'Viewed' }));
       } else {
         control.type = 'checkbox';
         control.className = 'js-reviewed-checkbox';
@@ -2344,21 +2349,21 @@ try {
   })()`);
   await writeFile(uxGate, 'waiting');
   await click('Analyze PR');
-  await waitFor(() => inPanel(`document.querySelectorAll('.rf-file-progress-row[data-state=classified]').length === 4`), 'every file but the three-block one labelled');
-  assert.deepEqual(await inPanel(`[document.querySelector('.rf-progress-bar').value, document.querySelector('.rf-progress-bar').max]`), [4, 7], 'The bar weighs files by their blocks and leaves the machine-maintained file out.');
+  await waitFor(() => inPanel(`document.querySelectorAll('.rf-file-progress-row[data-state=classified]').length === 4`), 'every file but the six-block one labelled');
+  assert.deepEqual(await inPanel(`[document.querySelector('.rf-progress-bar').value, document.querySelector('.rf-progress-bar').max]`), [4, 10], 'The bar weighs files by their blocks and leaves the machine-maintained file out.');
   await writeFile(uxGate, 'continue');
   await waitFor(() => inPanel("document.querySelector('.rf-overview-title')?.textContent === '2 review decisions' && !document.querySelector('.rf-analyze').disabled"), 'four-section panel review');
   const sectionGists = ['Gist for supporting setup.', 'Gist for check the contract and its implementation.', 'Gist for check the separate validation path.', 'Gist for external caller contract.'];
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic')].map(node => [node.dataset.topicId, node.querySelector('.rf-priority').textContent, node.open])`), [['supporting', 'Supporting', true], ['contract', 'Review', false], ['validation', 'Review', false], ['unknown', 'Supporting', false]]);
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic-summary .rf-gist')].map(node => node.textContent)`), sectionGists);
   assert.deepEqual(await inPanel(`[...document.querySelectorAll('.rf-topic-summary .rf-topic-kinds')].map(node => [...node.querySelectorAll('.rf-topic-kind')].map(tag => [tag.textContent, tag.dataset.kind]))`), [
-    [['3 behavior', 'behavior'], ['3 test', 'test'], ['1 interface', 'interface']], [['1 behavior', 'behavior']], [['1 behavior', 'behavior']], [['2 unknown', 'unknown']]
+    [['4 behavior', 'behavior'], ['3 test', 'test'], ['1 interface', 'interface']], [['3 behavior', 'behavior']], [['1 behavior', 'behavior']], [['2 unknown', 'unknown']]
   ], 'Each section card counts its edits by change type, most common first.');
-  await waitFor(() => inPage(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelectorAll('.review-focus-native-hidden').length === 4`), 'supporting changes folded beside cited and unresolved changes');
+  await waitFor(() => inPage(`document.getElementById('diff-${changes.entries[2].pathDigest}').querySelectorAll('.review-focus-native-hidden').length === 8`), 'supporting changes folded beside cited and unresolved changes');
   assert.deepEqual(await inPage(`(() => {
     const file = document.getElementById('diff-${changes.entries[2].pathDigest}');
     return [...file.querySelectorAll('.diff-line-row')].map(row => [row.querySelector('.diff-text-inner').textContent, row.classList.contains('review-focus-native-hidden')]);
-  })()`), [['before prerequisite', true], ['before prerequisite detail', true], ['after prerequisite', true], ['after prerequisite detail', true], ['unchanged context', false], ['before contract', false], ['after contract', false], ['unchanged context', false], ['before external caller', false], ['after external caller', false], ['trailing context', false], ['trailing context', false]], 'Native folding keeps review decisions, their context and unresolved changes visible.');
+  })()`), [['before prerequisite', true], ['before prerequisite detail', true], ['after prerequisite', true], ['after prerequisite detail', true], ['unchanged context', false], ['before contract', false], ['after contract', false], ['unchanged context', false], ['before external caller', false], ['after external caller', false], ['trailing context', true], ['trailing context', true], ['before tail setup', true], ['after tail setup', true], ['cited contract context', false], ['before second contract', false], ['after second contract', false], ['contract gap', false], ['before third contract', false], ['after third contract', false]], 'Native folding keeps review decisions, their context and unresolved changes visible.');
   assert.equal(await inPanel("document.querySelector('.rf-coverage').textContent"), 'Sections cover 5 of 6 files. 1 machine-maintained file not analyzed (open the file list to choose Review anyway).');
   assert.deepEqual(await inPage(`[...document.querySelectorAll('.diff-file-header code')].map(node => node.textContent)`), changes.paths.slice(0, 3), 'Analysis preserves GitHub’s native file order.');
   await openFiles();
@@ -2369,8 +2374,8 @@ try {
   await waitFor(() => inPanel("document.querySelector('.rf-topic[data-topic-id=contract]').open"), 'native section disclosure keyboard interaction');
   const contract = `document.querySelector('.rf-topic[data-topic-id=contract]')`;
   assert.deepEqual(await inPanel(`[getComputedStyle(${contract}.querySelector('.rf-topic-summary')).position, getComputedStyle(${contract}.querySelector('.rf-gist')).webkitLineClamp, getComputedStyle(document.querySelector('.rf-topic[data-topic-id=validation] .rf-gist')).webkitLineClamp]`), ['sticky', 'none', '2'], 'Open section headings stay pinned and expand their gist while collapsed sections show two lines.');
-  assert.deepEqual(await inPanel(`[...${contract}.querySelectorAll('.rf-section-file')].map(row => [row.querySelector('button').getAttribute('aria-label'), row.querySelector('.rf-file-delta').textContent])`), [[sharedPath, '+1 −1'], [changes.paths[4], 'cited evidence']], 'Cited and changed files appear once, with deltas belonging to this section.');
-  assert.equal(await inPanel(`${contract}.querySelectorAll('.rf-code-quote').length`), 3, 'Multiple excerpts stay grouped under their file.');
+  assert.deepEqual(await inPanel(`[...${contract}.querySelectorAll('.rf-section-file')].map(row => [row.querySelector('button').getAttribute('aria-label'), row.querySelector('.rf-file-delta').textContent])`), [[sharedPath, '+3 −3'], [changes.paths[4], 'cited evidence']], 'Cited and changed files appear once, with deltas belonging to this section.');
+  assert.equal(await inPanel(`${contract}.querySelectorAll('.rf-code-quote').length`), 4, 'Multiple excerpts stay grouped under their file.');
   const relatedSections = () => inPanel(`Object.fromEntries([...document.querySelectorAll('.rf-topic')].map(card => [card.dataset.topicId, [...card.querySelectorAll('.rf-section-links li')].map(item => item.textContent)]))`);
   const expectedRelated = {supporting: [], contract: ['contractValue is used in section 3', '<b>Contract</b> is used in section 3'], validation: ['contractValue is changed in section 2', '<b>Contract</b> is changed in section 2'], unknown: []};
   assert.deepEqual(await relatedSections(), expectedRelated, 'A symbol defined in one section and used in another links both cards; sections without such symbols show none.');
@@ -2415,15 +2420,22 @@ try {
   let clicksBeforeTicks = await inPage('window.fixtureViewedClicks');
   const folded = [true, true, true, true];
   const open = [false, false];
-  // Two context rows after the external caller rows: too few for an AI fold, so they stay open even beside reviewed rows.
-  const trailing = [false, false];
+  // Two context rows and the supporting section's last edit end the file, folded together. Once that
+  // section is done its edit folds as reviewed, and the context rows stay folded beside it although
+  // they are fewer than an AI fold's minimum.
+  const trailing = [true, true, true, true];
+  // The file ends with a line the contract cites, then the contract's other two edits around one
+  // context line no section cites. Ticking the contract folds the cited line and both edits; the lone
+  // context line stays open, as it was before.
+  const contractEnd = [true, true, true, false, true, true];
+  const contractEndOpen = [false, false, false, false, false, false];
   // The contract section owns and cites rows 5–8; the unresolved section also cites its added row 7.
   const contractDone = [true, true, false, true];
   const contractReason = 'You marked “Check the contract and its implementation” done.';
   await inPanel(`${sectionDone('contract')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'a done review section folds its changed and cited rows beside the supporting fold');
-  assert.deepEqual(await sharedFolds(), [['4 lines folded', 'Show 4 lines folded by PRiorities. Supporting changes from “Supporting setup”.'], ['2 lines reviewed', `Show 2 lines you reviewed. ${contractReason}`], ['1 line reviewed', `Show 1 line you reviewed. ${contractReason}`]], 'The done section folds behind its own reviewed markers, apart from the adjacent AI fold; its own edit stays open where a section not yet done cites it.');
-  assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-fold')].map(marker => marker.classList.contains('review-focus-native-reviewed'))`), [false, true, true], 'Only the done section’s markers are marked reviewed.');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing, ...contractEnd]), 'a done review section folds its changed and cited rows beside the supporting fold');
+  assert.deepEqual(await sharedFolds(), [['4 lines folded', 'Show 4 lines folded by PRiorities. Supporting changes from “Supporting setup”.'], ['2 lines reviewed', `Show 2 lines you reviewed. ${contractReason}`], ['1 line reviewed', `Show 1 line you reviewed. ${contractReason}`], ['4 lines folded', 'Show 4 lines folded by PRiorities. Supporting changes from “Supporting setup”.'], ['3 lines reviewed', `Show 3 lines you reviewed. ${contractReason}`], ['2 lines reviewed', `Show 2 lines you reviewed. ${contractReason}`]], 'The done section folds behind its own reviewed markers, apart from the adjacent AI fold; its own edit stays open where a section not yet done cites it.');
+  assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-fold')].map(marker => marker.classList.contains('review-focus-native-reviewed'))`), [false, true, true, false, true, true], 'Only the done section’s markers are marked reviewed.');
   const contractNotesShown = () => inPanel(`(() => {
     const wasOpen = ${contract}.open;
     ${contract}.open = true;
@@ -2431,64 +2443,70 @@ try {
     ${contract}.open = wasOpen;
     return shown;
   })()`);
-  assert.deepEqual(await contractNotesShown(), [[false, false], [true]], 'Marking the contract section done in the shared file collapses its notes there, not in the file it is not done in.');
+  assert.deepEqual(await contractNotesShown(), [[false, false, false], [true]], 'Marking the contract section done in the shared file collapses its notes there, not in the file it is not done in.');
   await inPage(`${sharedFile}.querySelectorAll('.review-focus-native-toggle')[1].click()`);
   assert.deepEqual((await sharedFolds())[1], ['Fold 2 lines', `Fold again 2 lines you reviewed. ${contractReason}`], 'An expanded reviewed fold offers to fold again and still says you reviewed it.');
   await inPage(`${sharedFile}.querySelectorAll('.review-focus-native-toggle')[1].click()`);
   assert.deepEqual((await sharedFolds())[1], ['2 lines reviewed', `Show 2 lines you reviewed. ${contractReason}`], 'Folding it again restores the reviewed label.');
   assert.equal(await sharedViewed(), false, 'Another section listing the file is not done, so GitHub Viewed stays off.');
   await inPanel("document.querySelector('.rf-fold-toggle input').click()");
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([false, false, false, false, ...contractDone, ...open, ...trailing]), 'a done section stays folded when folding less important code is off');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([false, false, false, false, ...contractDone, ...open, false, false, false, false, ...contractEnd]), 'a done section stays folded when folding less important code is off');
   assert.match(await inPanel("document.querySelector('.rf-fold-summary').textContent"), /^Only sections you marked done are folded/);
   await inPanel("document.querySelector('.rf-fold-toggle input').click()");
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'AI folding returns beside the done section');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing, ...contractEnd]), 'AI folding returns beside the done section');
   await inPanel(`${sectionDone('supporting')}.click()`);
   await waitFor(async () => (await sharedFolds())[0]?.[1] === 'Show 6 lines you reviewed. You marked “Supporting setup”, “Check the contract and its implementation” done.', 'once the supporting section is done too, its rows join the adjacent reviewed fold');
+  assert.deepEqual((await sharedFolds()).slice(2), [['2 lines folded', 'Show 2 lines folded by PRiorities. Unchanged context around the changes.'], ['5 lines reviewed', 'Show 5 lines you reviewed. You marked “Supporting setup”, “Check the contract and its implementation” done.'], ['2 lines reviewed', `Show 2 lines you reviewed. ${contractReason}`]], 'Ticking a section never unfolds the context rows folded beside its edit, though they are now fewer than an AI fold’s minimum, and never folds the lone context line between two of its edits.');
+  assert.deepEqual(await sharedHidden(), [...folded, ...contractDone, ...open, ...trailing, ...contractEnd]);
   await earlierPageCallsHandled();
   assert.equal(await sharedViewed(), false, 'Two of three sections done leaves GitHub Viewed off.');
   assert.equal(await inPage('window.fixtureViewedClicks'), clicksBeforeTicks, 'The second of three ticks never clicks GitHub Viewed.');
   await inPanel(`${sectionDone('unknown')}.click()`);
-  await waitFor(async () => await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify([...Array(10).fill(true), ...trailing]), 'marking every section listing a file done folds its shared and unresolved rows and marks it Viewed');
+  await waitFor(async () => await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify([...Array(10).fill(true), ...trailing, ...contractEnd]), 'marking every section listing a file done folds its shared and unresolved rows and marks it Viewed');
   await waitFor(() => inPanel(`document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${sharedPath}"] input').checked`), 'file list mirrors the Viewed mark set by the last done section');
   await inPanel(`${sectionDone('unknown')}.click()`);
-  await waitFor(async () => !await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'unticking a section of a fully done file unfolds its rows and clears Viewed');
+  await waitFor(async () => !await sharedViewed() && JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing, ...contractEnd]), 'unticking a section of a fully done file unfolds its rows and clears Viewed');
   assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 2, 'Only crossing into and out of all-done changes GitHub Viewed.');
   await inPanel(`${sectionDone('supporting')}.click()`);
   await inPanel(`${sectionDone('contract')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open, ...trailing]), 'unticking every section leaves only the AI fold');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open, ...trailing, ...contractEndOpen]), 'unticking every section leaves only the AI fold');
   await inPanel(`${sectionDone('unknown')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, true, true, ...trailing]), 'a done section folds its two isolated rows');
-  assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-toggle')].map(toggle => toggle.textContent)`), ['4 lines folded', '2 lines reviewed'], 'A done section folds fewer rows than the three-row minimum for AI folds, and not the contract line it cites while the contract section is not done. The two context rows after it are too few for an AI fold and do not join the reviewed marker.');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, true, true, ...trailing, ...contractEndOpen]), 'a done section folds its two isolated rows');
+  assert.deepEqual(await inPage(`[...${sharedFile}.querySelectorAll('.review-focus-native-toggle')].map(toggle => toggle.textContent)`), ['4 lines folded', '2 lines reviewed', '4 lines folded'], 'A done section folds fewer rows than the three-row minimum for AI folds, and not the contract line it cites while the contract section is not done. The AI fold after it keeps its own marker.');
   await inPanel(`${sectionDone('unknown')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open, ...trailing]), 'unticking the isolated section unfolds its rows');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, false, false, false, false, ...open, ...trailing, ...contractEndOpen]), 'unticking the isolated section unfolds its rows');
   await inPanel(`${sectionDone('supporting')}.click()`);
   await inPanel(`${sectionDone('contract')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'the supporting and contract sections are done again for the saved-review checks');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing, ...contractEnd]), 'the supporting and contract sections are done again for the saved-review checks');
   assert.equal(await inPage('window.fixtureViewedClicks') - clicksBeforeTicks, 2, 'Ticks that never complete the file leave GitHub Viewed alone.');
   // Ticking the file, in the panel or in GitHub, ticks or unticks every section listing it there.
   const sharedReviewed = `document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${sharedPath}"] input')`;
   const sharedControl = `${sharedFile}.querySelector('button[aria-pressed]')`;
   // The panel's Reviewed box mirrors GitHub's Viewed a moment later; each click waits for it to catch up.
   const fileState = async () => [await sharedViewed(), await inPanel(`${sharedReviewed}.checked`), await sharedDone(), await sharedHidden(), await inPage(`${sharedControl}.disabled`)];
-  const allDone = [true, true, [true, true, true], [...Array(10).fill(true), ...trailing], false];
-  const noneDone = [false, false, [false, false, false], [...folded, false, false, false, false, ...open, ...trailing], false];
+  const allDone = [true, true, [true, true, true], [...Array(10).fill(true), ...trailing, ...contractEnd], false];
+  const noneDone = [false, false, [false, false, false], [...folded, false, false, false, false, ...open, ...trailing, ...contractEndOpen], false];
   await waitFor(async () => !await sharedViewed() && await inPanel(`!${sharedReviewed}.checked && ${sharedReviewed}.getAttribute('aria-disabled') === 'false'`), 'the file list shows the shared file not yet Viewed');
   const beforeFileTicks = await inPage('window.fixtureViewedClicks');
   await inPanel(`${sharedReviewed}.click()`);
   await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(allDone), 'ticking the file in the panel marks every section listing it done');
-  assert.deepEqual(await contractNotesShown(), [[false, false], [true]], 'A section ticked through its file collapses its notes there.');
+  assert.deepEqual(await contractNotesShown(), [[false, false, false], [true]], 'A section ticked through its file collapses its notes there.');
   await inPanel(`${sharedReviewed}.click()`);
   await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(noneDone), 'unticking the file in the panel clears every section listing it');
-  assert.deepEqual(await contractNotesShown(), [[true, true], [true]], 'Unticking shows the notes again.');
+  assert.deepEqual(await contractNotesShown(), [[true, true, true], [true]], 'Unticking shows the notes again.');
   await clickInPage(sharedControl);
   await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(allDone), 'clicking Viewed in GitHub marks every section listing the file done');
   await clickInPage(sharedControl);
   await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(noneDone), 'clicking Viewed off in GitHub clears every section listing the file');
   assert.equal(await inPage('window.fixtureViewedClicks') - beforeFileTicks, 4, 'Each file tick changes GitHub Viewed once; marking its sections clicks nothing more.');
-  clicksBeforeTicks += 4;
+  await inPage(`${sharedControl}.click()`);
+  await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify([true, true, ...noneDone.slice(2)]), 'a scripted Viewed click leaves the sections alone');
+  await inPage(`${sharedControl}.click()`);
+  await waitFor(async () => JSON.stringify(await fileState()) === JSON.stringify(noneDone), 'a scripted Viewed uncheck leaves the sections alone');
+  clicksBeforeTicks += await inPage('window.fixtureViewedClicks') - beforeFileTicks;
   await inPanel(`${sectionDone('supporting')}.click()`);
   await inPanel(`${sectionDone('contract')}.click()`);
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'the supporting and contract sections are done again after the file ticks');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing, ...contractEnd]), 'the supporting and contract sections are done again after the file ticks');
   const missingInput = `document.querySelector('.rf-file-list .rf-reviewed-toggle[data-path="${changes.paths[4]}"] input')`;
   assert.deepEqual(await inPanel(`[${missingInput}.indeterminate, ${missingInput}.disabled]`), [true, true]);
   await inPanel(`${sectionDone('supporting', changes.paths[4])}.click()`);
@@ -2558,7 +2576,7 @@ try {
   await waitFor(() => inPanel(reviewReady), 'saved sections restored');
   assert.deepEqual(await relatedSections(), expectedRelated, 'A saved review keeps the symbol relations behind its section links.');
   assert.deepEqual(await sharedDone(), [true, true, false], 'A reopened saved review restores the sections marked done.');
-  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing]), 'restored done sections fold again');
+  await waitFor(async () => JSON.stringify(await sharedHidden()) === JSON.stringify([...folded, ...contractDone, ...open, ...trailing, ...contractEnd]), 'restored done sections fold again');
   assert.equal(await inPage('window.fixtureViewedClicks'), 0, 'Restoring a saved review never changes Viewed.');
   assert.equal((await modelRequests()).length - beforeSections, 8);
   for (const override of ['always-visible', 'protected']) {

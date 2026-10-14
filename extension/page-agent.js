@@ -153,10 +153,7 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
     onChange(counts());
   }
 
-  function foldRows(path, rows) {
-    // A section marked done is the reviewer's own request, so its rows fold however few they are.
-    const reviewed = rows.some(row => row.done.length);
-    if (rows.length < minimumFold && !reviewed) return;
+  function foldRows(path, rows, reviewed) {
     const first = rows[0].element;
     const marker = doc.createElement('tr');
     marker.className = 'review-focus-native-fold';
@@ -205,7 +202,35 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
       const perElement = new Map();
       for (const row of file.rows) perElement.set(row.element, (perElement.get(row.element) ?? 0) + 1);
       let group = [];
-      const flush = () => { foldRows(file.path, group); group = []; };
+      // Reviewed rows get their own marker so they never share one with rows PRiorities folded. Grey
+      // rows fold when their unbroken run of suggested rows, done or not, meets the minimum: the fold
+      // they had before any tick, so ticking a section neither unfolds nor adds grey folds. A section
+      // marked done is the reviewer's own request, so its rows fold however few they are.
+      const flush = () => {
+        const suggestedRun = new Map();
+        let run = [];
+        const endRun = () => {
+          for (const row of run) suggestedRun.set(row, run.length);
+          run = [];
+        };
+        for (const row of group) {
+          if (row.suggested) run.push(row);
+          else endRun();
+        }
+        endRun();
+        let piece = [];
+        const foldPiece = () => {
+          const reviewed = piece[0]?.done.length > 0;
+          if (piece.length && (reviewed || suggestedRun.get(piece[0]) >= minimumFold)) foldRows(file.path, piece, reviewed);
+          piece = [];
+        };
+        for (const row of group) {
+          if (piece.length && piece[0].done.length > 0 !== row.done.length > 0) foldPiece();
+          piece.push(row);
+        }
+        foldPiece();
+        group = [];
+      };
       for (const row of file.rows) {
         const match = expected.get(rowKey(row));
         if (!match || row.element.tagName !== 'TR' || perElement.get(row.element) !== 1 || hasDiscussion(row.element)) {
@@ -218,11 +243,8 @@ function createNativeFolding(doc, snapshot, analysis, { protectedPaths = [], alw
           flush();
           continue;
         }
-        const previous = group.at(-1);
-        // Reviewed rows get their own marker so they never share one with rows PRiorities folded.
-        const reviewedChanged = previous && previous.done.length > 0 !== match.done.length > 0;
-        if (previous && (previous.element.nextElementSibling !== row.element || reviewedChanged)) flush();
-        group.push({ ...row, topic: match.topic, done: match.done });
+        if (group.length && group.at(-1).element.nextElementSibling !== row.element) flush();
+        group.push({ ...row, topic: match.topic, done: match.done, suggested });
       }
       flush();
     }
@@ -506,7 +528,9 @@ export function startPageAgent(port, queued = []) {
   document.addEventListener('change', event => {
     if (event.target.matches('input.js-reviewed-checkbox')) scheduleCheck();
   }, eventOptions);
-  // The reviewer's own Viewed clicks are trusted; the clicks setReviewed makes are not.
+  // Only the reviewer's own Viewed clicks, which are trusted, tick or untick a file's sections. The
+  // clicks setReviewed makes are not: unticking one section of a done file clears Viewed, and that
+  // must not untick the file's other sections.
   document.addEventListener('click', event => {
     const control = event.target.closest?.(reviewControlSelector);
     if (!event.isTrusted || !control || control.getAttribute('aria-disabled') === 'true' || !verifiedPage()) return;
