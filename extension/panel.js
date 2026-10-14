@@ -653,7 +653,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     const unavailable = !control || control.disabled;
     label.dataset.unavailable = String(unavailable);
     hint.textContent = !unavailable ? '' : control ? 'Unavailable in this view' : reviewed === undefined ? 'Status unavailable' : 'Load file to update';
-    label.title = !unavailable ? 'Uses GitHub’s Viewed checkbox. AI analysis never changes your checkmark.'
+    label.title = !unavailable ? 'Uses GitHub’s Viewed checkbox and marks every section listing this file done. AI analysis never changes your checkmark.'
       : control ? 'GitHub’s Viewed checkbox is unavailable in this view.' : 'Load this file in GitHub’s diff to read or change its Viewed status.';
   }
 
@@ -678,6 +678,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       }
       // GitHub's checkbox stays the source of truth; the page agent reports its new state back.
       void page.call('setReviewed', path, input.checked).catch(() => {}).finally(() => renderFileProgress());
+      markFileDone(path, input.checked);
     });
     label.dataset.path = path;
     label.append(input, element('span', '', 'Reviewed'), element('span', 'rf-review-unavailable'));
@@ -770,11 +771,26 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   // GitHub has loaded the file's control.
   function markSectionDone(topic, path, done) {
     const others = analysis.topics.filter(other => other !== topic && sectionPaths(other, snapshot).has(path));
+    setSectionTick(topic, path, done);
+    applyFolding();
+    if (others.every(other => sectionDone(other, path))) void page.call('setReviewed', path, done, { whenLoaded: true }).catch(() => {}).finally(() => renderFileProgress());
+  }
+
+  // Ticking a file as reviewed, in the panel or in GitHub, marks every section listing it done there.
+  function markFileDone(path, done) {
+    if (!finalResult) return;
+    for (const topic of analysis.topics.filter(topic => sectionPaths(topic, snapshot).has(path))) setSectionTick(topic, path, done);
+    applyFolding();
+    // Updating the checkboxes in place keeps the panel's scroll, open disclosures and focus.
+    for (const input of result.querySelectorAll('.rf-section-done input')) {
+      if (input.dataset.path === path) input.checked = done;
+    }
+  }
+
+  function setSectionTick(topic, path, done) {
     sectionTicks = sectionTicks.filter(tick => tick.topicId !== topic.id || tick.path !== path);
     if (done) sectionTicks.push({ topicId: topic.id, path });
     port?.postMessage({ type: 'set-section-tick', topicId: topic.id, path, done });
-    applyFolding();
-    if (others.every(other => sectionDone(other, path))) void page.call('setReviewed', path, done, { whenLoaded: true }).catch(() => {}).finally(() => renderFileProgress());
   }
 
   function sectionDoneToggle(topic, path) {
@@ -783,6 +799,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     const input = element('input');
     input.type = 'checkbox';
     input.checked = sectionDone(topic, path);
+    input.dataset.path = path;
     input.setAttribute('aria-label', `Done with this section in ${path}: folds its lines in GitHub’s diff`);
     input.addEventListener('change', () => markSectionDone(topic, path, input.checked));
     label.append(input);
@@ -1399,6 +1416,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     foldCounts = counts;
     renderFoldSummary();
   };
+  page.onViewedClick = (path, viewed) => markFileDone(path, viewed);
   window.addEventListener('focus', refreshConnection, eventOptions);
   window.addEventListener('pagehide', stop, eventOptions);
   loadSettings();
@@ -1416,6 +1434,7 @@ function pageBridge(port, state) {
     state,
     onPage() {},
     onFoldCounts() {},
+    onViewedClick() {},
     onCaptureProgress() {},
     call(method, ...args) {
       return new Promise((resolve, reject) => {
@@ -1463,6 +1482,7 @@ function pageBridge(port, state) {
       bridge.state = message.state;
       bridge.onPage(message.state);
     } else if (message.kind === 'fold-counts') bridge.onFoldCounts(message.counts);
+    else if (message.kind === 'viewed-click') bridge.onViewedClick(message.path, message.viewed);
     else if (message.kind === 'capture-progress') bridge.onCaptureProgress(message.message, message.files);
     else if (message.kind === 'reply') {
       const call = calls.get(message.id);

@@ -223,6 +223,7 @@ html, body { height: 100%; margin: 0; background: var(--rf-background); }
 .rf-code-refs > li + li { margin-top: 12px; }
 .rf-code-quote { margin: 2px 0 0; padding-left: 12px; }
 .rf-code-quote + .rf-code-quote { margin-top: 8px; }
+.rf-code-refs > li:has(.rf-section-done input:checked) > .rf-code-quote { display: none; }
 .rf-section-files .rf-link-button { flex: 1 1 auto; min-width: 0; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .rf-file-delta { color: var(--rf-muted); font-size: 11px; white-space: nowrap; }
 .rf-delta-add { color: var(--rf-primary); }
