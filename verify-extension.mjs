@@ -19,9 +19,8 @@ const prUrl = 'https://github.com/microsoft/vscode/pull/200000';
 const sourcePath = 'src/vs/editor/contrib/suggest/browser/suggestWidgetRenderer.ts';
 const classic = await readFile(new URL('test-fixtures/github-classic.html', import.meta.url), 'utf8');
 const react = await readFile(new URL('test-fixtures/github-react.html', import.meta.url), 'utf8');
-const blob = JSON.parse(await readFile(new URL('test-fixtures/github-source.json', import.meta.url), 'utf8'));
-const sourcePage = `<script type="application/json" data-target="react-app.embeddedData">${JSON.stringify({ payload: { blob } }).replace(/</g, '\\u003c')}</script>`;
-const fixtureStyle = '<style>:root{--color-prettylights-syntax-keyword:#cf222e;--color-prettylights-syntax-constant:#0550ae;--color-prettylights-syntax-string:#0a3069;--color-prettylights-syntax-entity:#6639ba;--color-prettylights-syntax-comment:#59636e;--bgColor-default:#fff;--bgColor-muted:#f6f8fa;--fgColor-default:#1f2328;--fgColor-muted:#59636e;--borderColor-default:#d1d9e0;--fgColor-accent:#0969da;--diffBlob-additionLine-bgColor:#dafbe1;--diffBlob-deletionLine-bgColor:#ffebe9}body{margin:24px;font:14px system-ui;color:#1f2328;background:#fff}main{max-width:1300px;margin:auto}.file{border:1px solid #d1d9e0;border-radius:6px;margin:16px 0}.file-header{background:#f6f8fa;padding:12px;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}.blob-code-inner{white-space:pre;font:12px monospace}.blob-num{width:45px;color:#59636e}.blob-code-addition{background:#dafbe1}.blob-code-hunk{background:#ddf4ff}.sr-only,template{display:none}button{cursor:pointer}</style>';
+const rawSource = await readFile(new URL('test-fixtures/github-source.txt', import.meta.url), 'utf8');
+const fixtureStyle = '<style>:root{--bgColor-default:#fff;--bgColor-muted:#f6f8fa;--fgColor-default:#1f2328;--fgColor-muted:#59636e;--borderColor-default:#d1d9e0;--fgColor-accent:#0969da;--diffBlob-additionLine-bgColor:#dafbe1;--diffBlob-deletionLine-bgColor:#ffebe9}body{margin:24px;font:14px system-ui;color:#1f2328;background:#fff}main{max-width:1300px;margin:auto}.file{border:1px solid #d1d9e0;border-radius:6px;margin:16px 0}.file-header{background:#f6f8fa;padding:12px;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}.blob-code-inner{white-space:pre;font:12px monospace}.blob-num{width:45px;color:#59636e}.blob-code-addition{background:#dafbe1}.blob-code-hunk{background:#ddf4ff}.sr-only,template{display:none}button{cursor:pointer}</style>';
 const fixture = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' + fixtureStyle + '<main><h1 class="js-issue-title">Apply font variation settings to suggestions</h1><a href="/microsoft/vscode/pull/200000/files">Files changed <span class="Counter">1</span></a>' + classic.replace(/^.*?<main>/s, '').replace(/<\/main>\s*$/, '') + '</main>';
 const description = 'Apply editor font variation settings to suggestion labels.';
 const discussionPage = `<main><div id="issue-2025089863"><div class="js-comment-body">${description}
@@ -199,7 +198,7 @@ function checkEvidence(requests) {
     assert.equal(evidence.headSha, headSha);
     assert.equal(evidence.baseSha, baseSha);
     assert.equal(evidence.files[0].path, sourcePath);
-    assert.deepEqual(evidence.context, [{ path: sourcePath, side: 'after', text: blob.rawLines.join('\n') + '\n' }], 'Both analysis passes receive the exact pinned source context.');
+    assert.deepEqual(evidence.context, [{ path: sourcePath, side: 'after', text: rawSource }], 'Both analysis passes receive the exact pinned source context.');
     if (schema.required.includes('edits')) assert.equal(evidence.description, undefined, 'Classification must not receive the PR description or linked issues.');
     else {
       assert.ok(evidence.description.startsWith(description));
@@ -335,7 +334,7 @@ async function handleEvent(message) {
           {type:'DELETION',text:'-before prerequisite',left:1,right:0}, {type:'DELETION',text:'-before prerequisite detail',left:2,right:0},
           {type:'ADDITION',text:'+after prerequisite',left:2,right:1}, {type:'ADDITION',text:'+after prerequisite detail',left:2,right:2},
           {type:'CONTEXT',text:' unchanged context',left:3,right:3},
-          {type:'DELETION',text:'-before contract',left:4,right:3}, {type:'ADDITION',text:'+after contract',html:'+<span class="pl-s">after <span class="pl-s1">contract</span></span>',left:4,right:4},
+          {type:'DELETION',text:'-before contract',left:4,right:3}, {type:'ADDITION',text:'+after contract',left:4,right:4},
           {type:'CONTEXT',text:' unchanged context',left:5,right:5},
           {type:'DELETION',text:'-before external caller',left:6,right:5}, {type:'ADDITION',text:'+after external caller',left:6,right:6},
           {type:'CONTEXT',text:' trailing context',left:7,right:7}, {type:'CONTEXT',text:' trailing context',left:8,right:8},
@@ -345,17 +344,13 @@ async function handleEvent(message) {
           {type:'CONTEXT',text:' contract gap',left:12,right:12},
           {type:'DELETION',text:'-before third contract',left:13,right:12}, {type:'ADDITION',text:'+after third contract',left:13,right:13}];
         Object.assign(route.diffSummaries[2], {linesAdded:7, linesDeleted:7, linesChanged:14});
-        const [, deletion, addition] = route.diffContents[3].diffLines;
-        deletion.html = `-<img src=x onerror="window.injectedHighlight=1">before ${changes.paths[3]}`;
-        addition.html = `+<a href="https://example.com/">after</a> ${changes.paths[3]}`;
       }
       if (changesMode === 'all-generated') for (const entry of route.diffContents) entry.newTreeEntry = { isGenerated: true };
-      if (changesMode === 'plain') for (const entry of route.diffContents) for (const line of entry.diffLines) delete line.html;
       if (changesMode === 'duplicate-summary') route.diffSummaries[4] = route.diffSummaries[0];
       if (changesMode === 'truncated-list') route.pageLimits.filesLimitExceeded = true;
       if (changesMode === 'inline-revision') route.diffContents[0].newCommitOid = '1'.repeat(40);
       if (changesMode === 'inline-base-revision') route.diffContents[1].oldCommitOid = '1'.repeat(40);
-      if (changesMode === 'merge-base-context') {
+      if (changesMode === 'merge-base-context' || changesMode === 'foreign-source') {
         route.diffContents = [{ ...route.diffContents[0], path: 'src/merge-base.ts' }];
         route.diffSummaries = [{ ...route.diffSummaries[0], path: 'src/merge-base.ts' }];
       }
@@ -388,13 +383,7 @@ async function handleEvent(message) {
       const paths = url.searchParams.get('paths').split(',').map(decodeURIComponent);
       const isRange = url.searchParams.get('range') === selectedRange;
       const entries = structuredClone((isRange ? rangeEntries : [...changes.entries, ...changes.removed]).filter(entry => paths.includes(entry.path)));
-      if (changesMode === 'guide-sections') for (const entry of entries) {
-        if (entry.path === changes.paths[5]) entry.newTreeEntry = { isGenerated: true };
-        if (entry.path !== changes.paths[4]) continue;
-        entry.diffLines[1].html = `-<span class="pl-k x-evil">before</span> ${entry.path}`;
-        entry.diffLines[2].html = `+<span class="pl-k">AFTER</span> ${entry.path}`;
-      }
-      if (changesMode === 'plain') for (const entry of entries) for (const line of entry.diffLines) delete line.html;
+      if (changesMode === 'guide-sections') for (const entry of entries) if (entry.path === changes.paths[5]) entry.newTreeEntry = { isGenerated: true };
       if (isRange && paths.includes(changes.paths[0])) {
         entries[0].isTooBig = true;
         entries[0].diffLines = [];
@@ -444,11 +433,17 @@ async function handleEvent(message) {
         headers.push({ name: 'Location', value: 'https://github.com/other/repo/issues/903' });
         body = '';
       } else { status = 404; body = '<main>Issue unavailable in this fixture.</main>'; }
-    } else if (url.pathname.includes(`/blob/${headSha}/`) || url.pathname.includes(`/blob/${rangeHead}/`) || url.pathname.includes(`/blob/${rangeBase}/`)) {
-      status = transientSourceFailure ? 503 : 200;
-      body = transientSourceFailure ? 'Temporary error' : sourcePage;
+    } else if (url.pathname.startsWith('/microsoft/vscode/raw/') && (changesMode === 'foreign-source' || [headSha, rangeHead, rangeBase].some(sha => url.pathname.includes(`/raw/${sha}/`)))) {
+      const host = changesMode !== 'foreign-source' ? 'https://raw.githubusercontent.com/microsoft/vscode' : url.pathname.includes(`/raw/${headSha}/`) ? 'https://raw.githubusercontent.com/other/vscode' : 'https://example.com/microsoft/vscode';
+      status = transientSourceFailure ? 503 : 302;
+      body = transientSourceFailure ? 'Temporary error' : '';
+      if (!transientSourceFailure) headers.push({ name: 'Location', value: `${host}${url.pathname.slice('/microsoft/vscode/raw'.length)}?token=fixture` });
     }
     else { status = 404; body = '<main>Source unavailable in this fixture.</main>'; }
+  } else if (url.origin === 'https://raw.githubusercontent.com' || changesMode === 'foreign-source' && url.origin === 'https://example.com') {
+    contentType = 'text/plain; charset=utf-8';
+    headers.push({ name: 'Access-Control-Allow-Origin', value: '*' });
+    body = rawSource;
   } else {
     await send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, message.sessionId).catch(error => { throw new Error(`${request.url}: ${error.message}`); });
     return;
@@ -633,7 +628,7 @@ try {
   assert.deepEqual(await inPage('Array.from(document.querySelector("#effort").options,option=>option.value)'), ['low','medium','high']);
   assert.equal(await inPage('document.querySelector("#effort").value'), 'high');
   await writeFile('/tmp/review-focus-extension-settings.png', Buffer.from((await page('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
-  await page('Fetch.enable', { patterns: [{ urlPattern: 'https://github.com/*' }, { urlPattern: 'https://example.com/*' }] });
+  await page('Fetch.enable', { patterns: [{ urlPattern: 'https://github.com/*' }, { urlPattern: 'https://raw.githubusercontent.com/*' }, { urlPattern: 'https://example.com/*' }] });
   const fixtureTabId = await inPage('chrome.tabs.getCurrent().then(tab => tab.id)');
   changesMode = 'collapsed-first';
   await page('Page.navigate', { url: prUrl + '/changes' });
@@ -1109,7 +1104,7 @@ try {
     const module=await import(${JSON.stringify(moduleUrl)});
     const doc=new DOMParser().parseFromString(${JSON.stringify(react)},'text/html');
     const files=module.findNativeFiles(doc);
-    const {snapshot}=await module.capturePullRequest();
+    const snapshot=await module.capturePullRequest();
     return {files:files.map(file=>({path:file.path,rows:file.rows.map(({oldLine,newLine,type,text})=>({oldLine,newLine,type,text}))})), snapshot};
   })()`);
   assert.deepEqual(modern.files.map(file => file.path), ['.github/workflows/wait-for-checks.yml', '5854', 'play with this file, not readme']);
@@ -1131,8 +1126,8 @@ try {
     const progress=[];
     const fileCounts=[];
     try {
-      const {snapshot,highlights}=await module.capturePullRequest({...${JSON.stringify(options)},onProgress:(message,files)=>{progress.push(message);if(files)fileCounts.push(files);}});
-      return {snapshot,highlights,progress,fileCounts};
+      const snapshot=await module.capturePullRequest({...${JSON.stringify(options)},onProgress:(message,files)=>{progress.push(message);if(files)fileCounts.push(files);}});
+      return {snapshot,progress,fileCounts};
     } catch(error) { return {error:error.message,progress,fileCounts}; }
   })()`);
   const lifecycleRoute = structuredClone(changes.route);
@@ -1149,13 +1144,13 @@ try {
     window.fetch = async url => {
       requests.push(url);
       if (url.includes('/files?')) return new Response(${JSON.stringify(changes.page(lifecycleRoute))});
-      if (url.includes('/blob/')) {
+      if (url.includes('/raw/')) {
         if (url.includes(${JSON.stringify('/' + headSha + '/modified.js')})) return new Response('Temporary error', {status:503});
-        return new Response('<script type="application/json" data-target="react-app.embeddedData">{"rawLines":["export const value = true;"]}</script>');
+        return new Response('export const value = true;\\n');
       }
       return new Response('<div data-testid="issue-body-viewer">Add one file, remove another, and update a third.</div>');
     };
-    try { return {snapshot:(await capturePullRequest()).snapshot,requests}; }
+    try { return {snapshot:await capturePullRequest(),requests}; }
     finally { window.fetch = originalFetch; }
   })()`);
   assert.deepEqual(lifecycleCapture.snapshot.files.map(file => [file.path, file.additions, file.deletions]), [['added.js', 2, 0], ['deleted.js', 0, 1], ['modified.js', 1, 1]], 'Added content resembling a file header must preserve complete hunks and subsequent file headers.');
@@ -1172,115 +1167,72 @@ try {
     const originalFetch = window.fetch;
     window.fetch = async url => {
       if (url.includes('/files?')) return new Response(${JSON.stringify(`<script type="application/json" data-target="react-app.embeddedData">${JSON.stringify({ payload: { diffEntryData: reactEntries } })}</script>`)});
-      if (url.includes('/blob/')) return new Response('<script type="application/json" data-target="react-app.embeddedData">{"rawLines":["export const value = true;"]}</script>');
+      if (url.includes('/raw/')) return new Response('export const value = true;\\n');
       return new Response('<div data-testid="issue-body-viewer">Update one file and delete another.</div>');
     };
-    const capture = options => capturePullRequest(options).then(({snapshot,highlights}) => ({snapshot,highlightedPaths:Object.keys(highlights)}), error => ({error:error.message}));
+    const capture = options => capturePullRequest(options).then(snapshot => ({snapshot}), error => ({error:error.message}));
     try { return {listed:await capture({fileLimit:1,listDeletedFiles:true}),analyzed:await capture({fileLimit:1})}; }
     finally { window.fetch = originalFetch; }
   })()`);
   assert.equal(reactDeletion.listed.error, undefined, 'A deleted file recognized by its diff does not count toward the file limit.');
   assert.deepEqual(reactDeletion.listed.snapshot.files.map(file => file.path), ['modified.js']);
   assert.deepEqual(reactDeletion.listed.snapshot.deletedFiles, [{ path: 'deleted.js', deletions: 2 }]);
-  assert.ok(!JSON.stringify(reactDeletion.listed).includes('DELETED_REACT_CONTENT'), 'Listed deleted files keep their rows and highlighting out of the capture.');
-  assert.ok(!reactDeletion.listed.highlightedPaths.includes('deleted.js'));
+  assert.ok(!JSON.stringify(reactDeletion.listed).includes('DELETED_REACT_CONTENT'), 'Listed deleted files keep their rows out of the capture.');
   assert.equal(reactDeletion.analyzed.error, 'This PR changes 2 files; PRiorities analyzes up to 1 (change this in Settings). Use Full diff to review it. No analysis was sent.');
 
-  const beforeHighlightingCapture = (await modelRequests()).length;
-  const batchedHighlighting = await inPage(`(async () => {
+  const sourceRoute = structuredClone(changes.route);
+  const goPaths = ['pkg/server_test.go', 'pkg/missing.go', 'pkg/huge.go', 'pkg/added.go', 'pkg/one.go', 'pkg/two.go', 'pkg/three.go', 'pkg/seven.go'];
+  sourceRoute.diffContents = goPaths.map(path => path === 'pkg/added.go'
+    ? { path, linesAdded: 1, linesDeleted: 0, diffLines: [{ type: 'HUNK', text: '@@ -0,0 +1 @@' }, { type: 'ADDITION', text: '+package pkg' }] }
+    : { path, linesAdded: 1, linesDeleted: 1, diffLines: [{ type: 'HUNK', text: '@@ -1 +1 @@' }, { type: 'DELETION', text: '-package old' }, { type: 'ADDITION', text: '+package pkg' }] }
+  ).map(entry => ({ ...entry, linesChanged: entry.linesAdded + entry.linesDeleted, oldCommitOid: baseSha, newCommitOid: headSha }));
+  sourceRoute.diffSummaries = sourceRoute.diffContents;
+  const exactSource = 'package pkg\n\nconst greeting = "olá ü"\t\n// no trailing newline';
+  const beforeSourceCapture = (await modelRequests()).length;
+  const sourceCapture = await inPage(`(async () => {
     const {capturePullRequest} = await import(${JSON.stringify(moduleUrl)});
-    const lineCount = 12000;
-    const paths = ['tests/highlighting.ts', 'src/highlighting-1.ts', 'src/highlighting-2.ts', 'src/highlighting-3.ts'];
-    const route = ${JSON.stringify(changes.route)};
-    route.diffContents = paths.map((path, index) => ({
-      path, oldCommitOid:${JSON.stringify(baseSha)}, newCommitOid:${JSON.stringify(headSha)},
-      linesAdded:index === 0 ? lineCount : 1, linesDeleted:index === 0 ? 0 : 1, linesChanged:index === 0 ? lineCount : 2,
-      diffLines:index === 0 ? [
-        {type:'HUNK',text:'@@ -0,0 +1,' + lineCount + ' @@'},
-        ...Array.from({length:lineCount}, (_, index) => ({type:'ADDITION',text:'+x',html:index % 2 ? '+x' : '+<span class="pl-k">x</span>'}))
-      ] : [
-        {type:'HUNK',text:'@@ -1 +1 @@'},
-        {type:'DELETION',text:'-x',html:'-<span class="pl-k">x</span>'},
-        {type:'ADDITION',text:'+y',html:'+<span class="pl-k">y</span>'}
-      ]
-    }));
-    route.diffSummaries = route.diffContents;
-    const embedded = data => '<script type="application/json" data-target="react-app.embeddedData">' + JSON.stringify(data) + '</script>';
-    const diffPage = embedded({payload:{pullRequestsChangesRoute:route}});
-    const sourcePages = Object.fromEntries(['x','y'].map(text => [text, embedded({rawLines:Array(lineCount).fill(text),colorizedLines:Array.from({length:lineCount}, (_, index) => index % 2 ? text : '<span class="pl-k">' + text + '</span>')})]));
     const originalFetch = window.fetch;
-    const originalParse = DOMParser.prototype.parseFromString;
-    const runs = [];
-    try {
-      for (const abortPhase of [null, 'diff', 'source']) {
-        const controller = new AbortController();
-        const counts = {diff:0,source:0};
-        const observed = {};
-        const tasks = [];
-        let phase = 'diff';
-        let finished = false;
-        let countsAtAbort;
-        let checkedRevision = false;
-        window.fetch = async url => {
-          if (url.includes('/files?')) return new Response(diffPage);
-          if (url.includes('/blob/')) return new Response(sourcePages[url.includes(${JSON.stringify('/' + headSha + '/')}) ? 'y' : 'x']);
-          return new Response('<div data-testid="issue-body-viewer">Exercise cooperative highlighting.</div>');
-        };
-        DOMParser.prototype.parseFromString = function(html, type) {
-          if (html.startsWith('<body>')) {
-            const currentPhase = phase;
-            counts[currentPhase]++;
-            if (counts[currentPhase] === 1) tasks.push(scheduler.postTask(() => {
-              observed[currentPhase] = {count:counts[currentPhase],finished};
-              if (abortPhase === currentPhase) {
-                countsAtAbort = {...counts};
-                controller.abort();
-              }
-            }, {priority:'user-blocking'}));
-          }
-          return originalParse.call(this, html, type);
-        };
-        let result;
-        try {
-          const {snapshot,highlights} = await capturePullRequest({signal:controller.signal,onProgress:message => {
-            if (message.startsWith('Reading context for ')) phase = 'source';
-            if (message.startsWith('Checking that the PR')) checkedRevision = true;
-          }});
-          const rows = snapshot.files[0].hunks[0].items[0].rows;
-          const validTokens = (lines, text) => Object.keys(lines).length === lineCount / 2 && Array.from({length:lineCount}, (_, index) => index % 2 ? !Object.hasOwn(lines,index + 1) : JSON.stringify(lines[index + 1]) === JSON.stringify([[text,'pl-k']])).every(Boolean);
-          result = {
-            diffRows:rows.length === lineCount && rows.every((row,index) => row.text === 'x' && row.newLine === index + 1),
-            diffTokens:validTokens(highlights[paths[0]].after,'x'),
-            sourceCount:snapshot.context.length,
-            sourceText:snapshot.context.every(source => source.text === ((source.side === 'before' ? 'x' : 'y') + '\\n').repeat(lineCount)),
-            sourceTokens:paths.slice(1).every(path => validTokens(highlights[path].before,'x') && validTokens(highlights[path].after,'y')),
-            warnings:snapshot.warnings
-          };
-        } catch (error) { result = {error:error.name}; }
-        finished = true;
-        await Promise.all(tasks);
-        await scheduler.yield();
-        runs.push({abortPhase,counts,countsAtAbort,observed,checkedRevision,result});
-      }
-      return runs;
-    } finally {
-      window.fetch = originalFetch;
-      DOMParser.prototype.parseFromString = originalParse;
-    }
+    const capture = async abortOnSource => {
+      const controller = new AbortController();
+      const requests = [];
+      let checkedRevision = false;
+      window.fetch = async (url, options) => {
+        requests.push(url);
+        if (url.includes('/files?')) return new Response(${JSON.stringify(changes.page(sourceRoute))});
+        if (!url.includes('/raw/')) return new Response('<div data-testid="issue-body-viewer">Read the Go sources.</div>');
+        if (abortOnSource) {
+          controller.abort();
+          options.signal.throwIfAborted();
+        }
+        if (url.endsWith(${JSON.stringify('/' + headSha + '/pkg/missing.go')})) return new Response('Not Found', {status:404});
+        const body = url.endsWith(${JSON.stringify('/' + headSha + '/pkg/huge.go')}) ? 'x'.repeat(220001) : ${JSON.stringify(exactSource)};
+        const repository = url.endsWith('/pkg/one.go') ? 'Microsoft/VSCode' : 'microsoft/vscode';
+        return Object.defineProperty(new Response(body), 'url', {value:url.replace('https://github.com/microsoft/vscode/raw/', 'https://raw.githubusercontent.com/' + repository + '/')});
+      };
+      try {
+        const snapshot = await capturePullRequest({signal:controller.signal,onProgress:message => { if (message.startsWith('Checking that the PR')) checkedRevision = true; }});
+        return {context:snapshot.context,warnings:snapshot.warnings,requests};
+      } catch (error) { return {error:error.name,checkedRevision}; }
+    };
+    try { return {complete:await capture(false),aborted:await capture(true)}; }
+    finally { window.fetch = originalFetch; }
   })()`);
-  const [highlightedCapture, ...cancelledHighlights] = batchedHighlighting;
-  assert.deepEqual(highlightedCapture.counts, {diff:12006,source:72000});
-  for (const phase of ['diff', 'source']) {
-    assert.equal(highlightedCapture.observed[phase].finished, false, `A browser task runs while ${phase} highlighting is pending.`);
-    assert.ok(highlightedCapture.observed[phase].count < 12000, `The ${phase} capture yields within the first large file.`);
-  }
-  assert.deepEqual(highlightedCapture.result, {diffRows:true,diffTokens:true,sourceCount:6,sourceText:true,sourceTokens:true,warnings:[]}, 'Yielding preserves every diff row, syntax token, and complete before/after source across six concurrent readers.');
-  for (const run of cancelledHighlights) {
-    assert.deepEqual(run.result, {error:'AbortError'}, `Cancelling during ${run.abortPhase} highlighting rejects the capture without a snapshot.`);
-    assert.deepEqual(run.counts, run.countsAtAbort, 'No additional line is parsed after cancellation during a yield.');
-    assert.equal(run.checkedRevision, false, 'An aborted capture stops before the final revision check.');
-  }
-  assert.equal((await modelRequests()).length, beforeHighlightingCapture, 'Capturing and cancelling yielded highlighting do not start analysis.');
+  const sourceRequests = sourceCapture.complete.requests.filter(url => url.includes('/raw/'));
+  assert.ok(sourceRequests.every(url => url.startsWith(`https://github.com/microsoft/vscode/raw/`)), 'Full source is read from GitHub’s raw file route.');
+  assert.equal(sourceRequests.length, 11, 'Six runtime files take the full-source slots, and the added file’s missing before side is not fetched.');
+  assert.ok(!sourceRequests.some(url => url.endsWith('/pkg/server_test.go') || url.endsWith('/pkg/seven.go')), 'A Go _test.go file is not runtime, so it takes no full-source slot.');
+  const exact = (path, side) => ({ path, side, text: exactSource });
+  assert.deepEqual(sourceCapture.complete.context, [
+    exact('pkg/missing.go', 'before'), exact('pkg/huge.go', 'before'), exact('pkg/added.go', 'after'), { path: 'pkg/added.go', side: 'before', text: '' },
+    exact('pkg/one.go', 'after'), exact('pkg/one.go', 'before'), exact('pkg/two.go', 'after'), exact('pkg/two.go', 'before'), exact('pkg/three.go', 'after'), exact('pkg/three.go', 'before')
+  ], 'Raw source reaches the snapshot byte for byte, including from a differently cased repository path on raw.githubusercontent.com.');
+  assert.deepEqual(sourceCapture.complete.warnings, [
+    'Could not read after context for pkg/missing.go; only its diff was analyzed.',
+    'Full after source for pkg/huge.go exceeded the context budget; only its diff was analyzed.',
+    'Full source was collected for 4 of 7 runtime files. Other files are represented by their complete diff.'
+  ], 'Unreadable and over-budget sources are reported apart, and the count names only files whose every side was included.');
+  assert.deepEqual(sourceCapture.aborted, {error:'AbortError',checkedRevision:false}, 'Cancelling while sources are read rejects the capture before the final revision check.');
+  assert.equal((await modelRequests()).length, beforeSourceCapture, 'Capturing source context does not start analysis.');
   deferredMode = 'missing';
   const missingDeferred = await captureFixture();
   assert.match(missingDeferred.error ?? '', /4 of 53 files/, 'A count in the deferred tabs must detect the missing 49 files before claiming the four placeholders are the complete diff.');
@@ -1345,10 +1297,6 @@ try {
   assert.ok(completeChanges.progress.includes('Reading context for 53 changed files…'));
   assert.deepEqual(completeChanges.fileCounts.at(-1), { done: 53, total: 53 }, 'Reading missing diffs reports how many of the changed files are read.');
   assert.ok(completeChanges.fileCounts.every((count, index, counts) => count.total === 53 && count.done >= (counts[index - 1]?.done ?? 0)), 'Read counts only grow.');
-  assert.deepEqual(completeChanges.highlights[changes.paths[0]], {
-    before: {1: [['before', 'pl-k'], [` ${changes.paths[0]}`]]},
-    after: {1: [['after', 'pl-k'], [` ${changes.paths[0]}`]]}
-  }, 'GitHub’s row markup becomes text tokens keyed by line, without the diff marker or its changed-word wrapper.');
   assert.equal(completeChanges.progress.some(message => message.includes('context for 4 changed files')), false);
   const lazyRequests = changesRequests.filter(request => new URL(request.url).pathname.endsWith('/page_data/diff_entries'));
   assert.deepEqual(lazyRequests.flatMap(request => new URL(request.url).searchParams.get('paths').split(',').map(decodeURIComponent)).sort(), changes.paths.slice(4).sort(), 'Fetch every missing path exactly once, preserving commas, spaces, percent signs, and Unicode.');
@@ -1369,10 +1317,6 @@ try {
   for (const request of comparisonRequests) {
     assert.equal(new URL(request.url).searchParams.get('w'), '0', 'Capture must explicitly include whitespace changes.');
   }
-  changesMode = 'plain';
-  const plainChanges = await captureFixture();
-  assert.deepEqual(plainChanges.snapshot, completeChanges.snapshot, 'Highlighting stays outside the snapshot used for model requests and saved-review keys.');
-  assert.ok(Object.values(plainChanges.highlights).every(sides => !Object.keys(sides.before).length && !Object.keys(sides.after).length));
 
   changesMode = 'deferred-large';
   changesRequests.length = 0;
@@ -1399,8 +1343,16 @@ try {
   const mergeBaseContext = await captureFixture();
   assert.equal(mergeBaseContext.error, undefined);
   assert.equal(mergeBaseContext.snapshot.baseSha, changes.baseSha);
-  const mergeBaseSources = changesRequests.map(request => new URL(request.url).pathname).filter(path => path.includes('/blob/'));
-  assert.deepEqual(mergeBaseSources.sort(), [`/microsoft/vscode/blob/${changes.baseSha}/src/merge-base.ts`, `/microsoft/vscode/blob/${changes.headSha}/src/merge-base.ts`].sort(), 'Captured before/after context must use the same commits as the diff rows.');
+  const mergeBaseSources = changesRequests.map(request => new URL(request.url)).filter(url => url.origin === 'https://github.com' && url.pathname.includes('/raw/')).map(url => url.pathname);
+  assert.deepEqual(mergeBaseSources.sort(), [`/microsoft/vscode/raw/${changes.baseSha}/src/merge-base.ts`, `/microsoft/vscode/raw/${changes.headSha}/src/merge-base.ts`].sort(), 'Captured before/after context must use the same commits as the diff rows.');
+  assert.ok(changesRequests.some(request => request.url === `https://raw.githubusercontent.com/microsoft/vscode/${changes.headSha}/src/merge-base.ts?token=fixture`), 'GitHub’s raw route redirects to raw.githubusercontent.com.');
+  assert.deepEqual(mergeBaseContext.snapshot.context, [{ path: 'src/merge-base.ts', side: 'after', text: rawSource }], 'The redirected raw body is the source context.');
+  changesMode = 'foreign-source';
+  changesRequests.length = 0;
+  const foreignSource = await captureFixture();
+  assert.ok(['https://raw.githubusercontent.com/other/vscode/', 'https://example.com/microsoft/vscode/'].every(prefix => changesRequests.some(request => request.url.startsWith(prefix))), 'Both foreign redirect targets answered with source.');
+  assert.deepEqual(foreignSource.snapshot.context, [], 'Source redirected to another repository or host is never used.');
+  assert.deepEqual(foreignSource.snapshot.warnings.filter(warning => warning.includes('merge-base.ts')), ['Could not read after context for src/merge-base.ts; only its diff was analyzed.', 'Could not read before context for src/merge-base.ts; only its diff was analyzed.']);
 
   for (const mode of ['missing', 'duplicate', 'wrong-path', 'wrong-revision', 'wrong-base-revision', 'truncated', 'duplicate-summary', 'truncated-list', 'inline-revision', 'inline-base-revision', 'generated-missing', 'generated-incomplete']) {
     changesMode = mode;
@@ -1566,7 +1518,7 @@ try {
   const listedCapture = await captureFixture({ fileLimit: 3, listDeletedFiles: true });
   assert.deepEqual(listedCapture.snapshot.files.map(file => file.path), changes.paths.slice(0, 3));
   assert.deepEqual(listedCapture.snapshot.deletedFiles, removedPaths.map(path => ({ path, deletions: 2 })));
-  assert.ok(!JSON.stringify(listedCapture).includes('DELETED_CONTENT'), 'Deleted rows and highlighting stay out of the capture.');
+  assert.ok(!JSON.stringify(listedCapture).includes('DELETED_CONTENT'), 'Deleted rows stay out of the capture.');
 
   const beforeSavedDeleted = (await modelRequests()).length;
   await page('Page.reload');
@@ -1865,8 +1817,7 @@ try {
     const parallel = await cache.cacheInfo();
     const shrunk = await cache.setCacheLimit(1);
     await cache.clearCache();
-    const highlightKeys = new Set((await Promise.all([${JSON.stringify(completeChanges.snapshot)},${JSON.stringify(plainChanges.snapshot)}].map(snapshot=>cache.reviewCacheKey(snapshot,settings)))).map(entry=>entry.key)).size;
-    return {cancellation,ticks,earlierReview,keys:new Set([original,...variants].map(entry=>entry.key)).size,highlightKeys,lru,tooLarge,parallel,shrunk,cleared:await cache.cacheInfo()};
+    return {cancellation,ticks,earlierReview,keys:new Set([original,...variants].map(entry=>entry.key)).size,lru,tooLarge,parallel,shrunk,cleared:await cache.cacheInfo()};
   })()`);
   assert.equal(cacheChecks.cancellation.preAborted, true);
   assert.equal(cacheChecks.cancellation.abortedWrite, true, 'Cancelling an uncommitted IndexedDB write must abort the transaction.');
@@ -1883,7 +1834,6 @@ try {
   assert.deepEqual([cacheChecks.ticks.replaced, cacheChecks.ticks.cleared], [{review:null,count:1}, []], 'Ticks are deleted with their review when a fresh review of the same lookup replaces it or the cache is cleared; a tick never recreates a deleted review.');
   assert.deepEqual(cacheChecks.earlierReview, {offered:false,retained:true}, 'Reviews from the old folding prompt require fresh analysis without deleting their records.');
   assert.equal(cacheChecks.keys, 9, 'Commits, intent, source context, provider, model, effort and review preferences each change the cache key.');
-  assert.equal(cacheChecks.highlightKeys, 1, 'Captures with and without highlighting share one saved-review key.');
   assert.deepEqual([cacheChecks.lru.a, cacheChecks.lru.b, cacheChecks.lru.c], [true, false, true], 'Reading A keeps it while the older B is evicted.');
   assert.equal(cacheChecks.lru.info.count, 2);
   assert.ok(cacheChecks.lru.info.usedBytes <= 1024 * 1024);
@@ -2249,8 +2199,8 @@ try {
   assert.equal(classicRange.snapshot.baseSha, rangeBase);
   assert.equal(classicRange.snapshot.headSha, rangeHead);
   assert.equal(classicRange.snapshot.files.length, 1, 'Classic capture uses the selected comparison’s file inventory, not the full PR tab count.');
-  const rangeSourceRequests = changesRequests.map(request => request.url).filter(url => url.includes('/blob/'));
-  assert.ok(rangeSourceRequests.some(url => url.includes(`/blob/${rangeBase}/`)) && rangeSourceRequests.some(url => url.includes(`/blob/${rangeHead}/`)), 'Before and after source must use the selected commits.');
+  const rangeSourceRequests = changesRequests.map(request => request.url).filter(url => url.includes('/raw/'));
+  assert.ok(rangeSourceRequests.some(url => url.includes(`/raw/${rangeBase}/`)) && rangeSourceRequests.some(url => url.includes(`/raw/${rangeHead}/`)), 'Before and after source must use the selected commits.');
   await page('Page.navigate', { url: prUrl + '/commits/' + rangeHead });
   await waitFor(() => inPanel(`document.querySelector('.rf-analyze')?.textContent === 'Analyze range' && !document.querySelector('.rf-analyze').disabled`), 'classic single-commit diff ready');
   assert.deepEqual((await captureFixture()).snapshot.files, classicRange.snapshot.files);
@@ -2639,7 +2589,7 @@ try {
   await waitFor(() => inPanel("document.querySelector('.rf-analyze').disabled && document.querySelector('.rf-status').textContent.includes('Open a GitHub pull request')"), 'non-PR navigation clears the panel');
   assert.equal(await inPanel("document.querySelectorAll('.rf-topic').length"), 0);
   await waitFor(() => inPage('document.querySelectorAll(".review-focus-native-fold, .review-focus-native-hidden").length === 0'), 'non-PR navigation restores native rows');
-  assert.equal(/\bpl-[a-z0-9]+|<span/.test(JSON.stringify(await modelRequests())), false, 'Highlighting never reaches a model request.');
+  assert.equal(/\bpl-[a-z0-9]+|<span/.test(JSON.stringify(await modelRequests())), false, 'GitHub’s highlighted row markup never reaches a model request.');
   assert.ok(workers.length > 0);
   assert.deepEqual(eventErrors, []);
   assert.deepEqual(exceptions, []);

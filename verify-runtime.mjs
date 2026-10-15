@@ -66,10 +66,10 @@ async function until(predicate, description) {
   assert.ok(predicate(), description);
 }
 
-async function beginReview(input = snapshot, highlights) {
+async function beginReview(input = snapshot) {
   const reviewPort = port();
   await onConnect.emit(reviewPort);
-  await reviewPort.onMessage.emit({ type: 'analyze', snapshot: input, highlights, force: true });
+  await reviewPort.onMessage.emit({ type: 'analyze', snapshot: input, force: true });
   return reviewPort;
 }
 
@@ -1512,8 +1512,7 @@ try {
       return response(request);
     };
     const beforeNavigation = requests.length;
-    const highlights = { 'account.js': { before: {}, after: { 3: [['return', 'pl-k'], [' null;']] } } };
-    const navigating = await beginReview(snapshot, highlights);
+    const navigating = await beginReview(snapshot);
     await until(() => held, `The ${stage} request should start before navigation.`);
     const progress = { type: 'progress', phase: 'writing', sections: stage === 'checking' ? ['Handle the new null return', `Long ${'😀'.repeat(195)}`] : [], labelled: 1, thought: `Weighing ${'😀'.repeat(191)}` };
     const beforeInvalidProgress = navigating.messages.length;
@@ -1533,7 +1532,6 @@ try {
     const resumed = await resumeReview(navigating, snapshot, `${snapshot.url}/changes`);
     assert.equal(resumed.messages[0].type, 'resumed');
     assert.deepEqual(resumed.messages[0].snapshot, snapshot);
-    assert.deepEqual(resumed.messages[0].highlights, highlights, 'Resuming returns the captured highlighting to the Guide.');
     assert.equal(resumed.messages[1].type, 'session', 'Pinned settings arrive before the file results that use them.');
     assert.equal(resumed.messages.find(message => message.type === 'file-progress').state, stage === 'checking' ? 'classified' : stage);
     if (stage === 'checking') assert.deepEqual(resumed.messages.at(-1), relayed, 'Resuming re-sends the latest PR review progress.');
@@ -1547,7 +1545,6 @@ try {
     await waitForSettlement(resumed);
     assert.equal(resumed.messages.at(-1).type, 'result');
     assert.equal(requests.length - beforeNavigation, 2, 'Every session runs exactly once despite navigation.');
-    assert.ok(requests.slice(beforeNavigation).every(request => !JSON.stringify(request).includes('pl-k')), 'Highlighting never reaches the model.');
     assert.equal(navigating.messages.length, beforeDisconnect, 'A detached document must not receive later results.');
     await closeTab(resumed);
   }
