@@ -130,7 +130,6 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
   let settingsLoaded = false;
   let savedReviewChecked = false;
   let snapshot;
-  let highlights;
   let analysis;
   let sectionTicks = [];
   let port;
@@ -502,7 +501,6 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
     nativeNotice.hidden = true;
     nativeNotice.replaceChildren();
     snapshot = undefined;
-    highlights = undefined;
     analysis = undefined;
     sectionTicks = [];
     finalResult = false;
@@ -872,7 +870,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       };
       const captured = await page.call('capture', { fileLimit, listDeletedFiles });
       if (request !== operation || !isActive()) return;
-      ({ snapshot, highlights } = captured);
+      snapshot = captured;
       void page.call('setSnapshot', snapshot).catch(() => {});
       reviewStage = 'files';
       for (const file of snapshot.files) {
@@ -882,7 +880,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
       for (const file of snapshot.deletedFiles ?? []) fileStates.set(file.path, deletedFileState);
       const connection = connectReview(request, { restoringReview, cacheOnly });
       connection.postMessage({ type: 'discard' });
-      connection.postMessage({ type: 'analyze', snapshot, highlights, force, cacheOnly });
+      connection.postMessage({ type: 'analyze', snapshot, force, cacheOnly });
     } catch (failure) {
       if (request !== operation) return;
       finishFailure(failure.message, request);
@@ -906,7 +904,7 @@ function startPanel(page, { autostart = false, onAutostart = () => {} } = {}) {
         return;
       }
       if (message.type === 'resumed') {
-        ({ snapshot, highlights } = message);
+        snapshot = message.snapshot;
         void page.call('setSnapshot', snapshot).catch(() => {});
         attempted = true;
         busy = true;

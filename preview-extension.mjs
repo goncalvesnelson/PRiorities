@@ -15,14 +15,12 @@ import { installNativeHost } from './install-native-host.mjs';
 const dark = process.argv.includes('--dark');
 const shot = process.argv.find(arg => arg.startsWith('--shot='))?.slice('--shot='.length);
 const prUrl = 'https://github.com/microsoft/vscode/pull/200000';
-const headSha = '9ed10330f92962e92c6b121fd0cf6588268e89a8';
 const sourcePath = 'src/vs/editor/contrib/suggest/browser/suggestWidgetRenderer.ts';
 const classic = await readFile(new URL('test-fixtures/github-classic.html', import.meta.url), 'utf8');
-const blob = JSON.parse(await readFile(new URL('test-fixtures/github-source.json', import.meta.url), 'utf8'));
-const sourcePage = `<script type="application/json" data-target="react-app.embeddedData">${JSON.stringify({ payload: { blob } }).replace(/</g, '\\u003c')}</script>`;
+const rawSource = await readFile(new URL('test-fixtures/github-source.txt', import.meta.url), 'utf8');
 const theme = dark
-  ? ':root{--color-prettylights-syntax-keyword:#ff7b72;--color-prettylights-syntax-constant:#79c0ff;--color-prettylights-syntax-string:#a5d6ff;--color-prettylights-syntax-entity:#d2a8ff;--color-prettylights-syntax-comment:#9198a1}body{color:#f0f6fc;background:#0d1117}.file{border-color:#3d444d}.file-header{background:#151b23}.blob-code-addition,.blob-num-addition{background:#12261e}.blob-code-deletion,.blob-num-deletion{background:#331c1f}.blob-code-hunk,.blob-num-hunk{background:#162536;color:#9198a1}.blob-num{color:#9198a1}a{color:#4493f8}'
-  : ':root{--color-prettylights-syntax-keyword:#cf222e;--color-prettylights-syntax-constant:#0550ae;--color-prettylights-syntax-string:#0a3069;--color-prettylights-syntax-entity:#6639ba;--color-prettylights-syntax-comment:#59636e}body{color:#1f2328;background:#fff}.file{border-color:#d1d9e0}.file-header{background:#f6f8fa}.blob-code-addition,.blob-num-addition{background:#dafbe1}.blob-code-deletion,.blob-num-deletion{background:#ffebe9}.blob-code-hunk,.blob-num-hunk{background:#ddf4ff;color:#59636e}.blob-num{color:#59636e}a{color:#0969da}';
+  ? 'body{color:#f0f6fc;background:#0d1117}.file{border-color:#3d444d}.file-header{background:#151b23}.blob-code-addition,.blob-num-addition{background:#12261e}.blob-code-deletion,.blob-num-deletion{background:#331c1f}.blob-code-hunk,.blob-num-hunk{background:#162536;color:#9198a1}.blob-num{color:#9198a1}a{color:#4493f8}'
+  : 'body{color:#1f2328;background:#fff}.file{border-color:#d1d9e0}.file-header{background:#f6f8fa}.blob-code-addition,.blob-num-addition{background:#dafbe1}.blob-code-deletion,.blob-num-deletion{background:#ffebe9}.blob-code-hunk,.blob-num-hunk{background:#ddf4ff;color:#59636e}.blob-num{color:#59636e}a{color:#0969da}';
 const pageStyle = `<style>${theme}body{margin:24px;font:14px system-ui}main{max-width:1300px;margin:auto}.file{border:1px solid;border-radius:6px;margin:16px 0}.file-header{padding:12px;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%}.blob-code-inner{white-space:pre;font:12px ui-monospace,monospace}.blob-num{width:45px;text-align:right;padding:0 8px;font:12px ui-monospace,monospace}.sr-only,template{display:none}</style>`;
 const filesPage = `<!doctype html><html data-color-mode="${dark ? 'dark' : 'light'}"><meta charset="utf-8">${pageStyle}<main><h1 class="js-issue-title">Apply font variation settings to suggestions</h1><a href="/microsoft/vscode/pull/200000/files">Files changed <span class="Counter">1</span></a>${classic.replace(/^.*?<main>/s, '').replace(/<\/main>\s*$/, '')}</main></html>`;
 const discussionPage = '<main><div id="issue-1"><div class="js-comment-body">Apply editor font variation settings to suggestion labels, so suggestions match the editor when a variable font is configured.</div></div></main>';
@@ -116,7 +114,7 @@ async function route({ params: { request, requestId }, sessionId }) {
   let body = '<main>Not part of the preview fixture.</main>';
   if (url.pathname.endsWith('/files')) body = filesPage;
   else if (url.pathname === new URL(prUrl).pathname) body = discussionPage;
-  else if (url.pathname.includes(`/blob/${headSha}/`) || url.pathname.includes('/blob/')) body = sourcePage;
+  else if (url.pathname.includes('/raw/')) body = rawSource;
   else status = 404;
   return send('Fetch.fulfillRequest', { requestId, responseCode: status, responseHeaders: [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }], body: Buffer.from(body).toString('base64') }, sessionId);
 }

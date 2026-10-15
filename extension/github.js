@@ -3,8 +3,6 @@ import { defaultFileLimit, isGeneratedFile, maxChangedFiles, validateSnapshot } 
 
 const shaPattern = /^[a-f0-9]{40}$/;
 const MAX_HTML = 16_000_000;
-const MAX_HIGHLIGHT_HTML = 500_000;
-const HIGHLIGHT_BATCH_MS = 8;
 const diffFragmentSelector = '.js-diff-progressive-container include-fragment[src], .js-file include-fragment[src], .js-file include-fragment.js-diff-entry-loader[data-fragment-url]';
 
 export function pullRequestLocation(href) {
@@ -198,8 +196,7 @@ function separateDeletedFiles(loaded, { fileLimit, listDeletedFiles }) {
   checkFileCount(loaded.files.length, deleted.length, fileLimit);
   if (!listDeletedFiles) return loaded;
   const deletedPaths = new Set(deleted.map(file => file.path));
-  const highlights = Object.fromEntries(Object.entries(loaded.highlights ?? {}).filter(([path]) => !deletedPaths.has(path)));
-  return { ...loaded, files: loaded.files.filter(file => !deletedPaths.has(file.path)), highlights, deletedFiles: deleted.map(file => ({ path: file.path, deletions: file.deletions })) };
+  return { ...loaded, files: loaded.files.filter(file => !deletedPaths.has(file.path)), deletedFiles: deleted.map(file => ({ path: file.path, deletions: file.deletions })) };
 }
 
 function repositoryUrl(href, identity) {
@@ -220,14 +217,14 @@ async function loadFileCount(doc, identity, signal) {
   return null;
 }
 
-async function fetchText(url, signal, redirect = 'follow', headers = { Accept: 'text/html' }) {
+async function fetchText(url, signal, redirect = 'follow', headers = { Accept: 'text/html' }, rawOrigin) {
   const response = await fetch(url, { credentials: 'same-origin', signal, redirect, headers });
   if (!response.ok) throw new Error(`GitHub could not load the PR source (${response.status}). Check that you can open this repository, then retry.`);
   const requested = new URL(url);
   const received = new URL(response.url || url);
   if (received.pathname.startsWith('/login')) throw new Error('Sign in to GitHub, then analyze this PR again.');
   const repository = requested.pathname.split('/').slice(0, 3).join('/') + '/';
-  if (received.origin !== requested.origin || !received.pathname.toLowerCase().startsWith(repository.toLowerCase())) throw new Error('GitHub redirected this source outside the requested repository.');
+  if (received.origin !== requested.origin && received.origin !== rawOrigin || !received.pathname.toLowerCase().startsWith(repository.toLowerCase())) throw new Error('GitHub redirected this source outside the requested repository.');
   if (Number(response.headers.get('content-length')) > MAX_HTML) throw new Error('This GitHub page is too large for the prototype.');
   const text = await response.text();
   if (text.length > MAX_HTML) throw new Error('This GitHub page is too large for the prototype.');
@@ -260,71 +257,11 @@ async function fetchDocument(url, signal, redirect = 'follow') {
   return new DOMParser().parseFromString(await fetchText(url, signal, redirect), 'text/html');
 }
 
-// GitHub's highlighting markup is untrusted: only nested pl-* spans whose text exactly matches the captured line are kept.
-function highlightTokens(html, text) {
-  if (typeof html !== 'string') return null;
-  const tokens = [];
-  const read = (parent, classes) => [...parent.childNodes].every(node => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      tokens.push([node.data, ...classes]);
-      return true;
-    }
-    const className = node.localName === 'span' && node.attributes.length === 1 ? node.getAttribute('class') : null;
-    const names = className?.split(' ');
-    // GitHub wraps changed words in x spans; their text keeps the surrounding syntax classes.
-    if (names?.every(name => /^x(?:-first|-last)?$/.test(name))) return read(node, classes);
-    if (!names?.every(name => /^pl-[a-z0-9]+$/.test(name))) return false;
-    return read(node, [...classes, className]);
-  });
-  // The body tag keeps leading indentation, which the HTML parser otherwise drops.
-  const body = new DOMParser().parseFromString(`<body>${html}`, 'text/html').body;
-  const highlighted = read(body, []) && tokens.some(token => token.length > 1);
-  return highlighted && tokens.map(([part]) => part).join('') === text ? tokens : null;
-}
-
-async function highlightInBatches(items, visit, batch) {
-  batch.signal?.throwIfAborted();
-  for (let index = 0; index < items.length; index++) {
-    if (performance.now() >= batch.deadline) {
-      await scheduler.yield();
-      batch.signal?.throwIfAborted();
-      batch.deadline = performance.now() + HIGHLIGHT_BATCH_MS;
-    }
-    visit(items[index], index);
-  }
-}
-
-async function diffHighlights(file, entry, batch) {
-  const sides = { before: {}, after: {} };
-  const lines = entry.diffLines.filter(line => line.type !== 'HUNK');
-  if (JSON.stringify(lines.map(line => line.html)).length > MAX_HIGHLIGHT_HTML) return sides;
-  const rows = file.hunks.flatMap(hunk => hunk.items.flatMap(item => item.type === 'edit' ? item.rows : [item]));
-  await highlightInBatches(rows, (row, index) => {
-    const tokens = highlightTokens(lines[index].html, lines[index].text);
-    if (!tokens) return;
-    tokens[0][0] = tokens[0][0].slice(1);
-    if (!tokens[0][0]) tokens.shift();
-    if (row.type === 'delete') sides.before[row.oldLine] = tokens;
-    else sides.after[row.newLine] = tokens;
-  }, batch);
-  return sides;
-}
-
-async function sourceHighlights({ rawLines, colorizedLines }, batch) {
-  const lines = {};
-  if (!Array.isArray(colorizedLines) || colorizedLines.length !== rawLines.length || JSON.stringify(colorizedLines).length > MAX_HIGHLIGHT_HTML) return lines;
-  await highlightInBatches(rawLines, (text, index) => {
-    const tokens = highlightTokens(colorizedLines[index], text);
-    if (tokens) lines[index + 1] = tokens;
-  }, batch);
-  return lines;
-}
-
 function needsDiffText(file) {
   return Boolean(file.isTooBig || file.truncatedReason || (Array.isArray(file.diffLines) && !file.diffLines.length && file.linesChanged > 0 && !file.isBinary && !file.isSubmodule));
 }
 
-async function parseEntries(entries, batch) {
+function parseEntries(entries) {
   const patches = entries.map(file => {
     if (!file || typeof file.path !== 'string' || !Array.isArray(file.diffLines)) throw new Error('GitHub returned an unsupported diff entry. No analysis was sent.');
     if (needsDiffText(file)) throw new Error(`GitHub has not supplied the full text diff for ${file.path}. Load it and retry.`);
@@ -337,14 +274,12 @@ async function parseEntries(entries, batch) {
   });
   const files = parseDiff(patches.join('\n'));
   assertCompleteHunks(files);
-  const highlights = {};
   for (let index = 0; index < files.length; index++) {
     const entry = entries[index];
     if (entry.isGenerated === true || entry.newTreeEntry?.isGenerated === true || !entry.newTreeEntry && entry.oldTreeEntry?.isGenerated === true) files[index].isGenerated = true;
     if (entry.diffLines.length && (files[index].additions !== entry.linesAdded || files[index].deletions !== entry.linesDeleted)) throw new Error(`GitHub supplied an incomplete diff for ${entry.path}. No analysis was sent.`);
-    highlights[entry.path] = await diffHighlights(files[index], entry, batch);
   }
-  return { files, highlights, warnings: files.filter(file => !file.hunks.length).map(file => `No text diff was available for ${file.path}; inspect it in GitHub. It will not be folded.`) };
+  return { files, warnings: files.filter(file => !file.hunks.length).map(file => `No text diff was available for ${file.path}; inspect it in GitHub. It will not be folded.`) };
 }
 
 async function fetchChangeData(doc, identity, endpoint, params, signal) {
@@ -365,7 +300,7 @@ function fetchChangeEntries(doc, identity, range, paths, signal) {
   return fetchChangeData(doc, identity, 'diff_entries', params, signal);
 }
 
-async function loadChanges(doc, route, identity, { fileLimit, listDeletedFiles }, signal, onProgress, batch) {
+async function loadChanges(doc, route, identity, { fileLimit, listDeletedFiles }, signal, onProgress) {
   const { diffSummaries, diffContents, comparison, pageLimits } = route;
   if (!Array.isArray(diffSummaries) || !diffSummaries.length || !Array.isArray(diffContents)) throw new Error('GitHub did not supply a readable list of changed files. No analysis was sent.');
   const selected = comparison?.selectedRange ?? (comparison?.viewing === 'FULL' ? comparison.fullDiff : null);
@@ -414,17 +349,17 @@ async function loadChanges(doc, route, identity, { fileLimit, listDeletedFiles }
     entries.set(entry.path, { ...loaded, diffLines: data.diffEntryLines, isTooBig: false, truncatedReason: null });
   });
   if (entries.size !== summaries.size) throw new Error(`GitHub supplied ${entries.size} of ${summaries.size} files. No analysis was sent.`);
-  const loaded = await parseEntries([...summaries.keys()].map(path => entries.get(path)), batch);
+  const loaded = parseEntries([...summaries.keys()].map(path => entries.get(path)));
   return listDeletedFiles ? { ...loaded, deletedFiles: deleted.map(summary => ({ path: summary.path, deletions: summary.linesDeleted })) } : loaded;
 }
 
-async function loadFiles(doc, identity, limits, signal, onProgress, batch) {
+async function loadFiles(doc, identity, limits, signal, onProgress) {
   const changes = changesRoute(doc);
-  if (changes) return loadChanges(doc, changes, identity, limits, signal, onProgress, batch);
+  if (changes) return loadChanges(doc, changes, identity, limits, signal, onProgress);
   const modern = reactDiff(doc);
   if (modern) {
     if (modern.moreDiffsToLoad || modern.asyncDiffLoadInfo?.truncated || modern.ignoreWhitespace || Number.isInteger(modern.headerInfo?.filesChanged) && modern.headerInfo.filesChanged !== modern.diffEntryData.length) throw new Error('GitHub supplied a partial or whitespace-filtered diff. Load all files with whitespace changes shown, then retry.');
-    return separateDeletedFiles(await parseEntries(modern.diffEntryData, batch), limits);
+    return separateDeletedFiles(parseEntries(modern.diffEntryData), limits);
   }
   const expected = await loadFileCount(doc, identity, signal);
   if (expected === null) throw new Error('GitHub did not supply the total changed-file count. Refresh the PR and retry. No analysis was sent.');
@@ -449,15 +384,6 @@ async function loadFiles(doc, identity, limits, signal, onProgress, batch) {
   assertCompleteHunks(files);
   const warnings = files.filter(file => !file.hunks.length).map(file => `No text diff was available for ${file.path}; inspect it in GitHub. It will not be folded.`);
   return separateDeletedFiles({ files, warnings }, limits);
-}
-
-async function readSource(doc, batch) {
-  for (const data of embeddedData(doc)) {
-    const source = findObject(data, item => Array.isArray(item.rawLines) && item.rawLines.every(line => typeof line === 'string'));
-    if (source) return { text: source.rawLines.join('\n') + '\n', highlights: await sourceHighlights(source, batch) };
-  }
-  const lines = [...doc.querySelectorAll('table .js-file-line')];
-  return lines.length ? { text: lines.map(line => line.textContent).join('\n') + '\n', highlights: {} } : null;
 }
 
 function originalBody(doc) {
@@ -523,10 +449,8 @@ export async function capturePullRequest({ onProgress = () => {}, signal, fileLi
   if (!identity?.baseSha || !identity.headSha) throw new Error('GitHub did not identify the commits in this diff. Refresh Files changed and retry.');
   if (initial.baseSha && initial.baseSha !== identity.baseSha || initial.headSha && initial.headSha !== identity.headSha) throw new Error('The comparison changed while reading its diffs. Analyze again to review the selected commits.');
   const descriptionWarnings = [];
-  // Diff files and concurrent source readers share a budget so their microtasks cannot accumulate uninterrupted highlighting work.
-  const batch = { deadline: performance.now() + HIGHLIGHT_BATCH_MS, signal };
-  const [{ files, warnings, highlights = {}, deletedFiles }, description] = await Promise.all([
-    loadFiles(doc, identity, { fileLimit, listDeletedFiles }, signal, onProgress, batch),
+  const [{ files, warnings, deletedFiles }, description] = await Promise.all([
+    loadFiles(doc, identity, { fileLimit, listDeletedFiles }, signal, onProgress),
     readDescription(initial.url, identity, descriptionWarnings, signal)
   ]);
   if (!files.length) throw new Error('Every file in this PR is deleted, and Settings lists deleted files without analyzing them. Use Full diff to review it, or turn that setting off. No analysis was sent.');
@@ -535,15 +459,17 @@ export async function capturePullRequest({ onProgress = () => {}, signal, fileLi
   onProgress(`Reading context for ${files.length} changed files…`);
   const context = [];
   let contextBytes = 0;
-  const runtime = files.filter(file => file.hunks.length && !isGeneratedFile(file) && !/(^|\/)(tests?|__tests__|__snapshots__|vendor|node_modules)\/|(?:\.snap|\.lock|\.min\.js)$|(?:\.test|\.spec)\./i.test(file.path));
-  const sides = runtime.slice(0, 6).flatMap(file => ['after', 'before'].map(side => ({ file, side })));
+  const runtime = files.filter(file => file.hunks.length && !isGeneratedFile(file) && !/(^|\/)(tests?|__tests__|__snapshots__|vendor|node_modules)\/|(?:\.snap|\.lock|\.min\.js|_test\.go)$|(?:\.test|\.spec)\./i.test(file.path));
+  const sourced = runtime.slice(0, 6);
+  const sides = sourced.flatMap(file => ['after', 'before'].map(side => ({ file, side })));
   const sources = await mapLimited(sides, async ({ file, side }) => {
     const emptySide = side === 'before' ? /^@@ -0,0 / : / \+0,0 @@/;
     if (file.hunks.length === 1 && emptySide.test(file.hunks[0].header)) return { empty: true };
     const sha = side === 'after' ? identity.headSha : identity.baseSha;
     const path = file.path.split('/').map(encodeURIComponent).join('/');
     try {
-      return { source: await readSource(await fetchDocument(`https://github.com/${identity.owner}/${identity.repo}/blob/${sha}/${path}`, signal), batch) };
+      // GitHub's raw route redirects to raw.githubusercontent.com, which serves the exact file bytes under the same owner and repository path.
+      return { text: await fetchText(`https://github.com/${identity.owner}/${identity.repo}/raw/${sha}/${path}`, signal, 'follow', {}, 'https://raw.githubusercontent.com') };
     } catch (error) {
       if (signal?.aborted) throw error;
       return { failed: true };
@@ -551,7 +477,7 @@ export async function capturePullRequest({ onProgress = () => {}, signal, fileLi
   });
   // The context budget is spent in file order, so the snapshot and its saved-review key match a sequential read.
   sides.forEach(({ file, side }, index) => {
-    const { empty, failed, source } = sources[index];
+    const { empty, failed, text } = sources[index];
     if (empty) {
       context.push({ path: file.path, side, text: '' });
       return;
@@ -560,20 +486,18 @@ export async function capturePullRequest({ onProgress = () => {}, signal, fileLi
       warnings.push(`Could not read ${side} context for ${file.path}; only its diff was analyzed.`);
       return;
     }
-    if (source === null || source.text.length > 220_000 || contextBytes + source.text.length > 700_000) {
-      warnings.push(`Full ${side} source for ${file.path} was unavailable or exceeded the context budget; only its diff was analyzed.`);
+    if (text.length > 220_000 || contextBytes + text.length > 700_000) {
+      warnings.push(`Full ${side} source for ${file.path} exceeded the context budget; only its diff was analyzed.`);
       return;
     }
-    context.push({ path: file.path, side, text: source.text });
-    contextBytes += source.text.length;
-    highlights[file.path] ??= { before: {}, after: {} };
-    Object.assign(highlights[file.path][side], source.highlights);
+    context.push({ path: file.path, side, text });
+    contextBytes += text.length;
   });
-  if (runtime.length > 6) warnings.push(`Full source was collected for 6 of ${runtime.length} runtime files. Other files are represented by their complete diff.`);
+  // Empty sides of added and deleted files are part of the context too, so a file is complete when both of its sides are.
+  const collected = sourced.filter(file => context.filter(source => source.path === file.path).length === 2).length;
+  if (runtime.length > 6) warnings.push(`Full source was collected for ${collected} of ${runtime.length} runtime files. Other files are represented by their complete diff.`);
   onProgress('Checking that the PR has not changed…');
   const latest = readPageIdentity(await fetchDocument(filesUrl, signal), filesUrl);
   if (latest?.headSha !== identity.headSha || latest?.baseSha !== identity.baseSha || location.pathname !== pathname) throw new Error('The comparison changed while reading it. Analyze again to review the selected commits.');
-  // Highlighting stays outside the snapshot so it never reaches the model or the saved-review key.
-  const snapshot = validateSnapshot({ url: initial.url, title, description, baseSha: identity.baseSha, headSha: identity.headSha, files, context, warnings, ...(deletedFiles ? { deletedFiles } : {}) });
-  return { snapshot, highlights };
+  return validateSnapshot({ url: initial.url, title, description, baseSha: identity.baseSha, headSha: identity.headSha, files, context, warnings, ...(deletedFiles ? { deletedFiles } : {}) });
 }
