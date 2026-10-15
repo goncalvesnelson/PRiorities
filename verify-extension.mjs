@@ -434,7 +434,7 @@ async function handleEvent(message) {
         body = '';
       } else { status = 404; body = '<main>Issue unavailable in this fixture.</main>'; }
     } else if (url.pathname.startsWith('/microsoft/vscode/raw/') && (changesMode === 'foreign-source' || [headSha, rangeHead, rangeBase].some(sha => url.pathname.includes(`/raw/${sha}/`)))) {
-      const host = changesMode !== 'foreign-source' ? 'https://raw.githubusercontent.com/microsoft/vscode' : url.pathname.includes(`/raw/${headSha}/`) ? 'https://raw.githubusercontent.com/other/vscode' : 'https://example.com/microsoft/vscode';
+      const host = changesMode !== 'foreign-source' ? 'https://raw.githubusercontent.com/microsoft/vscode' : url.pathname.includes(`/raw/${headSha}/`) ? 'https://raw.githubusercontent.com/microsoft/vscode-fork' : 'https://example.com/microsoft/vscode';
       status = transientSourceFailure ? 503 : 302;
       body = transientSourceFailure ? 'Temporary error' : '';
       if (!transientSourceFailure) headers.push({ name: 'Location', value: `${host}${url.pathname.slice('/microsoft/vscode/raw'.length)}?token=fixture` });
@@ -1187,7 +1187,8 @@ try {
     : { path, linesAdded: 1, linesDeleted: 1, diffLines: [{ type: 'HUNK', text: '@@ -1 +1 @@' }, { type: 'DELETION', text: '-package old' }, { type: 'ADDITION', text: '+package pkg' }] }
   ).map(entry => ({ ...entry, linesChanged: entry.linesAdded + entry.linesDeleted, oldCommitOid: baseSha, newCommitOid: headSha }));
   sourceRoute.diffSummaries = sourceRoute.diffContents;
-  const exactSource = 'package pkg\n\nconst greeting = "olá ü"\t\n// no trailing newline';
+  const servedSource = 'package pkg\r\n\r\nconst greeting = "olá ü"\t\r// no trailing newline';
+  const exactSource = 'package pkg\n\nconst greeting = "olá ü"\t\r// no trailing newline';
   const beforeSourceCapture = (await modelRequests()).length;
   const sourceCapture = await inPage(`(async () => {
     const {capturePullRequest} = await import(${JSON.stringify(moduleUrl)});
@@ -1205,9 +1206,10 @@ try {
           options.signal.throwIfAborted();
         }
         if (url.endsWith(${JSON.stringify('/' + headSha + '/pkg/missing.go')})) return new Response('Not Found', {status:404});
-        const body = url.endsWith(${JSON.stringify('/' + headSha + '/pkg/huge.go')}) ? 'x'.repeat(220001) : ${JSON.stringify(exactSource)};
+        const declaredTooLarge = url.endsWith(${JSON.stringify('/' + headSha + '/pkg/huge.go')});
+        const body = url.endsWith(${JSON.stringify('/' + baseSha + '/pkg/huge.go')}) ? 'é'.repeat(110001) : ${JSON.stringify(servedSource)};
         const repository = url.endsWith('/pkg/one.go') ? 'Microsoft/VSCode' : 'microsoft/vscode';
-        return Object.defineProperty(new Response(body), 'url', {value:url.replace('https://github.com/microsoft/vscode/raw/', 'https://raw.githubusercontent.com/' + repository + '/')});
+        return Object.defineProperty(new Response(body, {headers:declaredTooLarge ? {'Content-Length':'220001'} : {}}), 'url', {value:url.replace('https://github.com/microsoft/vscode/raw/', 'https://raw.githubusercontent.com/' + repository + '/')});
       };
       try {
         const snapshot = await capturePullRequest({signal:controller.signal,onProgress:message => { if (message.startsWith('Checking that the PR')) checkedRevision = true; }});
@@ -1223,14 +1225,15 @@ try {
   assert.ok(!sourceRequests.some(url => url.endsWith('/pkg/server_test.go') || url.endsWith('/pkg/seven.go')), 'A Go _test.go file is not runtime, so it takes no full-source slot.');
   const exact = (path, side) => ({ path, side, text: exactSource });
   assert.deepEqual(sourceCapture.complete.context, [
-    exact('pkg/missing.go', 'before'), exact('pkg/huge.go', 'before'), exact('pkg/added.go', 'after'), { path: 'pkg/added.go', side: 'before', text: '' },
+    exact('pkg/missing.go', 'before'), exact('pkg/added.go', 'after'), { path: 'pkg/added.go', side: 'before', text: '' },
     exact('pkg/one.go', 'after'), exact('pkg/one.go', 'before'), exact('pkg/two.go', 'after'), exact('pkg/two.go', 'before'), exact('pkg/three.go', 'after'), exact('pkg/three.go', 'before')
-  ], 'Raw source reaches the snapshot byte for byte, including from a differently cased repository path on raw.githubusercontent.com.');
+  ], 'Raw source reaches the snapshot with CRLF endings as LF and a lone CR kept, as git numbers lines, including from a differently cased repository path on raw.githubusercontent.com.');
   assert.deepEqual(sourceCapture.complete.warnings, [
     'Could not read after context for pkg/missing.go; only its diff was analyzed.',
     'Full after source for pkg/huge.go exceeded the context budget; only its diff was analyzed.',
+    'Full before source for pkg/huge.go exceeded the context budget; only its diff was analyzed.',
     'Full source was collected for 4 of 7 runtime files. Other files are represented by their complete diff.'
-  ], 'Unreadable and over-budget sources are reported apart, and the count names only files whose every side was included.');
+  ], 'Unreadable and over-budget sources are reported apart, a source over 220,000 bytes is over budget whether its Content-Length or its decoded UTF-8 says so, and the count names only files whose every side was included.');
   assert.deepEqual(sourceCapture.aborted, {error:'AbortError',checkedRevision:false}, 'Cancelling while sources are read rejects the capture before the final revision check.');
   assert.equal((await modelRequests()).length, beforeSourceCapture, 'Capturing source context does not start analysis.');
   deferredMode = 'missing';
@@ -1350,7 +1353,7 @@ try {
   changesMode = 'foreign-source';
   changesRequests.length = 0;
   const foreignSource = await captureFixture();
-  assert.ok(['https://raw.githubusercontent.com/other/vscode/', 'https://example.com/microsoft/vscode/'].every(prefix => changesRequests.some(request => request.url.startsWith(prefix))), 'Both foreign redirect targets answered with source.');
+  assert.ok(['https://raw.githubusercontent.com/microsoft/vscode-fork/', 'https://example.com/microsoft/vscode/'].every(prefix => changesRequests.some(request => request.url.startsWith(prefix))), 'Both foreign redirect targets answered with source.');
   assert.deepEqual(foreignSource.snapshot.context, [], 'Source redirected to another repository or host is never used.');
   assert.deepEqual(foreignSource.snapshot.warnings.filter(warning => warning.includes('merge-base.ts')), ['Could not read after context for src/merge-base.ts; only its diff was analyzed.', 'Could not read before context for src/merge-base.ts; only its diff was analyzed.']);
 
