@@ -217,7 +217,7 @@ async function loadFileCount(doc, identity, signal) {
   return null;
 }
 
-async function fetchText(url, signal, redirect = 'follow', headers = { Accept: 'text/html' }, rawOrigin) {
+async function fetchText(url, signal, { redirect = 'follow', headers = { Accept: 'text/html' }, rawOrigin, maxBytes = MAX_HTML } = {}) {
   const response = await fetch(url, { credentials: 'same-origin', signal, redirect, headers });
   if (!response.ok) throw new Error(`GitHub could not load the PR source (${response.status}). Check that you can open this repository, then retry.`);
   const requested = new URL(url);
@@ -225,9 +225,10 @@ async function fetchText(url, signal, redirect = 'follow', headers = { Accept: '
   if (received.pathname.startsWith('/login')) throw new Error('Sign in to GitHub, then analyze this PR again.');
   const repository = requested.pathname.split('/').slice(0, 3).join('/') + '/';
   if (received.origin !== requested.origin && received.origin !== rawOrigin || !received.pathname.toLowerCase().startsWith(repository.toLowerCase())) throw new Error('GitHub redirected this source outside the requested repository.');
-  if (Number(response.headers.get('content-length')) > MAX_HTML) throw new Error('This GitHub page is too large for the prototype.');
+  // Content-Length counts compressed bytes, so it can only reject early; the decoded text is measured too.
+  if (Number(response.headers.get('content-length')) > maxBytes) throw new RangeError('This GitHub page is too large for the prototype.');
   const text = await response.text();
-  if (text.length > MAX_HTML) throw new Error('This GitHub page is too large for the prototype.');
+  if (new TextEncoder().encode(text).byteLength > maxBytes) throw new RangeError('This GitHub page is too large for the prototype.');
   return text;
 }
 
@@ -254,7 +255,7 @@ async function mapLimited(items, task) {
 }
 
 async function fetchDocument(url, signal, redirect = 'follow') {
-  return new DOMParser().parseFromString(await fetchText(url, signal, redirect), 'text/html');
+  return new DOMParser().parseFromString(await fetchText(url, signal, { redirect }), 'text/html');
 }
 
 function needsDiffText(file) {
@@ -291,7 +292,7 @@ async function fetchChangeData(doc, identity, endpoint, params, signal) {
     'X-Requested-With': 'XMLHttpRequest', 'X-Fetch-Nonce': nonce,
     'X-GitHub-Client-Version': doc.querySelector('meta[name="release"]')?.content ?? ''
   };
-  const text = await fetchText(`${identity.url}/page_data/${endpoint}?${params}`, signal, 'error', headers);
+  const text = await fetchText(`${identity.url}/page_data/${endpoint}?${params}`, signal, { redirect: 'error', headers });
   try { return JSON.parse(text); } catch { throw new Error('GitHub returned unreadable diff data. No analysis was sent.'); }
 }
 
@@ -468,16 +469,18 @@ export async function capturePullRequest({ onProgress = () => {}, signal, fileLi
     const sha = side === 'after' ? identity.headSha : identity.baseSha;
     const path = file.path.split('/').map(encodeURIComponent).join('/');
     try {
-      // GitHub's raw route redirects to raw.githubusercontent.com, which serves the exact file bytes under the same owner and repository path.
-      return { text: await fetchText(`https://github.com/${identity.owner}/${identity.repo}/raw/${sha}/${path}`, signal, 'follow', {}, 'https://raw.githubusercontent.com') };
+      // GitHub's raw route redirects to raw.githubusercontent.com under the same owner and repository path.
+      const raw = await fetchText(`https://github.com/${identity.owner}/${identity.repo}/raw/${sha}/${path}`, signal, { headers: {}, rawOrigin: 'https://raw.githubusercontent.com', maxBytes: 220_000 });
+      // Git and cited line numbers both split on \n, so only a CRLF ending's \r is dropped; a lone CR is not a line break to git.
+      return { text: raw.replaceAll('\r\n', '\n') };
     } catch (error) {
       if (signal?.aborted) throw error;
-      return { failed: true };
+      return error instanceof RangeError ? { tooLarge: true } : { failed: true };
     }
   });
   // The context budget is spent in file order, so the snapshot and its saved-review key match a sequential read.
   sides.forEach(({ file, side }, index) => {
-    const { empty, failed, text } = sources[index];
+    const { empty, failed, tooLarge, text } = sources[index];
     if (empty) {
       context.push({ path: file.path, side, text: '' });
       return;
@@ -486,7 +489,7 @@ export async function capturePullRequest({ onProgress = () => {}, signal, fileLi
       warnings.push(`Could not read ${side} context for ${file.path}; only its diff was analyzed.`);
       return;
     }
-    if (text.length > 220_000 || contextBytes + text.length > 700_000) {
+    if (tooLarge || contextBytes + text.length > 700_000) {
       warnings.push(`Full ${side} source for ${file.path} exceeded the context budget; only its diff was analyzed.`);
       return;
     }
