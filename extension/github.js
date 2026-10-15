@@ -460,8 +460,7 @@ export async function capturePullRequest({ onProgress = () => {}, signal, fileLi
   onProgress(`Reading context for ${files.length} changed files…`);
   const context = [];
   let contextBytes = 0;
-  const runtime = files.filter(file => file.hunks.length && !isGeneratedFile(file) && !/(^|\/)(tests?|__tests__|__snapshots__|vendor|node_modules)\/|(?:\.snap|\.lock|\.min\.js|_test\.go)$|(?:\.test|\.spec)\./i.test(file.path));
-  const sourced = runtime.slice(0, 6);
+  const sourced = files.filter(file => file.hunks.length && !isGeneratedFile(file));
   const sides = sourced.flatMap(file => ['after', 'before'].map(side => ({ file, side })));
   const sources = await mapLimited(sides, async ({ file, side }) => {
     const emptySide = side === 'before' ? /^@@ -0,0 / : / \+0,0 @@/;
@@ -496,9 +495,6 @@ export async function capturePullRequest({ onProgress = () => {}, signal, fileLi
     context.push({ path: file.path, side, text });
     contextBytes += text.length;
   });
-  // Empty sides of added and deleted files are part of the context too, so a file is complete when both of its sides are.
-  const collected = sourced.filter(file => context.filter(source => source.path === file.path).length === 2).length;
-  if (runtime.length > 6) warnings.push(`Full source was collected for ${collected} of ${runtime.length} runtime files. Other files are represented by their complete diff.`);
   onProgress('Checking that the PR has not changed…');
   const latest = readPageIdentity(await fetchDocument(filesUrl, signal), filesUrl);
   if (latest?.headSha !== identity.headSha || latest?.baseSha !== identity.baseSha || location.pathname !== pathname) throw new Error('The comparison changed while reading it. Analyze again to review the selected commits.');

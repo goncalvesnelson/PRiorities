@@ -1181,7 +1181,7 @@ try {
   assert.equal(reactDeletion.analyzed.error, 'This PR changes 2 files; PRiorities analyzes up to 1 (change this in Settings). Use Full diff to review it. No analysis was sent.');
 
   const sourceRoute = structuredClone(changes.route);
-  const goPaths = ['pkg/server_test.go', 'pkg/missing.go', 'pkg/huge.go', 'pkg/added.go', 'pkg/one.go', 'pkg/two.go', 'pkg/three.go', 'pkg/seven.go'];
+  const goPaths = ['pkg/server_test.go', 'pkg/missing.go', 'pkg/huge.go', 'pkg/added.go', 'pkg/one.go', 'pkg/two.go', 'pkg/three.go', 'pkg/seven.go', 'go.sum'];
   sourceRoute.diffContents = goPaths.map(path => path === 'pkg/added.go'
     ? { path, linesAdded: 1, linesDeleted: 0, diffLines: [{ type: 'HUNK', text: '@@ -0,0 +1 @@' }, { type: 'ADDITION', text: '+package pkg' }] }
     : { path, linesAdded: 1, linesDeleted: 1, diffLines: [{ type: 'HUNK', text: '@@ -1 +1 @@' }, { type: 'DELETION', text: '-package old' }, { type: 'ADDITION', text: '+package pkg' }] }
@@ -1221,19 +1221,18 @@ try {
   })()`);
   const sourceRequests = sourceCapture.complete.requests.filter(url => url.includes('/raw/'));
   assert.ok(sourceRequests.every(url => url.startsWith(`https://github.com/microsoft/vscode/raw/`)), 'Full source is read from GitHub’s raw file route.');
-  assert.equal(sourceRequests.length, 11, 'Six runtime files take the full-source slots, and the added file’s missing before side is not fetched.');
-  assert.ok(!sourceRequests.some(url => url.endsWith('/pkg/server_test.go') || url.endsWith('/pkg/seven.go')), 'A Go _test.go file is not runtime, so it takes no full-source slot.');
+  assert.equal(sourceRequests.length, 15, 'Every changed file’s full source is read, including tests, and the added file’s missing before side is not fetched.');
+  assert.ok(!sourceRequests.some(url => url.endsWith('/go.sum')), 'A generated file’s source is not read.');
   const exact = (path, side) => ({ path, side, text: exactSource });
   assert.deepEqual(sourceCapture.complete.context, [
-    exact('pkg/missing.go', 'before'), exact('pkg/added.go', 'after'), { path: 'pkg/added.go', side: 'before', text: '' },
-    exact('pkg/one.go', 'after'), exact('pkg/one.go', 'before'), exact('pkg/two.go', 'after'), exact('pkg/two.go', 'before'), exact('pkg/three.go', 'after'), exact('pkg/three.go', 'before')
+    exact('pkg/server_test.go', 'after'), exact('pkg/server_test.go', 'before'), exact('pkg/missing.go', 'before'), exact('pkg/added.go', 'after'), { path: 'pkg/added.go', side: 'before', text: '' },
+    exact('pkg/one.go', 'after'), exact('pkg/one.go', 'before'), exact('pkg/two.go', 'after'), exact('pkg/two.go', 'before'), exact('pkg/three.go', 'after'), exact('pkg/three.go', 'before'), exact('pkg/seven.go', 'after'), exact('pkg/seven.go', 'before')
   ], 'Raw source reaches the snapshot with CRLF endings as LF and a lone CR kept, as git numbers lines, including from a differently cased repository path on raw.githubusercontent.com.');
   assert.deepEqual(sourceCapture.complete.warnings, [
     'Could not read after context for pkg/missing.go; only its diff was analyzed.',
     'Full after source for pkg/huge.go exceeded the context budget; only its diff was analyzed.',
-    'Full before source for pkg/huge.go exceeded the context budget; only its diff was analyzed.',
-    'Full source was collected for 4 of 7 runtime files. Other files are represented by their complete diff.'
-  ], 'Unreadable and over-budget sources are reported apart, a source over 220,000 bytes is over budget whether its Content-Length or its decoded UTF-8 says so, and the count names only files whose every side was included.');
+    'Full before source for pkg/huge.go exceeded the context budget; only its diff was analyzed.'
+  ], 'Unreadable and over-budget sources are reported apart, and a source over 220,000 bytes is over budget whether its Content-Length or its decoded UTF-8 says so.');
   assert.deepEqual(sourceCapture.aborted, {error:'AbortError',checkedRevision:false}, 'Cancelling while sources are read rejects the capture before the final revision check.');
   assert.equal((await modelRequests()).length, beforeSourceCapture, 'Capturing source context does not start analysis.');
   deferredMode = 'missing';
@@ -1262,7 +1261,7 @@ try {
   const fragments = deferredRequests.filter(url => url.includes('/deferred-') || url.includes('/partials/tabs?'));
   assert.deepEqual(new Set(fragments), new Set([...deferred.pages.keys()].map(path => `https://github.com${path}`)), 'Capture must fetch the tabs, pagination, and all 53 file diffs, including beyond the old 20-request limit.');
   assert.equal(fragments.length, deferred.pages.size, 'Each fragment is fetched once.');
-  assert.ok(deferredRequests.every(url => url.startsWith('https://github.com/microsoft/vscode/')));
+  assert.ok(deferredRequests.every(url => ['https://github.com/microsoft/vscode/', 'https://raw.githubusercontent.com/microsoft/vscode/'].some(prefix => url.startsWith(prefix))), 'Capture requests stay within the PR repository, including redirected source.');
 
   deferredMode = 'unexpected';
   deferredRequests.length = 0;
